@@ -13,7 +13,9 @@ import com.example.offlinelink.model.CallVoicePlayback
 import com.example.offlinelink.model.ChatMessage
 import com.example.offlinelink.model.ConnectionStatus
 import com.example.offlinelink.model.GroupMember
+import com.example.offlinelink.model.GroupMemberStatus
 import com.example.offlinelink.model.MessageKind
+import com.example.offlinelink.model.MessageStatus
 import com.example.offlinelink.model.NearbyEndpoint
 import com.example.offlinelink.protocol.ChatProtocol
 import com.example.offlinelink.protocol.DecodedWireMessage
@@ -35,6 +37,7 @@ class MainScreenViewModel(
   private val compressImage: (Uri) -> Result<com.example.offlinelink.image.CompressedImage>,
   localDeviceId: String = UUID.randomUUID().toString(),
   defaultDisplayName: String = "OfflineLink",
+  defaultAvatarName: String = "",
   private val historyRepository: ChatHistoryRepository = NoOpChatHistoryRepository,
 ) : ViewModel() {
   private val store = ChatSessionStore(localDeviceId = localDeviceId)
@@ -48,6 +51,7 @@ class MainScreenViewModel(
 
   init {
     store.setDisplayName(defaultDisplayName)
+    store.setAvatarName(defaultAvatarName)
     store.loadMessages(historyRepository.loadMessages())
     viewModelScope.launch {
       store.state
@@ -64,6 +68,10 @@ class MainScreenViewModel(
 
   fun setDisplayName(displayName: String) {
     store.setDisplayName(displayName)
+  }
+
+  fun setAvatarName(avatarName: String) {
+    store.setAvatarName(avatarName)
   }
 
   fun setGroupName(groupName: String) {
@@ -85,6 +93,20 @@ class MainScreenViewModel(
     store.setStatus(ConnectionStatus.Discovering, "Searching nearby devices")
     store.setDiscoveredEndpoints(emptyList())
     transport.startDiscovery()
+  }
+
+  fun recoverGroup() {
+    if (uiState.value.groupMembers.isEmpty() && uiState.value.connectedEndpoints.isEmpty()) {
+      startDiscovery()
+      return
+    }
+    if (uiState.value.connectedEndpoints.isNotEmpty()) {
+      broadcastHello()
+      retryUndeliveredMessages()
+      store.setStatus(ConnectionStatus.Connected, "Group status refreshed")
+      return
+    }
+    startGroupRecovery()
   }
 
   fun connectTo(endpoint: NearbyEndpoint) {
@@ -393,6 +415,29 @@ class MainScreenViewModel(
     handledCallVoiceClipIds.clear()
     retriedMessageEndpointIds.clear()
     store.clearConnectedEndpoints()
+  }
+
+  fun retryMessage(messageId: String) {
+    val message = uiState.value.messages.firstOrNull { it.id == messageId } ?: return
+    if (!message.isLocal || message.status != MessageStatus.Failed) return
+    val endpoints = uiState.value.connectedEndpoints
+    if (endpoints.isEmpty()) {
+      store.setStatus(ConnectionStatus.Error, "No connected device", "Reconnect before retrying")
+      return
+    }
+    retriedMessageEndpointIds.remove(message.id)
+    store.markQueued(message.id)
+    sendExistingMessageTo(message.copy(status = MessageStatus.Queued), endpoints)
+  }
+
+  fun deleteMessage(messageId: String) {
+    retriedMessageEndpointIds.remove(messageId)
+    store.deleteMessage(messageId)
+  }
+
+  fun clearMessages() {
+    retriedMessageEndpointIds.clear()
+    store.clearMessages()
   }
 
   override fun onCleared() {
@@ -722,10 +767,10 @@ class MainScreenViewModel(
 
   private fun mergeIncomingRoster(endpointId: String, hello: DecodedWireMessage.Hello): Boolean {
     endpointMemberIds[endpointId] = hello.senderId
-    val senderChanged = store.replaceGroupMember(endpointId, GroupMember(hello.senderId, hello.displayName))
+    val senderChanged = store.replaceGroupMember(endpointId, GroupMember(hello.senderId, hello.displayName, GroupMemberStatus.Online))
     val rosterChanged =
       store.mergeGroupMembers(
-        hello.members.map { member -> GroupMember(member.id, member.displayName) },
+        hello.members.map { member -> GroupMember(member.id, member.displayName, GroupMemberStatus.Offline) },
       )
     return senderChanged || rosterChanged
   }
@@ -853,6 +898,7 @@ class MainScreenViewModel(
   private fun startGroupRecovery() {
     recoveryMode = true
     recoveryConnectionAttempts.clear()
+    store.markGroupMembersReconnecting()
     if (shouldAdvertiseDuringRecovery()) {
       store.setStatus(ConnectionStatus.Advertising, "Reforming group: visible as ${uiState.value.displayName}")
       transport.startAdvertising(uiState.value.displayName)

@@ -10,7 +10,14 @@ data class NearbyEndpoint(
 data class GroupMember(
   val id: String,
   val displayName: String,
+  val status: GroupMemberStatus = GroupMemberStatus.Online,
 )
+
+enum class GroupMemberStatus {
+  Online,
+  Reconnecting,
+  Offline,
+}
 
 data class PendingConnection(
   val endpointId: String,
@@ -111,6 +118,7 @@ data class CallVoicePlayback(
 data class ChatUiState(
   val localDeviceId: String,
   val displayName: String = "OfflineLink",
+  val avatarName: String = "",
   val groupName: String = "Offline group",
   val status: ConnectionStatus = ConnectionStatus.Idle,
   val statusMessage: String = "Ready",

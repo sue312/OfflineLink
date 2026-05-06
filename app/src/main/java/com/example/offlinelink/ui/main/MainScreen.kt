@@ -1,5 +1,7 @@
 package com.example.offlinelink.ui.main
 
+import android.bluetooth.BluetoothManager
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.BitmapFactory
@@ -12,9 +14,11 @@ import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -39,12 +43,16 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.Send
 import androidx.compose.material.icons.rounded.Call
 import androidx.compose.material.icons.rounded.CallEnd
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.ContentCopy
+import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.ErrorOutline
 import androidx.compose.material.icons.rounded.ExpandLess
 import androidx.compose.material.icons.rounded.ExpandMore
@@ -55,12 +63,16 @@ import androidx.compose.material.icons.rounded.Mic
 import androidx.compose.material.icons.rounded.Person
 import androidx.compose.material.icons.rounded.Place
 import androidx.compose.material.icons.rounded.PlayArrow
+import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Search
+import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.material.icons.rounded.Visibility
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonColors
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -68,6 +80,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -85,12 +98,16 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -107,6 +124,7 @@ import com.example.offlinelink.model.ChatMessage
 import com.example.offlinelink.model.ChatUiState
 import com.example.offlinelink.model.ConnectionStatus
 import com.example.offlinelink.model.GroupMember
+import com.example.offlinelink.model.GroupMemberStatus
 import com.example.offlinelink.model.MessageKind
 import com.example.offlinelink.model.MessageStatus
 import com.example.offlinelink.model.NearbyEndpoint
@@ -131,7 +149,16 @@ fun MainScreen(
     remember(context) {
       JsonChatHistoryRepository(File(context.applicationContext.filesDir, "offline-link-chat-history.json"))
     }
-  val defaultDisplayName = remember { defaultDeviceDisplayName(Build.MODEL) }
+  val preferences = remember(context) { context.applicationContext.getSharedPreferences(SETTINGS_PREFS_NAME, Context.MODE_PRIVATE) }
+  val defaultDisplayName =
+    remember(preferences) {
+      preferences.getString(KEY_DISPLAY_NAME, null)?.trim()?.takeIf { it.isNotEmpty() }
+        ?: defaultDeviceDisplayName(Build.MODEL)
+    }
+  val defaultAvatarName =
+    remember(preferences) {
+      preferences.getString(KEY_AVATAR_NAME, null).orEmpty()
+    }
   val viewModel: MainScreenViewModel =
     viewModel {
       MainScreenViewModel(
@@ -139,6 +166,7 @@ fun MainScreen(
         locationHelper::currentLocation,
         { uri -> ImageCompressor.compress(contentResolver, uri) },
         defaultDisplayName = defaultDisplayName,
+        defaultAvatarName = defaultAvatarName,
         historyRepository = historyRepository,
       )
     }
@@ -168,10 +196,18 @@ fun MainScreen(
     state = state,
     hasPermissions = hasPermissions,
     onRequestPermissions = { permissionLauncher.launch(requiredPermissions) },
-    onDisplayNameChange = viewModel::setDisplayName,
+    onDisplayNameChange = { displayName ->
+      preferences.edit().putString(KEY_DISPLAY_NAME, displayName).apply()
+      viewModel.setDisplayName(displayName)
+    },
+    onAvatarNameChange = { avatarName ->
+      preferences.edit().putString(KEY_AVATAR_NAME, avatarName).apply()
+      viewModel.setAvatarName(avatarName)
+    },
     onGroupNameChange = viewModel::setGroupName,
     onAdvertise = viewModel::startAdvertising,
     onDiscover = viewModel::startDiscovery,
+    onRecoverGroup = viewModel::recoverGroup,
     onConnect = viewModel::connectTo,
     onAccept = viewModel::acceptPendingConnection,
     onReject = viewModel::rejectPendingConnection,
@@ -188,6 +224,10 @@ fun MainScreen(
     onRejectCall = viewModel::rejectCall,
     onEndCall = viewModel::endCall,
     onFinishCallVoicePlayback = viewModel::finishCallVoicePlayback,
+    onRetryMessage = viewModel::retryMessage,
+    onDeleteMessage = viewModel::deleteMessage,
+    onClearMessages = viewModel::clearMessages,
+    diagnostics = diagnosticsFor(context, hasPermissions, state),
     onPickImage = { imagePickerLauncher.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) },
     modifier = modifier.fillMaxSize(),
   )
@@ -199,9 +239,11 @@ private fun OfflineChatContent(
   hasPermissions: Boolean,
   onRequestPermissions: () -> Unit,
   onDisplayNameChange: (String) -> Unit,
+  onAvatarNameChange: (String) -> Unit,
   onGroupNameChange: (String) -> Unit,
   onAdvertise: () -> Unit,
   onDiscover: () -> Unit,
+  onRecoverGroup: () -> Unit,
   onConnect: (NearbyEndpoint) -> Unit,
   onAccept: () -> Unit,
   onReject: () -> Unit,
@@ -218,6 +260,10 @@ private fun OfflineChatContent(
   onRejectCall: () -> Unit,
   onEndCall: () -> Unit,
   onFinishCallVoicePlayback: (String) -> Unit,
+  onRetryMessage: (String) -> Unit,
+  onDeleteMessage: (String) -> Unit,
+  onClearMessages: () -> Unit,
+  diagnostics: List<DiagnosticItem>,
   onPickImage: () -> Unit,
   modifier: Modifier = Modifier,
 ) {
@@ -227,6 +273,8 @@ private fun OfflineChatContent(
   var isSendingLocation by remember { mutableStateOf(false) }
   var voiceError by remember { mutableStateOf<String?>(null) }
   var isSetupExpanded by rememberSaveable { mutableStateOf(defaultSetupExpanded(state.messages.size)) }
+  var showSettings by rememberSaveable { mutableStateOf(false) }
+  var previewImageMessage by remember { mutableStateOf<ChatMessage?>(null) }
   val listState = rememberLazyListState()
   val keyboardController = LocalSoftwareKeyboardController.current
   val ctx = LocalContext.current
@@ -265,7 +313,7 @@ private fun OfflineChatContent(
       modifier = Modifier.fillMaxSize().padding(start = 12.dp, top = 10.dp, end = 12.dp, bottom = 8.dp),
       verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-      Header(state = state)
+      Header(state = state, onOpenSettings = { showSettings = true })
 
       if (!hasPermissions) {
         PermissionPanel(onRequestPermissions, modifier = Modifier.fillMaxWidth())
@@ -279,6 +327,7 @@ private fun OfflineChatContent(
           onGroupNameChange = onGroupNameChange,
           onAdvertise = onAdvertise,
           onDiscover = onDiscover,
+          onRecoverGroup = onRecoverGroup,
           onDisconnect = onDisconnect,
           onStartCall = onStartCall,
           onConnect = onConnect,
@@ -329,8 +378,12 @@ private fun OfflineChatContent(
           messages = state.messages,
           localDeviceId = state.localDeviceId,
           localDisplayName = state.displayName,
+          localAvatarName = state.avatarName,
           groupMembers = state.groupMembers,
           listState = listState,
+          onRetryMessage = onRetryMessage,
+          onDeleteMessage = onDeleteMessage,
+          onPreviewImage = { previewImageMessage = it },
           onPlayVoice = { voice ->
             onPlayVoice(voice).onFailure {
               voiceError = "Could not play voice message"
@@ -338,7 +391,11 @@ private fun OfflineChatContent(
           },
           onOpenMaps = { lat, lng ->
             val uri = Uri.parse("geo:$lat,$lng?q=$lat,$lng")
-            ctx.startActivity(Intent(Intent.ACTION_VIEW, uri))
+            runCatching {
+              ctx.startActivity(Intent(Intent.ACTION_VIEW, uri))
+            }.onFailure {
+              voiceError = "Could not open maps"
+            }
           },
           modifier = Modifier.weight(1f).fillMaxWidth(),
         )
@@ -393,17 +450,36 @@ private fun OfflineChatContent(
         )
       }
     }
+    if (showSettings) {
+      SettingsDialog(
+        state = state,
+        diagnostics = diagnostics,
+        onDisplayNameChange = onDisplayNameChange,
+        onAvatarNameChange = onAvatarNameChange,
+        onClearMessages = onClearMessages,
+        onDismiss = { showSettings = false },
+      )
+    }
+    previewImageMessage?.let { message ->
+      ImagePreviewDialog(message = message, onDismiss = { previewImageMessage = null })
+    }
   }
 }
 
 @Composable
-private fun Header(state: ChatUiState) {
+private fun Header(
+  state: ChatUiState,
+  onOpenSettings: () -> Unit,
+) {
   Row(
     modifier = Modifier.fillMaxWidth(),
     verticalAlignment = Alignment.CenterVertically,
     horizontalArrangement = Arrangement.SpaceBetween,
   ) {
     Text("OfflineLink", style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
+    IconButton(onClick = onOpenSettings, modifier = Modifier.size(38.dp)) {
+      Icon(Icons.Rounded.Settings, contentDescription = "Settings", modifier = Modifier.size(20.dp))
+    }
     StatusChip(status = state.status)
   }
 }
@@ -493,6 +569,121 @@ private fun PermissionPanel(
 }
 
 @Composable
+private fun SettingsDialog(
+  state: ChatUiState,
+  diagnostics: List<DiagnosticItem>,
+  onDisplayNameChange: (String) -> Unit,
+  onAvatarNameChange: (String) -> Unit,
+  onClearMessages: () -> Unit,
+  onDismiss: () -> Unit,
+) {
+  Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+    Surface(
+      color = MaterialTheme.colorScheme.surface,
+      contentColor = MaterialTheme.colorScheme.onSurface,
+      shape = RoundedCornerShape(8.dp),
+      modifier = Modifier.fillMaxWidth(0.94f).heightIn(max = 620.dp),
+    ) {
+      Column(
+        modifier = Modifier.padding(14.dp).verticalScroll(rememberScrollState()),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+      ) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+          Icon(Icons.Rounded.Settings, contentDescription = null, modifier = Modifier.size(20.dp))
+          Text("Settings", style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
+          IconButton(onClick = onDismiss, modifier = Modifier.size(34.dp)) {
+            Icon(Icons.Rounded.Close, contentDescription = "Close", modifier = Modifier.size(18.dp))
+          }
+        }
+        OutlinedTextField(
+          value = state.displayName,
+          onValueChange = onDisplayNameChange,
+          label = { Text("Display name") },
+          leadingIcon = { Icon(Icons.Rounded.Person, contentDescription = null, modifier = Modifier.size(18.dp)) },
+          singleLine = true,
+          shape = RoundedCornerShape(8.dp),
+          modifier = Modifier.fillMaxWidth(),
+        )
+        OutlinedTextField(
+          value = state.avatarName,
+          onValueChange = onAvatarNameChange,
+          label = { Text("Avatar label") },
+          leadingIcon = { Avatar(state.avatarName.ifBlank { state.displayName }, color = MaterialTheme.colorScheme.primary) },
+          singleLine = true,
+          shape = RoundedCornerShape(8.dp),
+          modifier = Modifier.fillMaxWidth(),
+        )
+        SettingsSection(title = "Diagnostics") {
+          diagnostics.forEach { item ->
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+              Text(item.label, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+              Text(item.value, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
+            }
+          }
+        }
+        SettingsSection(title = "History") {
+          Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+              Text("${state.messages.size} messages", style = MaterialTheme.typography.bodyMedium)
+              Text("Clear only this phone's local history.", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            OutlinedButton(onClick = onClearMessages, shape = RoundedCornerShape(8.dp), enabled = state.messages.isNotEmpty()) {
+              Icon(Icons.Rounded.Delete, contentDescription = null, modifier = Modifier.size(16.dp))
+              Spacer(Modifier.width(5.dp))
+              Text("Clear")
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+@Composable
+private fun SettingsSection(
+  title: String,
+  content: @Composable () -> Unit,
+) {
+  Surface(
+    color = MaterialTheme.colorScheme.background,
+    shape = RoundedCornerShape(8.dp),
+    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+    modifier = Modifier.fillMaxWidth(),
+  ) {
+    Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+      Text(title, style = MaterialTheme.typography.titleMedium)
+      content()
+    }
+  }
+}
+
+@Composable
+private fun ImagePreviewDialog(
+  message: ChatMessage,
+  onDismiss: () -> Unit,
+) {
+  val image = message.image ?: return
+  val imageBitmap = remember(image.imageBase64) { decodeImageBitmap(image.imageBase64) }
+  Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+    Surface(color = MaterialTheme.colorScheme.scrim.copy(alpha = 0.92f), modifier = Modifier.fillMaxSize()) {
+      Box(modifier = Modifier.fillMaxSize().padding(12.dp)) {
+        Image(
+          bitmap = imageBitmap,
+          contentDescription = "Shared image preview",
+          contentScale = ContentScale.Fit,
+          modifier = Modifier.fillMaxSize(),
+        )
+        Surface(shape = CircleShape, color = MaterialTheme.colorScheme.surface, modifier = Modifier.align(Alignment.TopEnd)) {
+          IconButton(onClick = onDismiss, modifier = Modifier.size(42.dp)) {
+            Icon(Icons.Rounded.Close, contentDescription = "Close preview")
+          }
+        }
+      }
+    }
+  }
+}
+
+@Composable
 private fun SetupDisclosure(
   state: ChatUiState,
   expanded: Boolean,
@@ -501,6 +692,7 @@ private fun SetupDisclosure(
   onGroupNameChange: (String) -> Unit,
   onAdvertise: () -> Unit,
   onDiscover: () -> Unit,
+  onRecoverGroup: () -> Unit,
   onDisconnect: () -> Unit,
   onStartCall: () -> Unit,
   onConnect: (NearbyEndpoint) -> Unit,
@@ -527,7 +719,10 @@ private fun SetupDisclosure(
           )
         }
         if (state.connectedEndpoints.isNotEmpty() || state.groupMembers.isNotEmpty()) {
-          MembersPanel(localDisplayName = state.displayName, members = state.groupMembers)
+          MembersPanel(localDisplayName = state.displayName, localAvatarName = state.avatarName, members = state.groupMembers)
+        }
+        if (state.groupMembers.isNotEmpty() || state.status == ConnectionStatus.Disconnected || state.status == ConnectionStatus.Error) {
+          RecoveryPanel(state = state, onRecoverGroup = onRecoverGroup)
         }
         state.pendingConnection?.let { pending ->
           PendingConnectionPanel(
@@ -746,6 +941,40 @@ private fun ConnectedSummary(
 }
 
 @Composable
+private fun RecoveryPanel(
+  state: ChatUiState,
+  onRecoverGroup: () -> Unit,
+) {
+  Surface(
+    color = MaterialTheme.colorScheme.surface,
+    shape = RoundedCornerShape(8.dp),
+    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+    modifier = Modifier.fillMaxWidth(),
+  ) {
+    Row(
+      modifier = Modifier.padding(horizontal = 12.dp, vertical = 9.dp),
+      horizontalArrangement = Arrangement.spacedBy(10.dp),
+      verticalAlignment = Alignment.CenterVertically,
+    ) {
+      Icon(Icons.Rounded.Refresh, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(20.dp))
+      Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(1.dp)) {
+        Text("Group recovery", style = MaterialTheme.typography.titleMedium)
+        Text(recoveryHint(state), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2)
+      }
+      OutlinedButton(
+        onClick = onRecoverGroup,
+        shape = RoundedCornerShape(8.dp),
+        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 7.dp),
+      ) {
+        Icon(Icons.Rounded.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
+        Spacer(Modifier.width(5.dp))
+        Text("Reconnect")
+      }
+    }
+  }
+}
+
+@Composable
 private fun CallPanel(
   callState: CallState,
   isRecordingCallVoice: Boolean,
@@ -868,6 +1097,7 @@ private fun CallPanel(
 @Composable
 private fun MembersPanel(
   localDisplayName: String,
+  localAvatarName: String,
   members: List<GroupMember>,
 ) {
   val visibleMembers = members.take(3)
@@ -887,11 +1117,11 @@ private fun MembersPanel(
       Icon(Icons.Rounded.Groups, contentDescription = null, modifier = Modifier.size(20.dp))
       Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(1.dp)) {
         Text("Members (${members.size + 1})", style = MaterialTheme.typography.titleMedium)
-        Text("You: $localDisplayName", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text("You: $localDisplayName - online", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
       }
-      Avatar(localDisplayName, color = MaterialTheme.colorScheme.primary)
+      Avatar(localAvatarName.ifBlank { localDisplayName }, color = MaterialTheme.colorScheme.primary)
       visibleMembers.forEach { member ->
-        Avatar(member.displayName, color = MaterialTheme.colorScheme.secondary)
+        MemberAvatar(member)
       }
       if (overflow > 0) {
         Surface(color = MaterialTheme.colorScheme.surface, shape = CircleShape) {
@@ -899,6 +1129,20 @@ private fun MembersPanel(
         }
       }
     }
+  }
+}
+
+@Composable
+private fun MemberAvatar(member: GroupMember) {
+  val color =
+    when (member.status) {
+      GroupMemberStatus.Online -> MaterialTheme.colorScheme.secondary
+      GroupMemberStatus.Reconnecting -> MaterialTheme.colorScheme.tertiary
+      GroupMemberStatus.Offline -> MaterialTheme.colorScheme.outline
+    }
+  Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(2.dp)) {
+    Avatar(member.displayName, color = color)
+    Text(member.status.label(), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
   }
 }
 
@@ -986,8 +1230,12 @@ private fun MessageList(
   messages: List<ChatMessage>,
   localDeviceId: String,
   localDisplayName: String,
+  localAvatarName: String,
   groupMembers: List<GroupMember>,
   listState: LazyListState,
+  onRetryMessage: (String) -> Unit,
+  onDeleteMessage: (String) -> Unit,
+  onPreviewImage: (ChatMessage) -> Unit,
   onPlayVoice: (VoiceAttachment) -> Unit,
   onOpenMaps: (Double, Double) -> Unit,
   modifier: Modifier = Modifier,
@@ -1009,8 +1257,8 @@ private fun MessageList(
             localDeviceId = localDeviceId,
             groupMembers = groupMembers,
           )
-        val avatarName = if (message.isLocal) localDisplayName else senderName
-        MessageRow(message, senderName, avatarName, onPlayVoice, onOpenMaps)
+        val avatarName = if (message.isLocal) localAvatarName.ifBlank { localDisplayName } else senderName
+        MessageRow(message, senderName, avatarName, onRetryMessage, onDeleteMessage, onPreviewImage, onPlayVoice, onOpenMaps)
       }
     }
   }
@@ -1035,11 +1283,15 @@ private fun EmptyChatState() {
   }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun MessageRow(
   message: ChatMessage,
   senderName: String,
   avatarName: String,
+  onRetryMessage: (String) -> Unit,
+  onDeleteMessage: (String) -> Unit,
+  onPreviewImage: (ChatMessage) -> Unit,
   onPlayVoice: (VoiceAttachment) -> Unit,
   onOpenMaps: (Double, Double) -> Unit,
 ) {
@@ -1056,9 +1308,19 @@ private fun MessageRow(
   val border = BorderStroke(1.dp, if (isLocal) MaterialTheme.colorScheme.primary.copy(alpha = 0.32f) else MaterialTheme.colorScheme.outlineVariant)
   val attachmentButtonBorder = BorderStroke(1.dp, contentColor.copy(alpha = 0.42f))
   val attachmentButtonColors = ButtonDefaults.outlinedButtonColors(contentColor = contentColor)
+  var menuExpanded by remember { mutableStateOf(false) }
+  val clipboardManager = LocalClipboardManager.current
 
   if (message.kind == MessageKind.Image && message.image != null) {
-    ImageMessageRow(message = message, isLocal = isLocal, senderName = senderName, avatarName = avatarName)
+    ImageMessageRow(
+      message = message,
+      isLocal = isLocal,
+      senderName = senderName,
+      avatarName = avatarName,
+      onRetryMessage = onRetryMessage,
+      onDeleteMessage = onDeleteMessage,
+      onPreviewImage = onPreviewImage,
+    )
     return
   }
 
@@ -1078,7 +1340,13 @@ private fun MessageRow(
         contentColor = contentColor,
         shape = messageBubbleShape(isLocal),
         border = border,
-        modifier = Modifier.widthIn(max = 300.dp),
+        modifier =
+          Modifier
+            .widthIn(max = 300.dp)
+            .combinedClickable(
+              onClick = {},
+              onLongClick = { menuExpanded = true },
+            ),
       ) {
         Column(Modifier.padding(horizontal = 12.dp, vertical = 9.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
           when {
@@ -1106,9 +1374,26 @@ private fun MessageRow(
               Text(message.text, style = MaterialTheme.typography.bodyLarge)
             }
           }
-          Text(message.status.displayLabel(message.isLocal), style = MaterialTheme.typography.labelSmall, color = contentColor.copy(alpha = 0.68f))
+          MessageStatusLine(message = message, contentColor = contentColor, onRetryMessage = onRetryMessage)
         }
       }
+      MessageActionMenu(
+        expanded = menuExpanded,
+        message = message,
+        onDismiss = { menuExpanded = false },
+        onCopy = {
+          clipboardManager.setText(AnnotatedString(message.copyText()))
+          menuExpanded = false
+        },
+        onRetry = {
+          onRetryMessage(message.id)
+          menuExpanded = false
+        },
+        onDelete = {
+          onDeleteMessage(message.id)
+          menuExpanded = false
+        },
+      )
     }
     if (isLocal) {
       Spacer(Modifier.width(7.dp))
@@ -1117,15 +1402,21 @@ private fun MessageRow(
   }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun ImageMessageRow(
   message: ChatMessage,
   isLocal: Boolean,
   senderName: String,
   avatarName: String,
+  onRetryMessage: (String) -> Unit,
+  onDeleteMessage: (String) -> Unit,
+  onPreviewImage: (ChatMessage) -> Unit,
 ) {
   val image = message.image ?: return
   val imageBitmap = remember(image.imageBase64) { decodeImageBitmap(image.imageBase64) }
+  var menuExpanded by remember { mutableStateOf(false) }
+  val clipboardManager = LocalClipboardManager.current
   val sourceWidth = image.width.coerceAtLeast(1)
   val sourceHeight = image.height.coerceAtLeast(1)
   val aspect = sourceWidth.toFloat() / sourceHeight.toFloat()
@@ -1158,19 +1449,87 @@ private fun ImageMessageRow(
           Modifier
             .width(previewWidth.dp)
             .height(previewHeight.dp)
-            .clip(messageBubbleShape(isLocal)),
+            .clip(messageBubbleShape(isLocal))
+            .combinedClickable(
+              onClick = { onPreviewImage(message) },
+              onLongClick = { menuExpanded = true },
+            ),
       )
-      Text(
-        message.status.displayLabel(message.isLocal),
-        style = MaterialTheme.typography.labelSmall,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-        modifier = Modifier.padding(horizontal = 4.dp),
+      MessageStatusLine(message = message, contentColor = MaterialTheme.colorScheme.onSurfaceVariant, onRetryMessage = onRetryMessage)
+      MessageActionMenu(
+        expanded = menuExpanded,
+        message = message,
+        onDismiss = { menuExpanded = false },
+        onCopy = {
+          clipboardManager.setText(AnnotatedString(message.copyText()))
+          menuExpanded = false
+        },
+        onRetry = {
+          onRetryMessage(message.id)
+          menuExpanded = false
+        },
+        onDelete = {
+          onDeleteMessage(message.id)
+          menuExpanded = false
+        },
       )
     }
     if (isLocal) {
       Spacer(Modifier.width(7.dp))
       MessageAvatar(name = avatarName, color = MaterialTheme.colorScheme.primary)
     }
+  }
+}
+
+@Composable
+private fun MessageStatusLine(
+  message: ChatMessage,
+  contentColor: Color,
+  onRetryMessage: (String) -> Unit,
+) {
+  Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+    Text(message.status.displayLabel(message.isLocal), style = MaterialTheme.typography.labelSmall, color = contentColor.copy(alpha = 0.68f))
+    if (message.isLocal && message.status == MessageStatus.Failed) {
+      TextButton(
+        onClick = { onRetryMessage(message.id) },
+        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
+        modifier = Modifier.height(26.dp),
+      ) {
+        Icon(Icons.Rounded.Refresh, contentDescription = null, modifier = Modifier.size(14.dp))
+        Spacer(Modifier.width(3.dp))
+        Text("Retry", style = MaterialTheme.typography.labelSmall)
+      }
+    }
+  }
+}
+
+@Composable
+private fun MessageActionMenu(
+  expanded: Boolean,
+  message: ChatMessage,
+  onDismiss: () -> Unit,
+  onCopy: () -> Unit,
+  onRetry: () -> Unit,
+  onDelete: () -> Unit,
+) {
+  DropdownMenu(expanded = expanded, onDismissRequest = onDismiss) {
+    DropdownMenuItem(
+      text = { Text("Copy") },
+      leadingIcon = { Icon(Icons.Rounded.ContentCopy, contentDescription = null) },
+      onClick = onCopy,
+    )
+    if (message.isLocal && message.status == MessageStatus.Failed) {
+      DropdownMenuItem(
+        text = { Text("Retry") },
+        leadingIcon = { Icon(Icons.Rounded.Refresh, contentDescription = null) },
+        onClick = onRetry,
+      )
+    }
+    DropdownMenuItem(
+      text = { Text("Delete") },
+      leadingIcon = { Icon(Icons.Rounded.Delete, contentDescription = null) },
+      onClick = onDelete,
+    )
   }
 }
 
@@ -1472,6 +1831,53 @@ private fun countLabel(
   singular: String,
 ): String = "$count $singular${if (count == 1) "" else "s"}"
 
+private fun recoveryHint(state: ChatUiState): String =
+  when {
+    state.connectedEndpoints.isNotEmpty() -> "Refresh member status and retry pending messages."
+    state.groupMembers.any { it.status == GroupMemberStatus.Reconnecting } -> "Keep nearby phones open while the group reforms."
+    state.groupMembers.isNotEmpty() -> "Try to find the last known group members again."
+    else -> "Search nearby devices again."
+  }
+
+private fun GroupMemberStatus.label(): String =
+  when (this) {
+    GroupMemberStatus.Online -> "online"
+    GroupMemberStatus.Reconnecting -> "rejoin"
+    GroupMemberStatus.Offline -> "offline"
+  }
+
+private fun ChatMessage.copyText(): String =
+  when (kind) {
+    MessageKind.Text -> text
+    MessageKind.Voice -> text
+    MessageKind.Location -> location?.let { "%.6f, %.6f".format(it.latitude, it.longitude) } ?: text
+    MessageKind.Image -> text
+  }
+
+private data class DiagnosticItem(
+  val label: String,
+  val value: String,
+)
+
+private fun diagnosticsFor(
+  context: Context,
+  hasPermissions: Boolean,
+  state: ChatUiState,
+): List<DiagnosticItem> =
+  listOf(
+    DiagnosticItem("Permissions", if (hasPermissions) "Granted" else "Missing"),
+    DiagnosticItem("Bluetooth", bluetoothStatusLabel(context)),
+    DiagnosticItem("Connection", state.status.label()),
+    DiagnosticItem("Group members", (state.groupMembers.size + 1).toString()),
+    DiagnosticItem("Messages", state.messages.size.toString()),
+  )
+
+private fun bluetoothStatusLabel(context: Context): String =
+  runCatching {
+    val manager = context.applicationContext.getSystemService(BluetoothManager::class.java)
+    if (manager?.adapter?.isEnabled == true) "On" else "Off"
+  }.getOrDefault("Unknown")
+
 private fun ConnectionStatus.label(): String =
   when (this) {
     ConnectionStatus.Idle -> "Ready"
@@ -1510,6 +1916,10 @@ private fun decodeImageBitmap(imageBase64: String): androidx.compose.ui.graphics
 
 internal fun shouldApplyRootImePadding(windowResizesForKeyboard: Boolean): Boolean = !windowResizesForKeyboard
 
+private const val SETTINGS_PREFS_NAME = "offline-link-settings"
+private const val KEY_DISPLAY_NAME = "display_name"
+private const val KEY_AVATAR_NAME = "avatar_name"
+
 @Preview(showBackground = true)
 @Composable
 private fun OfflineChatContentPreview() {
@@ -1519,6 +1929,7 @@ private fun OfflineChatContentPreview() {
         ChatUiState(
           localDeviceId = "local",
           displayName = "Phone A",
+          avatarName = "A",
           groupName = "Field Team",
           status = ConnectionStatus.Connected,
           statusMessage = "Connected to Phone B",
@@ -1534,9 +1945,11 @@ private fun OfflineChatContentPreview() {
       hasPermissions = true,
       onRequestPermissions = {},
       onDisplayNameChange = {},
+      onAvatarNameChange = {},
       onGroupNameChange = {},
       onAdvertise = {},
       onDiscover = {},
+      onRecoverGroup = {},
       onConnect = {},
       onAccept = {},
       onReject = {},
@@ -1553,6 +1966,10 @@ private fun OfflineChatContentPreview() {
       onRejectCall = {},
       onEndCall = {},
       onFinishCallVoicePlayback = {},
+      onRetryMessage = {},
+      onDeleteMessage = {},
+      onClearMessages = {},
+      diagnostics = listOf(DiagnosticItem("Permissions", "Granted"), DiagnosticItem("Bluetooth", "On")),
       onPickImage = {},
       modifier = Modifier.fillMaxSize(),
     )

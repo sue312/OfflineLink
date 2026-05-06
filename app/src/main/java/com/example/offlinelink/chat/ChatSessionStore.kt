@@ -7,6 +7,7 @@ import com.example.offlinelink.model.CallStatus
 import com.example.offlinelink.model.CallVoicePlayback
 import com.example.offlinelink.model.ConnectionStatus
 import com.example.offlinelink.model.GroupMember
+import com.example.offlinelink.model.GroupMemberStatus
 import com.example.offlinelink.model.ImageAttachment
 import com.example.offlinelink.model.LocationAttachment
 import com.example.offlinelink.model.MessageKind
@@ -28,6 +29,10 @@ class ChatSessionStore(
 
   fun setDisplayName(displayName: String) {
     mutableState.value = mutableState.value.copy(displayName = displayName.ifBlank { "OfflineLink" })
+  }
+
+  fun setAvatarName(avatarName: String) {
+    mutableState.value = mutableState.value.copy(avatarName = avatarName.trim())
   }
 
   fun setGroupName(groupName: String) {
@@ -69,7 +74,7 @@ class ChatSessionStore(
     mutableState.value =
       current.copy(
         connectedEndpoints = connectedEndpoints,
-        groupMembers = mergeGroupMembers(current.groupMembers, listOf(GroupMember(endpoint.id, endpoint.name))),
+        groupMembers = mergeGroupMembers(current.groupMembers, listOf(GroupMember(endpoint.id, endpoint.name, GroupMemberStatus.Online))),
         pendingConnection = null,
         discoveredEndpoints = current.discoveredEndpoints.filterNot { it.id == endpoint.id },
         status = ConnectionStatus.Connected,
@@ -106,6 +111,16 @@ class ChatSessionStore(
     if (groupMembers == current.groupMembers) return false
     mutableState.value = current.copy(groupMembers = groupMembers)
     return true
+  }
+
+  fun markGroupMembersReconnecting() {
+    mutableState.value =
+      mutableState.value.copy(
+        groupMembers =
+          mutableState.value.groupMembers.map { member ->
+            if (member.status == GroupMemberStatus.Online) member else member.copy(status = GroupMemberStatus.Reconnecting)
+          },
+      )
   }
 
   fun removeConnectedEndpoint(endpointId: String) {
@@ -172,6 +187,23 @@ class ChatSessionStore(
     mutableState.value =
       mutableState.value.copy(
         messages = cleanedMessages,
+        messageRevision = mutableState.value.messageRevision + 1,
+      )
+  }
+
+  fun clearMessages() {
+    mutableState.value =
+      mutableState.value.copy(
+        messages = emptyList(),
+        messageRevision = mutableState.value.messageRevision + 1,
+      )
+  }
+
+  fun deleteMessage(messageId: String) {
+    val messages = mutableState.value.messages.filterNot { it.id == messageId }
+    mutableState.value =
+      mutableState.value.copy(
+        messages = messages,
         messageRevision = mutableState.value.messageRevision + 1,
       )
   }
@@ -481,6 +513,10 @@ class ChatSessionStore(
     updateMessageStatus(messageId, MessageStatus.Sent)
   }
 
+  fun markQueued(messageId: String) {
+    updateMessageStatus(messageId, MessageStatus.Queued)
+  }
+
   fun markFailed(messageId: String) {
     updateMessageStatus(messageId, MessageStatus.Failed)
   }
@@ -496,17 +532,28 @@ class ChatSessionStore(
       )
   }
 
-  private fun mergeGroupMembers(current: List<GroupMember>, incoming: List<GroupMember>): List<GroupMember> =
-    (current + incoming.map(::cleanGroupMember))
+  private fun mergeGroupMembers(current: List<GroupMember>, incoming: List<GroupMember>): List<GroupMember> {
+    val currentById = current.associateBy { it.id }
+    return (current + incoming.map(::cleanGroupMember))
       .filterNot { it.id == localDeviceId }
       .associateBy { it.id }
       .values
+      .map { member ->
+        val existing = currentById[member.id]
+        if (existing?.status == GroupMemberStatus.Online && member.status != GroupMemberStatus.Online) {
+          member.copy(status = GroupMemberStatus.Online)
+        } else {
+          member
+        }
+      }
       .toList()
+  }
 
   private fun cleanGroupMember(member: GroupMember): GroupMember =
     GroupMember(
       id = member.id,
       displayName = member.displayName.ifBlank { "Nearby device" },
+      status = member.status,
     )
 
   private fun connectedStatusMessage(endpoints: List<NearbyEndpoint>): String =

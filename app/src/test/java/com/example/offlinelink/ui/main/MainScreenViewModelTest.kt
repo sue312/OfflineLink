@@ -3,6 +3,7 @@ package com.example.offlinelink.ui.main
 import com.example.offlinelink.model.ConnectionStatus
 import com.example.offlinelink.model.CallStatus
 import com.example.offlinelink.model.ChatMessage
+import com.example.offlinelink.model.GroupMemberStatus
 import com.example.offlinelink.model.MessageKind
 import com.example.offlinelink.model.MessageStatus
 import com.example.offlinelink.model.NearbyEndpoint
@@ -86,6 +87,20 @@ class MainScreenViewModelTest {
       )
 
     assertEquals("Pixel 8", viewModel.uiState.value.displayName)
+  }
+
+  @Test
+  fun initUsesProvidedDefaultAvatarName() = runTest {
+    val viewModel =
+      MainScreenViewModel(
+        FakeChatTransport(),
+        requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) },
+        compressImage = { Result.success(com.example.offlinelink.image.CompressedImage("", "image/jpeg", 1, 1)) },
+        localDeviceId = "local",
+        defaultAvatarName = "Team Lead",
+      )
+
+    assertEquals("Team Lead", viewModel.uiState.value.avatarName)
   }
 
   @Test
@@ -724,6 +739,56 @@ class MainScreenViewModelTest {
   }
 
   @Test
+  fun retryMessageResendsFailedLocalMessageToConnectedEndpoints() = runTest {
+    val transport = FakeChatTransport()
+    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage("", "image/jpeg", 1, 1)) }, localDeviceId = "local")
+
+    advanceUntilIdle()
+    transport.emit(TransportEvent.Connected(NearbyEndpoint("endpoint-b", "Phone B")))
+    advanceUntilIdle()
+    transport.clearSentPayloads()
+    transport.queueSendResult(Result.failure(IllegalStateException("radio busy")))
+
+    viewModel.sendMessage("retry please")
+    advanceUntilIdle()
+
+    val messageId = viewModel.uiState.value.messages.single().id
+    assertEquals(MessageStatus.Failed, viewModel.uiState.value.messages.single().status)
+    transport.clearSentPayloads()
+
+    viewModel.retryMessage(messageId)
+    advanceUntilIdle()
+
+    val retried = ChatProtocol.decode(transport.sentPayloads.single().bytes) as DecodedWireMessage.Message
+    assertEquals(messageId, retried.messageId)
+    assertEquals(MessageStatus.Sent, viewModel.uiState.value.messages.single().status)
+  }
+
+  @Test
+  fun clearMessagesRemovesMessagesAndPersistsEmptyHistory() = runTest {
+    val persisted =
+      listOf(
+        ChatMessage(
+          id = "msg-1",
+          conversationId = "one-to-one",
+          senderId = "local",
+          text = "saved",
+          createdAt = 1000L,
+          status = MessageStatus.Received,
+          isLocal = true,
+        ),
+      )
+    val historyRepository = FakeChatHistoryRepository(persisted)
+    val viewModel = MainScreenViewModel(FakeChatTransport(), requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage("", "image/jpeg", 1, 1)) }, localDeviceId = "local", historyRepository = historyRepository)
+
+    viewModel.clearMessages()
+    advanceUntilIdle()
+
+    assertEquals(emptyList<ChatMessage>(), viewModel.uiState.value.messages)
+    assertEquals(emptyList<ChatMessage>(), historyRepository.savedMessages.last())
+  }
+
+  @Test
   fun retryOnlySendsPendingMessageToNewlyConnectedEndpointsOnce() = runTest {
     val pendingMessage =
       ChatMessage(
@@ -1123,6 +1188,7 @@ private class FakeChatTransport : ChatTransport {
     private set
   var rejectedConnections: List<String> = emptyList()
     private set
+  private val queuedSendResults = ArrayDeque<Result<Unit>>()
 
   suspend fun emit(event: TransportEvent) {
     mutableEvents.emit(event)
@@ -1130,6 +1196,10 @@ private class FakeChatTransport : ChatTransport {
 
   fun clearSentPayloads() {
     sentPayloads = emptyList()
+  }
+
+  fun queueSendResult(result: Result<Unit>) {
+    queuedSendResults.addLast(result)
   }
 
   override fun startAdvertising(displayName: String) {
@@ -1155,7 +1225,13 @@ private class FakeChatTransport : ChatTransport {
 
   override fun send(endpointId: String, bytes: ByteArray, onResult: (Result<Unit>) -> Unit) {
     sentPayloads = sentPayloads + SentPayload(endpointId, bytes)
-    onResult(Result.success(Unit))
+    val result =
+      if (queuedSendResults.isEmpty()) {
+        Result.success(Unit)
+      } else {
+        queuedSendResults.removeFirst()
+      }
+    onResult(result)
   }
 
   override fun stopAll() = Unit
