@@ -3,13 +3,17 @@ package com.example.offlinelink.ui.main
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.offlinelink.chat.ChatSessionStore
+import com.example.offlinelink.data.ChatHistoryRepository
+import com.example.offlinelink.data.NoOpChatHistoryRepository
 import com.example.offlinelink.image.ImageCompressor
 import android.net.Uri
 import com.example.offlinelink.location.DeviceLocation
 import com.example.offlinelink.model.CallStatus
 import com.example.offlinelink.model.CallVoicePlayback
+import com.example.offlinelink.model.ChatMessage
 import com.example.offlinelink.model.ConnectionStatus
 import com.example.offlinelink.model.GroupMember
+import com.example.offlinelink.model.MessageKind
 import com.example.offlinelink.model.NearbyEndpoint
 import com.example.offlinelink.protocol.ChatProtocol
 import com.example.offlinelink.protocol.DecodedWireMessage
@@ -20,6 +24,8 @@ import java.util.UUID
 import kotlin.io.encoding.Base64
 import kotlin.io.encoding.ExperimentalEncodingApi
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalEncodingApi::class)
@@ -28,16 +34,29 @@ class MainScreenViewModel(
   private val requestLocation: suspend () -> Result<DeviceLocation>,
   private val compressImage: (Uri) -> Result<com.example.offlinelink.image.CompressedImage>,
   localDeviceId: String = UUID.randomUUID().toString(),
+  defaultDisplayName: String = "OfflineLink",
+  private val historyRepository: ChatHistoryRepository = NoOpChatHistoryRepository,
 ) : ViewModel() {
   private val store = ChatSessionStore(localDeviceId = localDeviceId)
   private val endpointMemberIds = mutableMapOf<String, String>()
   private var recoveryMode = false
   private val recoveryConnectionAttempts = mutableSetOf<String>()
   private val handledCallVoiceClipIds = mutableSetOf<String>()
+  private val retriedMessageEndpointIds = mutableMapOf<String, MutableSet<String>>()
 
   val uiState: StateFlow<com.example.offlinelink.model.ChatUiState> = store.state
 
   init {
+    store.setDisplayName(defaultDisplayName)
+    store.loadMessages(historyRepository.loadMessages())
+    viewModelScope.launch {
+      store.state
+        .map { it.messages }
+        .distinctUntilChanged()
+        .collect { messages ->
+          historyRepository.saveMessages(messages)
+        }
+    }
     viewModelScope.launch {
       transport.events.collect(::handleTransportEvent)
     }
@@ -372,6 +391,7 @@ class MainScreenViewModel(
     recoveryConnectionAttempts.clear()
     endpointMemberIds.clear()
     handledCallVoiceClipIds.clear()
+    retriedMessageEndpointIds.clear()
     store.clearConnectedEndpoints()
   }
 
@@ -430,6 +450,89 @@ class MainScreenViewModel(
     }
   }
 
+  private fun retryUndeliveredMessages() {
+    val endpoints = uiState.value.connectedEndpoints
+    if (endpoints.isEmpty()) return
+    store.localMessagesPendingDelivery().forEach { message ->
+      val alreadyRetriedEndpointIds = retriedMessageEndpointIds[message.id].orEmpty()
+      val pendingEndpoints = endpoints.filterNot { it.id in alreadyRetriedEndpointIds }
+      sendExistingMessageTo(message, pendingEndpoints)
+    }
+  }
+
+  private fun sendExistingMessageTo(
+    message: ChatMessage,
+    endpoints: List<NearbyEndpoint>,
+  ) {
+    if (endpoints.isEmpty()) return
+    val bytes =
+      when (message.kind) {
+        MessageKind.Text ->
+          ChatProtocol.encodeMessage(
+            messageId = message.id,
+            conversationId = message.conversationId,
+            senderId = message.senderId,
+            text = message.text,
+            createdAt = message.createdAt,
+          )
+        MessageKind.Voice -> {
+          val voice = message.voice ?: return
+          ChatProtocol.encodeVoiceMessage(
+            messageId = message.id,
+            conversationId = message.conversationId,
+            senderId = message.senderId,
+            audioBase64 = voice.audioBase64,
+            durationMs = voice.durationMs,
+            mimeType = voice.mimeType,
+            createdAt = message.createdAt,
+          )
+        }
+        MessageKind.Location -> {
+          val location = message.location ?: return
+          ChatProtocol.encodeLocation(
+            messageId = message.id,
+            conversationId = message.conversationId,
+            senderId = message.senderId,
+            latitude = location.latitude,
+            longitude = location.longitude,
+            accuracy = location.accuracy,
+            createdAt = message.createdAt,
+          )
+        }
+        MessageKind.Image -> {
+          val image = message.image ?: return
+          ChatProtocol.encodeImage(
+            messageId = message.id,
+            conversationId = message.conversationId,
+            senderId = message.senderId,
+            imageBase64 = image.imageBase64,
+            mimeType = image.mimeType,
+            width = image.width,
+            height = image.height,
+            createdAt = message.createdAt,
+          )
+        }
+      }
+    val pendingEndpointIds = endpoints.map { it.id }.toMutableSet()
+    var hasFailure = false
+    endpoints.forEach { endpoint ->
+      transport.send(endpoint.id, bytes) { result ->
+        if (result.isFailure) {
+          hasFailure = true
+        }
+        pendingEndpointIds.remove(endpoint.id)
+        if (pendingEndpointIds.isEmpty()) {
+          if (hasFailure) {
+            store.markFailed(message.id)
+          } else {
+            retriedMessageEndpointIds.getOrPut(message.id) { mutableSetOf() }.addAll(endpoints.map { it.id })
+            store.markSent(message.id)
+          }
+        }
+      }
+    }
+  }
+
   private fun handleTransportEvent(event: TransportEvent) {
     when (event) {
       is TransportEvent.EndpointFound -> {
@@ -439,6 +542,11 @@ class MainScreenViewModel(
       is TransportEvent.EndpointLost -> store.removeEndpoint(event.endpointId)
       is TransportEvent.ConnectionInitiated -> {
         if (recoveryMode) {
+          if (!isExpectedRecoveryEndpoint(event.pendingConnection.endpointName)) {
+            transport.rejectConnection(event.pendingConnection.endpointId)
+            store.setPendingConnection(null)
+            return
+          }
           store.setPendingConnection(null)
           store.setStatus(ConnectionStatus.Connecting, "Rejoining ${event.pendingConnection.endpointName}")
           transport.acceptConnection(event.pendingConnection.endpointId)
@@ -452,6 +560,7 @@ class MainScreenViewModel(
         recoveryConnectionAttempts.remove(event.endpoint.id)
         store.addConnectedEndpoint(event.endpoint)
         sendHello(event.endpoint.id)
+        retryUndeliveredMessages()
       }
       is TransportEvent.Disconnected -> handleEndpointDisconnected(event.endpointId)
       is TransportEvent.BytesReceived -> handleIncomingBytes(event.endpointId, event.bytes)
@@ -764,8 +873,19 @@ class MainScreenViewModel(
     if (!recoveryMode) return
     if (uiState.value.status != ConnectionStatus.Discovering) return
     if (uiState.value.connectedEndpoints.any { it.id == endpoint.id }) return
+    if (!isExpectedRecoveryEndpoint(endpoint.name)) return
     if (!recoveryConnectionAttempts.add(endpoint.id)) return
     connectTo(endpoint)
+  }
+
+  private fun isExpectedRecoveryEndpoint(endpointName: String): Boolean {
+    if (!recoveryMode) return true
+    val expectedNames =
+      uiState.value.groupMembers
+        .map { it.displayName.trim() }
+        .filter { it.isNotEmpty() }
+        .toSet()
+    return expectedNames.isEmpty() || endpointName.trim() in expectedNames
   }
 
   private fun isGroupMismatch(localGroupName: String, remoteGroupName: String): Boolean =

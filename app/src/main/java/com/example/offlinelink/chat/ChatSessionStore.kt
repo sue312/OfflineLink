@@ -167,6 +167,20 @@ class ChatSessionStore(
       )
   }
 
+  fun loadMessages(messages: List<ChatMessage>) {
+    val cleanedMessages = messages.distinctBy { it.id }
+    mutableState.value =
+      mutableState.value.copy(
+        messages = cleanedMessages,
+        messageRevision = mutableState.value.messageRevision + 1,
+      )
+  }
+
+  fun localMessagesPendingDelivery(): List<ChatMessage> =
+    state.value.messages.filter { message ->
+      message.isLocal && message.status != MessageStatus.Received
+    }
+
   fun startOutgoingCall(endpoint: NearbyEndpoint, callId: String) {
     mutableState.value =
       mutableState.value.copy(

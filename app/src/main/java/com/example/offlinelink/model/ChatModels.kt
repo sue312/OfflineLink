@@ -1,5 +1,7 @@
 package com.example.offlinelink.model
 
+import kotlinx.serialization.Serializable
+
 data class NearbyEndpoint(
   val id: String,
   val name: String,
@@ -26,6 +28,7 @@ enum class ConnectionStatus {
   Error,
 }
 
+@Serializable
 enum class MessageStatus {
   Queued,
   Sent,
@@ -33,6 +36,7 @@ enum class MessageStatus {
   Failed,
 }
 
+@Serializable
 enum class MessageKind {
   Text,
   Voice,
@@ -47,18 +51,21 @@ enum class CallStatus {
   Active,
 }
 
+@Serializable
 data class VoiceAttachment(
   val audioBase64: String,
   val durationMs: Long,
   val mimeType: String,
 )
 
+@Serializable
 data class LocationAttachment(
   val latitude: Double,
   val longitude: Double,
   val accuracy: Float? = null,
 )
 
+@Serializable
 data class ImageAttachment(
   val imageBase64: String,
   val mimeType: String,
@@ -66,6 +73,7 @@ data class ImageAttachment(
   val height: Int,
 )
 
+@Serializable
 data class ChatMessage(
   val id: String,
   val conversationId: String,

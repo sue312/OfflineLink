@@ -1,5 +1,6 @@
 package com.example.offlinelink.ui.main
 
+import com.example.offlinelink.model.GroupMember
 import com.example.offlinelink.model.MessageStatus
 import org.junit.Assert.assertEquals
 import org.junit.Test
@@ -9,5 +10,53 @@ class MessageStatusLabelTest {
   fun receivedStatusUsesDeliveredLabelForLocalMessages() {
     assertEquals("delivered", MessageStatus.Received.displayLabel(isLocal = true))
     assertEquals("received", MessageStatus.Received.displayLabel(isLocal = false))
+  }
+
+  @Test
+  fun avatarInitialsUseTwoWordsWhenAvailable() {
+    assertEquals("PB", avatarInitials("Phone B"))
+    assertEquals("A", avatarInitials("Alice"))
+    assertEquals("?", avatarInitials(" "))
+  }
+
+  @Test
+  fun defaultDeviceDisplayNameUsesTrimmedModelWithFallback() {
+    assertEquals("Pixel 8", defaultDeviceDisplayName(" Pixel 8 "))
+    assertEquals("OfflineLink", defaultDeviceDisplayName(" "))
+  }
+
+  @Test
+  fun senderDisplayNameResolvesLocalAndKnownGroupMembers() {
+    assertEquals(
+      "You",
+      senderDisplayName(
+        senderId = "local",
+        isLocal = true,
+        localDeviceId = "local",
+        groupMembers = listOf(GroupMember("device-b", "Phone B")),
+      ),
+    )
+    assertEquals(
+      "Phone B",
+      senderDisplayName(
+        senderId = "device-b",
+        isLocal = false,
+        localDeviceId = "local",
+        groupMembers = listOf(GroupMember("device-b", "Phone B")),
+      ),
+    )
+  }
+
+  @Test
+  fun senderDisplayNameFallsBackToStableDeviceShortName() {
+    assertEquals(
+      "Device ABCD",
+      senderDisplayName(
+        senderId = "abcdef1234",
+        isLocal = false,
+        localDeviceId = "local",
+        groupMembers = emptyList(),
+      ),
+    )
   }
 }

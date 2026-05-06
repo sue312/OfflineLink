@@ -4,6 +4,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.BitmapFactory
 import android.net.Uri
+import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -91,6 +92,7 @@ import androidx.navigation3.runtime.NavKey
 import com.example.offlinelink.audio.RecordedVoiceClip
 import com.example.offlinelink.audio.VoicePlayer
 import com.example.offlinelink.audio.VoiceRecorder
+import com.example.offlinelink.data.JsonChatHistoryRepository
 import com.example.offlinelink.image.ImageCompressor
 import com.example.offlinelink.location.LocationHelper
 import com.example.offlinelink.model.CallState
@@ -106,6 +108,7 @@ import com.example.offlinelink.model.VoiceAttachment
 import com.example.offlinelink.permissions.requiredNearbyRuntimePermissions
 import com.example.offlinelink.theme.MyApplicationTheme
 import com.example.offlinelink.transport.NearbyChatTransport
+import java.io.File
 import kotlin.io.encoding.Base64
 import kotlin.io.encoding.ExperimentalEncodingApi
 import kotlinx.coroutines.delay
@@ -118,12 +121,19 @@ fun MainScreen(
   val context = LocalContext.current
   val locationHelper = remember(context) { LocationHelper(context.applicationContext) }
   val contentResolver = context.applicationContext.contentResolver
+  val historyRepository =
+    remember(context) {
+      JsonChatHistoryRepository(File(context.applicationContext.filesDir, "offline-link-chat-history.json"))
+    }
+  val defaultDisplayName = remember { defaultDeviceDisplayName(Build.MODEL) }
   val viewModel: MainScreenViewModel =
     viewModel {
       MainScreenViewModel(
         NearbyChatTransport(context.applicationContext),
         locationHelper::currentLocation,
         { uri -> ImageCompressor.compress(contentResolver, uri) },
+        defaultDisplayName = defaultDisplayName,
+        historyRepository = historyRepository,
       )
     }
   val voiceRecorder = remember(context) { VoiceRecorder(context.applicationContext) }
@@ -316,6 +326,9 @@ private fun OfflineChatContent(
         }
         MessageList(
           messages = state.messages,
+          localDeviceId = state.localDeviceId,
+          localDisplayName = state.displayName,
+          groupMembers = state.groupMembers,
           listState = listState,
           onPlayVoice = { voice ->
             onPlayVoice(voice).onFailure {
@@ -797,7 +810,7 @@ private fun Avatar(
 ) {
   Surface(shape = CircleShape, color = color, contentColor = MaterialTheme.colorScheme.onPrimary, modifier = Modifier.size(30.dp)) {
     Box(contentAlignment = Alignment.Center) {
-      Text(name.trim().take(1).ifEmpty { "?" }.uppercase(), style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
+      Text(avatarInitials(name), style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.SemiBold)
     }
   }
 }
@@ -872,6 +885,9 @@ private fun EndpointList(
 @Composable
 private fun MessageList(
   messages: List<ChatMessage>,
+  localDeviceId: String,
+  localDisplayName: String,
+  groupMembers: List<GroupMember>,
   listState: LazyListState,
   onPlayVoice: (VoiceAttachment) -> Unit,
   onOpenMaps: (Double, Double) -> Unit,
@@ -887,7 +903,15 @@ private fun MessageList(
       item { EmptyChatState() }
     } else {
       items(messages, key = { it.id }) { message ->
-        MessageRow(message, onPlayVoice, onOpenMaps)
+        val senderName =
+          senderDisplayName(
+            senderId = message.senderId,
+            isLocal = message.isLocal,
+            localDeviceId = localDeviceId,
+            groupMembers = groupMembers,
+          )
+        val avatarName = if (message.isLocal) localDisplayName else senderName
+        MessageRow(message, senderName, avatarName, onPlayVoice, onOpenMaps)
       }
     }
   }
@@ -915,6 +939,8 @@ private fun EmptyChatState() {
 @Composable
 private fun MessageRow(
   message: ChatMessage,
+  senderName: String,
+  avatarName: String,
   onPlayVoice: (VoiceAttachment) -> Unit,
   onOpenMaps: (Double, Double) -> Unit,
 ) {
@@ -933,49 +959,61 @@ private fun MessageRow(
   val attachmentButtonColors = ButtonDefaults.outlinedButtonColors(contentColor = contentColor)
 
   if (message.kind == MessageKind.Image && message.image != null) {
-    ImageMessageRow(message = message, isLocal = isLocal)
+    ImageMessageRow(message = message, isLocal = isLocal, senderName = senderName, avatarName = avatarName)
     return
   }
 
   Row(
     modifier = Modifier.fillMaxWidth(),
     horizontalArrangement = if (isLocal) Arrangement.End else Arrangement.Start,
+    verticalAlignment = Alignment.Bottom,
   ) {
-    Surface(
-      color = bubbleColor,
-      contentColor = contentColor,
-      shape = messageBubbleShape(isLocal),
-      border = border,
-      modifier = Modifier.widthIn(max = 312.dp),
-    ) {
-      Column(Modifier.padding(horizontal = 12.dp, vertical = 9.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        when {
-          message.kind == MessageKind.Location && message.location != null -> {
-            LocationMessageContent(
-              latitude = message.location.latitude,
-              longitude = message.location.longitude,
-              accuracy = message.location.accuracy,
-              contentColor = contentColor,
-              accentColor = accentColor,
-              onOpenMaps = onOpenMaps,
-            )
+    if (!isLocal) {
+      MessageAvatar(name = avatarName, color = MaterialTheme.colorScheme.secondary)
+      Spacer(Modifier.width(7.dp))
+    }
+    Column(horizontalAlignment = if (isLocal) Alignment.End else Alignment.Start, verticalArrangement = Arrangement.spacedBy(3.dp)) {
+      Text(senderName, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+      Surface(
+        color = bubbleColor,
+        contentColor = contentColor,
+        shape = messageBubbleShape(isLocal),
+        border = border,
+        modifier = Modifier.widthIn(max = 300.dp),
+      ) {
+        Column(Modifier.padding(horizontal = 12.dp, vertical = 9.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+          when {
+            message.kind == MessageKind.Location && message.location != null -> {
+              LocationMessageContent(
+                latitude = message.location.latitude,
+                longitude = message.location.longitude,
+                accuracy = message.location.accuracy,
+                contentColor = contentColor,
+                accentColor = accentColor,
+                onOpenMaps = onOpenMaps,
+              )
+            }
+            message.voice != null -> {
+              VoiceMessageContent(
+                durationMs = message.voice.durationMs,
+                contentColor = contentColor,
+                accentColor = accentColor,
+                border = attachmentButtonBorder,
+                colors = attachmentButtonColors,
+                onPlay = { onPlayVoice(message.voice) },
+              )
+            }
+            else -> {
+              Text(message.text, style = MaterialTheme.typography.bodyLarge)
+            }
           }
-          message.voice != null -> {
-            VoiceMessageContent(
-              durationMs = message.voice.durationMs,
-              contentColor = contentColor,
-              accentColor = accentColor,
-              border = attachmentButtonBorder,
-              colors = attachmentButtonColors,
-              onPlay = { onPlayVoice(message.voice) },
-            )
-          }
-          else -> {
-            Text(message.text, style = MaterialTheme.typography.bodyLarge)
-          }
+          Text(message.status.displayLabel(message.isLocal), style = MaterialTheme.typography.labelSmall, color = contentColor.copy(alpha = 0.68f))
         }
-        Text(message.status.displayLabel(message.isLocal), style = MaterialTheme.typography.labelSmall, color = contentColor.copy(alpha = 0.68f))
       }
+    }
+    if (isLocal) {
+      Spacer(Modifier.width(7.dp))
+      MessageAvatar(name = avatarName, color = MaterialTheme.colorScheme.primary)
     }
   }
 }
@@ -984,6 +1022,8 @@ private fun MessageRow(
 private fun ImageMessageRow(
   message: ChatMessage,
   isLocal: Boolean,
+  senderName: String,
+  avatarName: String,
 ) {
   val image = message.image ?: return
   val imageBitmap = remember(image.imageBase64) { decodeImageBitmap(image.imageBase64) }
@@ -1003,8 +1043,14 @@ private fun ImageMessageRow(
   Row(
     modifier = Modifier.fillMaxWidth(),
     horizontalArrangement = if (isLocal) Arrangement.End else Arrangement.Start,
+    verticalAlignment = Alignment.Bottom,
   ) {
+    if (!isLocal) {
+      MessageAvatar(name = avatarName, color = MaterialTheme.colorScheme.secondary)
+      Spacer(Modifier.width(7.dp))
+    }
     Column(horizontalAlignment = if (isLocal) Alignment.End else Alignment.Start, verticalArrangement = Arrangement.spacedBy(3.dp)) {
+      Text(senderName, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
       Image(
         bitmap = imageBitmap,
         contentDescription = "Shared image",
@@ -1021,6 +1067,22 @@ private fun ImageMessageRow(
         color = MaterialTheme.colorScheme.onSurfaceVariant,
         modifier = Modifier.padding(horizontal = 4.dp),
       )
+    }
+    if (isLocal) {
+      Spacer(Modifier.width(7.dp))
+      MessageAvatar(name = avatarName, color = MaterialTheme.colorScheme.primary)
+    }
+  }
+}
+
+@Composable
+private fun MessageAvatar(
+  name: String,
+  color: Color,
+) {
+  Surface(shape = CircleShape, color = color, contentColor = MaterialTheme.colorScheme.onPrimary, modifier = Modifier.size(28.dp)) {
+    Box(contentAlignment = Alignment.Center) {
+      Text(avatarInitials(name), style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.SemiBold)
     }
   }
 }
@@ -1267,6 +1329,31 @@ internal fun MessageStatus.displayLabel(isLocal: Boolean): String =
     MessageStatus.Received -> if (isLocal) "delivered" else "received"
     MessageStatus.Failed -> "failed"
   }
+
+internal fun senderDisplayName(
+  senderId: String,
+  isLocal: Boolean,
+  localDeviceId: String,
+  groupMembers: List<GroupMember>,
+): String {
+  if (isLocal || senderId == localDeviceId) return "You"
+  return groupMembers.firstOrNull { it.id == senderId }?.displayName
+    ?: "Device ${senderId.take(4).uppercase().ifBlank { "?" }}"
+}
+
+internal fun avatarInitials(name: String): String {
+  val cleaned = name.trim()
+  if (cleaned.isEmpty()) return "?"
+  val words = cleaned.split(Regex("\\s+")).filter { it.isNotBlank() }
+  return if (words.size >= 2) {
+    words.take(2).joinToString("") { it.take(1) }.uppercase()
+  } else {
+    cleaned.take(1).uppercase()
+  }
+}
+
+internal fun defaultDeviceDisplayName(modelName: String): String =
+  modelName.trim().ifBlank { "OfflineLink" }
 
 private fun ConnectionStatus.label(): String =
   when (this) {
