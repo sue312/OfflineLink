@@ -60,6 +60,46 @@ sealed interface DecodedWireMessage {
     val createdAt: Long,
     override val sentAt: Long,
   ) : DecodedWireMessage
+
+  data class CallRequest(
+    val callId: String,
+    val senderId: String,
+    val createdAt: Long,
+    override val sentAt: Long,
+  ) : DecodedWireMessage
+
+  data class CallAccept(
+    val callId: String,
+    val senderId: String,
+    val createdAt: Long,
+    override val sentAt: Long,
+  ) : DecodedWireMessage
+
+  data class CallReject(
+    val callId: String,
+    val senderId: String,
+    val reason: String,
+    val createdAt: Long,
+    override val sentAt: Long,
+  ) : DecodedWireMessage
+
+  data class CallEnd(
+    val callId: String,
+    val senderId: String,
+    val createdAt: Long,
+    override val sentAt: Long,
+  ) : DecodedWireMessage
+
+  data class CallVoice(
+    val callId: String,
+    val clipId: String,
+    val senderId: String,
+    val audioBase64: String,
+    val durationMs: Long,
+    val mimeType: String,
+    val createdAt: Long,
+    override val sentAt: Long,
+  ) : DecodedWireMessage
 }
 
 data class WireMember(
@@ -76,6 +116,11 @@ object ChatProtocol {
   private const val TYPE_DISCONNECT = "disconnect"
   private const val TYPE_LOCATION = "location"
   private const val TYPE_IMAGE = "image"
+  private const val TYPE_CALL_REQUEST = "call_request"
+  private const val TYPE_CALL_ACCEPT = "call_accept"
+  private const val TYPE_CALL_REJECT = "call_reject"
+  private const val TYPE_CALL_END = "call_end"
+  private const val TYPE_CALL_VOICE = "call_voice"
 
   private val json = Json {
     ignoreUnknownKeys = true
@@ -143,6 +188,51 @@ object ChatProtocol {
     sentAt: Long = System.currentTimeMillis(),
   ): ByteArray =
     encodeEnvelope(TYPE_LOCATION, LocationPayload(messageId, conversationId, senderId, latitude, longitude, accuracy, createdAt), sentAt)
+
+  fun encodeCallRequest(
+    callId: String,
+    senderId: String,
+    createdAt: Long,
+    sentAt: Long = System.currentTimeMillis(),
+  ): ByteArray =
+    encodeEnvelope(TYPE_CALL_REQUEST, CallPayload(callId, senderId, createdAt), sentAt)
+
+  fun encodeCallAccept(
+    callId: String,
+    senderId: String,
+    createdAt: Long,
+    sentAt: Long = System.currentTimeMillis(),
+  ): ByteArray =
+    encodeEnvelope(TYPE_CALL_ACCEPT, CallPayload(callId, senderId, createdAt), sentAt)
+
+  fun encodeCallReject(
+    callId: String,
+    senderId: String,
+    reason: String,
+    createdAt: Long,
+    sentAt: Long = System.currentTimeMillis(),
+  ): ByteArray =
+    encodeEnvelope(TYPE_CALL_REJECT, CallRejectPayload(callId, senderId, reason, createdAt), sentAt)
+
+  fun encodeCallEnd(
+    callId: String,
+    senderId: String,
+    createdAt: Long,
+    sentAt: Long = System.currentTimeMillis(),
+  ): ByteArray =
+    encodeEnvelope(TYPE_CALL_END, CallPayload(callId, senderId, createdAt), sentAt)
+
+  fun encodeCallVoice(
+    callId: String,
+    clipId: String,
+    senderId: String,
+    audioBase64: String,
+    durationMs: Long,
+    mimeType: String,
+    createdAt: Long,
+    sentAt: Long = System.currentTimeMillis(),
+  ): ByteArray =
+    encodeEnvelope(TYPE_CALL_VOICE, CallVoicePayload(callId, clipId, senderId, audioBase64, durationMs, mimeType, createdAt), sentAt)
 
   fun decode(bytes: ByteArray): DecodedWireMessage {
     val envelope = json.decodeFromString(WireEnvelope.serializer(), bytes.decodeToString())
@@ -215,6 +305,56 @@ object ChatProtocol {
           latitude = payload.latitude,
           longitude = payload.longitude,
           accuracy = payload.accuracy,
+          createdAt = payload.createdAt,
+          sentAt = envelope.sentAt,
+        )
+      }
+      TYPE_CALL_REQUEST -> {
+        val payload = json.decodeFromString(CallPayload.serializer(), envelope.payload)
+        DecodedWireMessage.CallRequest(
+          callId = payload.callId,
+          senderId = payload.senderId,
+          createdAt = payload.createdAt,
+          sentAt = envelope.sentAt,
+        )
+      }
+      TYPE_CALL_ACCEPT -> {
+        val payload = json.decodeFromString(CallPayload.serializer(), envelope.payload)
+        DecodedWireMessage.CallAccept(
+          callId = payload.callId,
+          senderId = payload.senderId,
+          createdAt = payload.createdAt,
+          sentAt = envelope.sentAt,
+        )
+      }
+      TYPE_CALL_REJECT -> {
+        val payload = json.decodeFromString(CallRejectPayload.serializer(), envelope.payload)
+        DecodedWireMessage.CallReject(
+          callId = payload.callId,
+          senderId = payload.senderId,
+          reason = payload.reason,
+          createdAt = payload.createdAt,
+          sentAt = envelope.sentAt,
+        )
+      }
+      TYPE_CALL_END -> {
+        val payload = json.decodeFromString(CallPayload.serializer(), envelope.payload)
+        DecodedWireMessage.CallEnd(
+          callId = payload.callId,
+          senderId = payload.senderId,
+          createdAt = payload.createdAt,
+          sentAt = envelope.sentAt,
+        )
+      }
+      TYPE_CALL_VOICE -> {
+        val payload = json.decodeFromString(CallVoicePayload.serializer(), envelope.payload)
+        DecodedWireMessage.CallVoice(
+          callId = payload.callId,
+          clipId = payload.clipId,
+          senderId = payload.senderId,
+          audioBase64 = payload.audioBase64,
+          durationMs = payload.durationMs,
+          mimeType = payload.mimeType,
           createdAt = payload.createdAt,
           sentAt = envelope.sentAt,
         )
@@ -303,5 +443,31 @@ private data class LocationPayload(
   val latitude: Double,
   val longitude: Double,
   val accuracy: Float? = null,
+  val createdAt: Long,
+)
+
+@Serializable
+private data class CallPayload(
+  val callId: String,
+  val senderId: String,
+  val createdAt: Long,
+)
+
+@Serializable
+private data class CallRejectPayload(
+  val callId: String,
+  val senderId: String,
+  val reason: String,
+  val createdAt: Long,
+)
+
+@Serializable
+private data class CallVoicePayload(
+  val callId: String,
+  val clipId: String,
+  val senderId: String,
+  val audioBase64: String,
+  val durationMs: Long,
+  val mimeType: String,
   val createdAt: Long,
 )

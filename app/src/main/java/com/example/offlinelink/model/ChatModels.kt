@@ -40,6 +40,13 @@ enum class MessageKind {
   Image,
 }
 
+enum class CallStatus {
+  Idle,
+  Outgoing,
+  Incoming,
+  Active,
+}
+
 data class VoiceAttachment(
   val audioBase64: String,
   val durationMs: Long,
@@ -73,6 +80,26 @@ data class ChatMessage(
   val image: ImageAttachment? = null,
 )
 
+data class CallState(
+  val status: CallStatus = CallStatus.Idle,
+  val callId: String? = null,
+  val peerEndpointId: String? = null,
+  val peerName: String? = null,
+  val isInitiator: Boolean = false,
+  val startedAt: Long? = null,
+  val activityLabel: String? = null,
+)
+
+data class CallVoicePlayback(
+  val callId: String,
+  val clipId: String,
+  val senderId: String,
+  val audioBase64: String,
+  val durationMs: Long,
+  val mimeType: String,
+  val createdAt: Long,
+)
+
 data class ChatUiState(
   val localDeviceId: String,
   val displayName: String = "OfflineLink",
@@ -87,6 +114,8 @@ data class ChatUiState(
   val messageRevision: Int = 0,
   val groupWarning: String? = null,
   val lastError: String? = null,
+  val callState: CallState = CallState(),
+  val callPlayback: CallVoicePlayback? = null,
 ) {
   val connectedEndpoint: NearbyEndpoint?
     get() = connectedEndpoints.firstOrNull()

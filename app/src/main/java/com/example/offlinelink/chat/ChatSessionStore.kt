@@ -2,6 +2,9 @@ package com.example.offlinelink.chat
 
 import com.example.offlinelink.model.ChatMessage
 import com.example.offlinelink.model.ChatUiState
+import com.example.offlinelink.model.CallState
+import com.example.offlinelink.model.CallStatus
+import com.example.offlinelink.model.CallVoicePlayback
 import com.example.offlinelink.model.ConnectionStatus
 import com.example.offlinelink.model.GroupMember
 import com.example.offlinelink.model.ImageAttachment
@@ -107,11 +110,19 @@ class ChatSessionStore(
 
   fun removeConnectedEndpoint(endpointId: String) {
     val connectedEndpoints = mutableState.value.connectedEndpoints.filterNot { it.id == endpointId }
+    val callState =
+      if (mutableState.value.callState.peerEndpointId == endpointId) {
+        CallState()
+      } else {
+        mutableState.value.callState
+      }
     mutableState.value =
       mutableState.value.copy(
         connectedEndpoints = connectedEndpoints,
         status = if (connectedEndpoints.isEmpty()) ConnectionStatus.Disconnected else ConnectionStatus.Connected,
         statusMessage = connectedStatusMessage(connectedEndpoints),
+        callState = callState,
+        callPlayback = if (callState.status == CallStatus.Idle) null else mutableState.value.callPlayback,
       )
   }
 
@@ -151,6 +162,89 @@ class ChatSessionStore(
         pendingConnection = null,
         status = ConnectionStatus.Disconnected,
         statusMessage = "Disconnected",
+        callState = CallState(),
+        callPlayback = null,
+      )
+  }
+
+  fun startOutgoingCall(endpoint: NearbyEndpoint, callId: String) {
+    mutableState.value =
+      mutableState.value.copy(
+        callState =
+          CallState(
+            status = CallStatus.Outgoing,
+            callId = callId,
+            peerEndpointId = endpoint.id,
+            peerName = endpoint.name,
+            isInitiator = true,
+          ),
+      )
+  }
+
+  fun receiveIncomingCall(endpoint: NearbyEndpoint, callId: String) {
+    mutableState.value =
+      mutableState.value.copy(
+        callState =
+          CallState(
+            status = CallStatus.Incoming,
+            callId = callId,
+            peerEndpointId = endpoint.id,
+            peerName = endpoint.name,
+            isInitiator = false,
+          ),
+      )
+  }
+
+  fun acceptCall(callId: String, startedAt: Long = System.currentTimeMillis()): Boolean {
+    val current = mutableState.value
+    val callState = current.callState
+    if (callState.callId != callId) return false
+    if (callState.status != CallStatus.Incoming && callState.status != CallStatus.Outgoing) return false
+    mutableState.value =
+      current.copy(
+        callState =
+          callState.copy(
+            status = CallStatus.Active,
+            startedAt = startedAt,
+          ),
+      )
+    return true
+  }
+
+  fun endCall(callId: String? = null): Boolean {
+    val current = mutableState.value
+    if (current.callState.status == CallStatus.Idle) return false
+    if (callId != null && current.callState.callId != callId) return false
+    mutableState.value = current.copy(callState = CallState(), callPlayback = null)
+    return true
+  }
+
+  fun rejectCall(callId: String? = null): Boolean = endCall(callId)
+
+  fun setCallActivity(activityLabel: String?) {
+    val current = mutableState.value
+    if (current.callState.status == CallStatus.Idle) return
+    mutableState.value = current.copy(callState = current.callState.copy(activityLabel = activityLabel))
+  }
+
+  fun showCallPlayback(playback: CallVoicePlayback, activityLabel: String) {
+    val current = mutableState.value
+    if (current.callState.status != CallStatus.Active) return
+    if (current.callState.callId != playback.callId) return
+    mutableState.value =
+      current.copy(
+        callState = current.callState.copy(activityLabel = activityLabel),
+        callPlayback = playback,
+      )
+  }
+
+  fun finishCallPlayback(clipId: String) {
+    val current = mutableState.value
+    if (current.callPlayback?.clipId != clipId) return
+    mutableState.value =
+      current.copy(
+        callState = current.callState.copy(activityLabel = null),
+        callPlayback = null,
       )
   }
 

@@ -2,6 +2,7 @@ package com.example.offlinelink.chat
 
 import com.example.offlinelink.model.MessageStatus
 import com.example.offlinelink.model.MessageKind
+import com.example.offlinelink.model.CallStatus
 import com.example.offlinelink.model.GroupMember
 import com.example.offlinelink.model.NearbyEndpoint
 import com.example.offlinelink.model.PendingConnection
@@ -181,5 +182,45 @@ class ChatSessionStoreTest {
     assertEquals(1, store.state.value.messages.size)
     assertEquals(MessageKind.Voice, store.state.value.messages.single().kind)
     assertEquals(VoiceAttachment("AQIDBA==", 2300L, "audio/3gpp"), store.state.value.messages.single().voice)
+  }
+
+  @Test
+  fun startOutgoingCallTracksTargetEndpoint() {
+    val store = ChatSessionStore(localDeviceId = "device-a")
+    val phoneB = NearbyEndpoint("endpoint-b", "Phone B")
+
+    store.startOutgoingCall(phoneB, callId = "call-1")
+
+    assertEquals(CallStatus.Outgoing, store.state.value.callState.status)
+    assertEquals("call-1", store.state.value.callState.callId)
+    assertEquals("endpoint-b", store.state.value.callState.peerEndpointId)
+    assertEquals("Phone B", store.state.value.callState.peerName)
+  }
+
+  @Test
+  fun receiveIncomingCallThenAcceptTransitionsToActive() {
+    val store = ChatSessionStore(localDeviceId = "device-a")
+    val phoneB = NearbyEndpoint("endpoint-b", "Phone B")
+
+    store.receiveIncomingCall(phoneB, callId = "call-1")
+    store.acceptCall("call-1", startedAt = 5000L)
+
+    assertEquals(CallStatus.Active, store.state.value.callState.status)
+    assertEquals("call-1", store.state.value.callState.callId)
+    assertEquals("endpoint-b", store.state.value.callState.peerEndpointId)
+    assertEquals(5000L, store.state.value.callState.startedAt)
+  }
+
+  @Test
+  fun removingConnectedEndpointClearsMatchingCallState() {
+    val store = ChatSessionStore(localDeviceId = "device-a")
+    val phoneB = NearbyEndpoint("endpoint-b", "Phone B")
+
+    store.addConnectedEndpoint(phoneB)
+    store.startOutgoingCall(phoneB, callId = "call-1")
+    store.removeConnectedEndpoint("endpoint-b")
+
+    assertEquals(CallStatus.Idle, store.state.value.callState.status)
+    assertNull(store.state.value.callState.callId)
   }
 }

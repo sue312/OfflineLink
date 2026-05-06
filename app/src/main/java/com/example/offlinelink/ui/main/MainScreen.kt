@@ -37,6 +37,8 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.Send
+import androidx.compose.material.icons.rounded.Call
+import androidx.compose.material.icons.rounded.CallEnd
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.ErrorOutline
@@ -91,6 +93,8 @@ import com.example.offlinelink.audio.VoicePlayer
 import com.example.offlinelink.audio.VoiceRecorder
 import com.example.offlinelink.image.ImageCompressor
 import com.example.offlinelink.location.LocationHelper
+import com.example.offlinelink.model.CallState
+import com.example.offlinelink.model.CallStatus
 import com.example.offlinelink.model.ChatMessage
 import com.example.offlinelink.model.ChatUiState
 import com.example.offlinelink.model.ConnectionStatus
@@ -104,6 +108,7 @@ import com.example.offlinelink.theme.MyApplicationTheme
 import com.example.offlinelink.transport.NearbyChatTransport
 import kotlin.io.encoding.Base64
 import kotlin.io.encoding.ExperimentalEncodingApi
+import kotlinx.coroutines.delay
 
 @Composable
 fun MainScreen(
@@ -156,11 +161,17 @@ fun MainScreen(
     onReject = viewModel::rejectPendingConnection,
     onSendMessage = viewModel::sendMessage,
     onSendVoiceMessage = viewModel::sendVoiceMessage,
+    onSendCallVoiceMessage = viewModel::sendCallVoiceMessage,
     onSendLocation = viewModel::sendLocation,
     onStartVoiceRecording = voiceRecorder::start,
     onStopVoiceRecording = voiceRecorder::stop,
     onPlayVoice = voicePlayer::play,
     onDisconnect = viewModel::disconnect,
+    onStartCall = viewModel::startCall,
+    onAcceptCall = viewModel::acceptCall,
+    onRejectCall = viewModel::rejectCall,
+    onEndCall = viewModel::endCall,
+    onFinishCallVoicePlayback = viewModel::finishCallVoicePlayback,
     onPickImage = { imagePickerLauncher.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) },
     modifier = modifier.fillMaxSize(),
   )
@@ -180,16 +191,23 @@ private fun OfflineChatContent(
   onReject: () -> Unit,
   onSendMessage: (String) -> Unit,
   onSendVoiceMessage: (ByteArray, Long, String) -> Unit,
+  onSendCallVoiceMessage: (ByteArray, Long, String) -> Unit,
   onSendLocation: ((Result<Unit>) -> Unit) -> Unit,
   onStartVoiceRecording: () -> Result<Unit>,
   onStopVoiceRecording: () -> Result<RecordedVoiceClip>,
   onPlayVoice: (VoiceAttachment) -> Result<Unit>,
   onDisconnect: () -> Unit,
+  onStartCall: () -> Unit,
+  onAcceptCall: () -> Unit,
+  onRejectCall: () -> Unit,
+  onEndCall: () -> Unit,
+  onFinishCallVoicePlayback: (String) -> Unit,
   onPickImage: () -> Unit,
   modifier: Modifier = Modifier,
 ) {
   var draft by remember { mutableStateOf("") }
   var isRecordingVoice by remember { mutableStateOf(false) }
+  var isRecordingCallVoice by remember { mutableStateOf(false) }
   var isSendingLocation by remember { mutableStateOf(false) }
   var voiceError by remember { mutableStateOf<String?>(null) }
   val listState = rememberLazyListState()
@@ -200,6 +218,16 @@ private fun OfflineChatContent(
     if (state.messages.isNotEmpty()) {
       listState.animateScrollToItem(state.messages.lastIndex)
     }
+  }
+
+  LaunchedEffect(state.callPlayback?.clipId) {
+    val playback = state.callPlayback ?: return@LaunchedEffect
+    onPlayVoice(VoiceAttachment(playback.audioBase64, playback.durationMs, playback.mimeType))
+      .onFailure {
+        voiceError = "Could not play call voice"
+      }
+    delay(playback.durationMs.coerceIn(700L, 10_000L) + 250L)
+    onFinishCallVoicePlayback(playback.clipId)
   }
 
   val rootModifier =
@@ -221,7 +249,7 @@ private fun OfflineChatContent(
       } else {
         Alerts(groupWarning = state.groupWarning, lastError = state.lastError)
         if (state.status == ConnectionStatus.Connected) {
-          ConnectedSummary(state = state, onDisconnect = onDisconnect)
+          ConnectedSummary(state = state, onDisconnect = onDisconnect, onStartCall = onStartCall)
         } else {
           ConnectionConsole(
             state = state,
@@ -243,6 +271,46 @@ private fun OfflineChatContent(
             onReject = onReject,
           )
         }
+        if (state.callState.status != CallStatus.Idle) {
+          CallPanel(
+            callState = state.callState,
+            isRecordingCallVoice = isRecordingCallVoice,
+            recordingEnabled = !isRecordingVoice,
+            onAcceptCall = onAcceptCall,
+            onRejectCall = onRejectCall,
+            onEndCall = {
+              if (isRecordingCallVoice) {
+                onStopVoiceRecording()
+                isRecordingCallVoice = false
+              }
+              onEndCall()
+            },
+            onToggleTalk = {
+              if (isRecordingCallVoice) {
+                val result = onStopVoiceRecording()
+                isRecordingCallVoice = false
+                result
+                  .onSuccess { clip ->
+                    voiceError = null
+                    onSendCallVoiceMessage(clip.bytes, clip.durationMs, clip.mimeType)
+                  }
+                  .onFailure {
+                    voiceError = "Could not save call voice"
+                  }
+              } else if (!isRecordingVoice) {
+                onStartVoiceRecording()
+                  .onSuccess {
+                    isRecordingCallVoice = true
+                    voiceError = null
+                    keyboardController?.hide()
+                  }
+                  .onFailure {
+                    voiceError = "Could not start voice recording"
+                  }
+              }
+            },
+          )
+        }
         if (state.status != ConnectionStatus.Connected) {
           EndpointList(endpoints = state.discoveredEndpoints, onConnect = onConnect)
         }
@@ -262,7 +330,7 @@ private fun OfflineChatContent(
         )
         MessageComposer(
           draft = draft,
-          enabled = state.status == ConnectionStatus.Connected,
+          enabled = state.status == ConnectionStatus.Connected && !isRecordingCallVoice,
           isRecordingVoice = isRecordingVoice,
           isSendingLocation = isSendingLocation,
           voiceError = voiceError,
@@ -525,6 +593,7 @@ private fun ConnectionActionButton(
 private fun ConnectedSummary(
   state: ChatUiState,
   onDisconnect: () -> Unit,
+  onStartCall: () -> Unit,
 ) {
   Surface(
     color = MaterialTheme.colorScheme.surface,
@@ -544,6 +613,13 @@ private fun ConnectedSummary(
         Text(state.statusMessage, style = MaterialTheme.typography.titleMedium)
         Text("Group: ${state.groupName}", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
       }
+      ComposerActionButton(
+        icon = Icons.Rounded.Call,
+        contentDescription = "Start call",
+        enabled = state.callState.status == CallStatus.Idle,
+        primary = state.callState.status == CallStatus.Idle,
+        onClick = onStartCall,
+      )
       OutlinedButton(
         onClick = onDisconnect,
         shape = RoundedCornerShape(8.dp),
@@ -552,6 +628,126 @@ private fun ConnectedSummary(
         Icon(Icons.Rounded.Close, contentDescription = null, modifier = Modifier.size(17.dp))
         Spacer(Modifier.width(5.dp))
         Text("Leave")
+      }
+    }
+  }
+}
+
+@Composable
+private fun CallPanel(
+  callState: CallState,
+  isRecordingCallVoice: Boolean,
+  recordingEnabled: Boolean,
+  onAcceptCall: () -> Unit,
+  onRejectCall: () -> Unit,
+  onEndCall: () -> Unit,
+  onToggleTalk: () -> Unit,
+) {
+  val peerName = callState.peerName ?: "Nearby device"
+  val title =
+    when (callState.status) {
+      CallStatus.Incoming -> "Incoming call"
+      CallStatus.Outgoing -> "Calling"
+      CallStatus.Active -> "In call"
+      CallStatus.Idle -> "Call"
+    }
+  val subtitle =
+    when {
+      isRecordingCallVoice -> "Recording..."
+      callState.activityLabel != null -> callState.activityLabel
+      callState.status == CallStatus.Active -> peerName
+      callState.status == CallStatus.Outgoing -> peerName
+      callState.status == CallStatus.Incoming -> peerName
+      else -> ""
+    }
+  val container =
+    when (callState.status) {
+      CallStatus.Incoming -> MaterialTheme.colorScheme.tertiaryContainer
+      else -> MaterialTheme.colorScheme.surface
+    }
+  val accent =
+    when (callState.status) {
+      CallStatus.Incoming -> MaterialTheme.colorScheme.tertiary
+      else -> MaterialTheme.colorScheme.secondary
+    }
+  val accentContent =
+    when (callState.status) {
+      CallStatus.Incoming -> MaterialTheme.colorScheme.onTertiary
+      else -> MaterialTheme.colorScheme.onSecondary
+    }
+
+  Surface(
+    color = container,
+    contentColor = MaterialTheme.colorScheme.onSurface,
+    shape = RoundedCornerShape(8.dp),
+    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+    modifier = Modifier.fillMaxWidth(),
+  ) {
+    Row(
+      modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+      horizontalArrangement = Arrangement.spacedBy(10.dp),
+      verticalAlignment = Alignment.CenterVertically,
+    ) {
+      Surface(color = accent, contentColor = accentContent, shape = CircleShape) {
+        Icon(Icons.Rounded.Call, contentDescription = null, modifier = Modifier.padding(8.dp).size(18.dp))
+      }
+      Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(1.dp)) {
+        Text(title, style = MaterialTheme.typography.titleMedium)
+        Text(subtitle, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
+      }
+      when (callState.status) {
+        CallStatus.Incoming -> {
+          Button(
+            onClick = onAcceptCall,
+            shape = RoundedCornerShape(8.dp),
+            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary, contentColor = MaterialTheme.colorScheme.onSecondary),
+            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
+          ) {
+            Icon(Icons.Rounded.Check, contentDescription = null, modifier = Modifier.size(17.dp))
+            Spacer(Modifier.width(5.dp))
+            Text("Accept")
+          }
+          OutlinedButton(
+            onClick = onRejectCall,
+            shape = RoundedCornerShape(8.dp),
+            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
+          ) {
+            Icon(Icons.Rounded.Close, contentDescription = null, modifier = Modifier.size(17.dp))
+            Spacer(Modifier.width(5.dp))
+            Text("Reject")
+          }
+        }
+        CallStatus.Outgoing -> {
+          OutlinedButton(
+            onClick = onEndCall,
+            shape = RoundedCornerShape(8.dp),
+            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
+          ) {
+            Icon(Icons.Rounded.CallEnd, contentDescription = null, modifier = Modifier.size(17.dp))
+            Spacer(Modifier.width(5.dp))
+            Text("Cancel")
+          }
+        }
+        CallStatus.Active -> {
+          ComposerActionButton(
+            icon = if (isRecordingCallVoice) Icons.Rounded.Stop else Icons.Rounded.Mic,
+            contentDescription = if (isRecordingCallVoice) "Stop call voice" else "Record call voice",
+            enabled = recordingEnabled || isRecordingCallVoice,
+            selected = isRecordingCallVoice,
+            primary = !isRecordingCallVoice,
+            onClick = onToggleTalk,
+          )
+          OutlinedButton(
+            onClick = onEndCall,
+            shape = RoundedCornerShape(8.dp),
+            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
+          ) {
+            Icon(Icons.Rounded.CallEnd, contentDescription = null, modifier = Modifier.size(17.dp))
+            Spacer(Modifier.width(5.dp))
+            Text("End")
+          }
+        }
+        CallStatus.Idle -> Unit
       }
     }
   }
@@ -1142,11 +1338,17 @@ private fun OfflineChatContentPreview() {
       onReject = {},
       onSendMessage = {},
       onSendVoiceMessage = { _, _, _ -> },
+      onSendCallVoiceMessage = { _, _, _ -> },
       onSendLocation = { it(Result.success(Unit)) },
       onStartVoiceRecording = { Result.success(Unit) },
       onStopVoiceRecording = { Result.success(RecordedVoiceClip(byteArrayOf(1, 2, 3), 1000L)) },
       onPlayVoice = { Result.success(Unit) },
       onDisconnect = {},
+      onStartCall = {},
+      onAcceptCall = {},
+      onRejectCall = {},
+      onEndCall = {},
+      onFinishCallVoicePlayback = {},
       onPickImage = {},
       modifier = Modifier.fillMaxSize(),
     )

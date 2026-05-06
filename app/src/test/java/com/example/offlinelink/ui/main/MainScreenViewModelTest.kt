@@ -1,6 +1,7 @@
 package com.example.offlinelink.ui.main
 
 import com.example.offlinelink.model.ConnectionStatus
+import com.example.offlinelink.model.CallStatus
 import com.example.offlinelink.model.MessageKind
 import com.example.offlinelink.model.MessageStatus
 import com.example.offlinelink.model.NearbyEndpoint
@@ -579,6 +580,213 @@ class MainScreenViewModelTest {
       listOf("AQIDBA==", "AQIDBA=="),
       transport.sentPayloads.map { (ChatProtocol.decode(it.bytes) as DecodedWireMessage.VoiceMessage).audioBase64 },
     )
+  }
+
+  @Test
+  fun startCallSendsCallRequestToConnectedEndpoint() = runTest {
+    val transport = FakeChatTransport()
+    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage("", "image/jpeg", 1, 1)) }, localDeviceId = "local")
+
+    advanceUntilIdle()
+    transport.emit(TransportEvent.Connected(NearbyEndpoint("endpoint-b", "Phone B")))
+    advanceUntilIdle()
+    transport.clearSentPayloads()
+
+    viewModel.startCall()
+
+    assertEquals(CallStatus.Outgoing, viewModel.uiState.value.callState.status)
+    assertEquals("endpoint-b", viewModel.uiState.value.callState.peerEndpointId)
+    assertEquals("endpoint-b", transport.sentPayloads.single().endpointId)
+    val request = ChatProtocol.decode(transport.sentPayloads.single().bytes) as DecodedWireMessage.CallRequest
+    assertEquals("local", request.senderId)
+    assertEquals(viewModel.uiState.value.callState.callId, request.callId)
+  }
+
+  @Test
+  fun incomingCallRequestShowsIncomingCallState() = runTest {
+    val transport = FakeChatTransport()
+    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage("", "image/jpeg", 1, 1)) }, localDeviceId = "local")
+
+    advanceUntilIdle()
+    transport.emit(TransportEvent.Connected(NearbyEndpoint("endpoint-b", "Phone B")))
+    advanceUntilIdle()
+    transport.emit(
+      TransportEvent.BytesReceived(
+        endpointId = "endpoint-b",
+        bytes =
+          ChatProtocol.encodeCallRequest(
+            callId = "call-1",
+            senderId = "device-b",
+            createdAt = 1000L,
+          ),
+      ),
+    )
+    advanceUntilIdle()
+
+    assertEquals(CallStatus.Incoming, viewModel.uiState.value.callState.status)
+    assertEquals("call-1", viewModel.uiState.value.callState.callId)
+    assertEquals("endpoint-b", viewModel.uiState.value.callState.peerEndpointId)
+    assertEquals("Phone B", viewModel.uiState.value.callState.peerName)
+  }
+
+  @Test
+  fun acceptIncomingCallSendsCallAcceptAndActivatesCall() = runTest {
+    val transport = FakeChatTransport()
+    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage("", "image/jpeg", 1, 1)) }, localDeviceId = "local")
+
+    advanceUntilIdle()
+    transport.emit(TransportEvent.Connected(NearbyEndpoint("endpoint-b", "Phone B")))
+    advanceUntilIdle()
+    transport.emit(
+      TransportEvent.BytesReceived(
+        endpointId = "endpoint-b",
+        bytes = ChatProtocol.encodeCallRequest(callId = "call-1", senderId = "device-b", createdAt = 1000L),
+      ),
+    )
+    advanceUntilIdle()
+    transport.clearSentPayloads()
+
+    viewModel.acceptCall()
+
+    assertEquals(CallStatus.Active, viewModel.uiState.value.callState.status)
+    assertEquals("endpoint-b", transport.sentPayloads.single().endpointId)
+    val accept = ChatProtocol.decode(transport.sentPayloads.single().bytes) as DecodedWireMessage.CallAccept
+    assertEquals("call-1", accept.callId)
+    assertEquals("local", accept.senderId)
+  }
+
+  @Test
+  fun endActiveCallSendsCallEndAndClearsState() = runTest {
+    val transport = FakeChatTransport()
+    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage("", "image/jpeg", 1, 1)) }, localDeviceId = "local")
+
+    advanceUntilIdle()
+    transport.emit(TransportEvent.Connected(NearbyEndpoint("endpoint-b", "Phone B")))
+    advanceUntilIdle()
+    transport.emit(
+      TransportEvent.BytesReceived(
+        endpointId = "endpoint-b",
+        bytes = ChatProtocol.encodeCallRequest(callId = "call-1", senderId = "device-b", createdAt = 1000L),
+      ),
+    )
+    advanceUntilIdle()
+    viewModel.acceptCall()
+    transport.clearSentPayloads()
+
+    viewModel.endCall()
+
+    assertEquals(CallStatus.Idle, viewModel.uiState.value.callState.status)
+    assertEquals("endpoint-b", transport.sentPayloads.single().endpointId)
+    val end = ChatProtocol.decode(transport.sentPayloads.single().bytes) as DecodedWireMessage.CallEnd
+    assertEquals("call-1", end.callId)
+    assertEquals("local", end.senderId)
+  }
+
+  @Test
+  fun sendCallVoiceMessageTargetsActiveCallPeerOnly() = runTest {
+    val transport = FakeChatTransport()
+    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage("", "image/jpeg", 1, 1)) }, localDeviceId = "local")
+
+    advanceUntilIdle()
+    transport.emit(TransportEvent.Connected(NearbyEndpoint("endpoint-b", "Phone B")))
+    transport.emit(TransportEvent.Connected(NearbyEndpoint("endpoint-c", "Phone C")))
+    advanceUntilIdle()
+    transport.emit(
+      TransportEvent.BytesReceived(
+        endpointId = "endpoint-b",
+        bytes = ChatProtocol.encodeCallRequest(callId = "call-1", senderId = "device-b", createdAt = 1000L),
+      ),
+    )
+    advanceUntilIdle()
+    viewModel.acceptCall()
+    transport.clearSentPayloads()
+
+    viewModel.sendCallVoiceMessage(byteArrayOf(1, 2, 3, 4), durationMs = 2300L, mimeType = "audio/3gpp")
+
+    assertEquals(emptyList<com.example.offlinelink.model.ChatMessage>(), viewModel.uiState.value.messages)
+    assertEquals("Voice sent", viewModel.uiState.value.callState.activityLabel)
+    assertEquals(listOf("endpoint-b"), transport.sentPayloads.map { it.endpointId })
+    val callVoice = ChatProtocol.decode(transport.sentPayloads.single().bytes) as DecodedWireMessage.CallVoice
+    assertEquals("call-1", callVoice.callId)
+    assertEquals("AQIDBA==", callVoice.audioBase64)
+  }
+
+  @Test
+  fun incomingCallVoiceMessageCreatesPlaybackEventWithoutAppendingChatMessage() = runTest {
+    val transport = FakeChatTransport()
+    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage("", "image/jpeg", 1, 1)) }, localDeviceId = "local")
+
+    advanceUntilIdle()
+    transport.emit(TransportEvent.Connected(NearbyEndpoint("endpoint-b", "Phone B")))
+    advanceUntilIdle()
+    transport.emit(
+      TransportEvent.BytesReceived(
+        endpointId = "endpoint-b",
+        bytes = ChatProtocol.encodeCallRequest(callId = "call-1", senderId = "device-b", createdAt = 1000L),
+      ),
+    )
+    advanceUntilIdle()
+    viewModel.acceptCall()
+    transport.clearSentPayloads()
+
+    transport.emit(
+      TransportEvent.BytesReceived(
+        endpointId = "endpoint-b",
+        bytes =
+          ChatProtocol.encodeCallVoice(
+            callId = "call-1",
+            clipId = "clip-1",
+            senderId = "device-b",
+            audioBase64 = "AQIDBA==",
+            durationMs = 2300L,
+            mimeType = "audio/3gpp",
+            createdAt = 2000L,
+          ),
+      ),
+    )
+    advanceUntilIdle()
+
+    assertEquals(emptyList<com.example.offlinelink.model.ChatMessage>(), viewModel.uiState.value.messages)
+    assertEquals("Playing Phone B", viewModel.uiState.value.callState.activityLabel)
+    val playback = viewModel.uiState.value.callPlayback
+    assertNotNull(playback)
+    assertEquals("clip-1", playback!!.clipId)
+    assertEquals("AQIDBA==", playback.audioBase64)
+    assertEquals(2300L, playback.durationMs)
+  }
+
+  @Test
+  fun finishingCallVoicePlaybackClearsPlaybackEvent() = runTest {
+    val transport = FakeChatTransport()
+    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage("", "image/jpeg", 1, 1)) }, localDeviceId = "local")
+
+    advanceUntilIdle()
+    transport.emit(TransportEvent.Connected(NearbyEndpoint("endpoint-b", "Phone B")))
+    advanceUntilIdle()
+    transport.emit(TransportEvent.BytesReceived("endpoint-b", ChatProtocol.encodeCallRequest(callId = "call-1", senderId = "device-b", createdAt = 1000L)))
+    advanceUntilIdle()
+    viewModel.acceptCall()
+    transport.emit(
+      TransportEvent.BytesReceived(
+        endpointId = "endpoint-b",
+        bytes =
+          ChatProtocol.encodeCallVoice(
+            callId = "call-1",
+            clipId = "clip-1",
+            senderId = "device-b",
+            audioBase64 = "AQIDBA==",
+            durationMs = 2300L,
+            mimeType = "audio/3gpp",
+            createdAt = 2000L,
+          ),
+      ),
+    )
+    advanceUntilIdle()
+
+    viewModel.finishCallVoicePlayback("clip-1")
+
+    assertEquals(null, viewModel.uiState.value.callPlayback)
+    assertEquals(null, viewModel.uiState.value.callState.activityLabel)
   }
 
   @Test

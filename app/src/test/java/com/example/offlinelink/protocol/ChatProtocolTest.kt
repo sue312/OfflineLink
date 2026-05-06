@@ -90,4 +90,100 @@ class ChatProtocolTest {
     assertEquals("msg-2", ack.messageId)
     assertEquals(8765L, ack.sentAt)
   }
+
+  @Test
+  fun encodeAndDecodeCallRequestPayloadPreservesCallMetadata() {
+    val bytes =
+      ChatProtocol.encodeCallRequest(
+        callId = "call-1",
+        senderId = "device-a",
+        createdAt = 1234L,
+        sentAt = 5678L,
+      )
+
+    val decoded = ChatProtocol.decode(bytes)
+
+    assertTrue(decoded is DecodedWireMessage.CallRequest)
+    val request = decoded as DecodedWireMessage.CallRequest
+    assertEquals("call-1", request.callId)
+    assertEquals("device-a", request.senderId)
+    assertEquals(1234L, request.createdAt)
+    assertEquals(5678L, request.sentAt)
+  }
+
+  @Test
+  fun encodeAndDecodeCallResponsePayloadsPreserveCallIds() {
+    val accept =
+      ChatProtocol.decode(
+        ChatProtocol.encodeCallAccept(
+          callId = "call-1",
+          senderId = "device-b",
+          createdAt = 2000L,
+          sentAt = 3000L,
+        ),
+      ) as DecodedWireMessage.CallAccept
+    val reject =
+      ChatProtocol.decode(
+        ChatProtocol.encodeCallReject(
+          callId = "call-2",
+          senderId = "device-c",
+          reason = "busy",
+          createdAt = 4000L,
+          sentAt = 5000L,
+        ),
+      ) as DecodedWireMessage.CallReject
+    val end =
+      ChatProtocol.decode(
+        ChatProtocol.encodeCallEnd(
+          callId = "call-3",
+          senderId = "device-a",
+          createdAt = 6000L,
+          sentAt = 7000L,
+        ),
+      ) as DecodedWireMessage.CallEnd
+
+    assertEquals("call-1", accept.callId)
+    assertEquals("device-b", accept.senderId)
+    assertEquals(2000L, accept.createdAt)
+    assertEquals(3000L, accept.sentAt)
+
+    assertEquals("call-2", reject.callId)
+    assertEquals("device-c", reject.senderId)
+    assertEquals("busy", reject.reason)
+    assertEquals(4000L, reject.createdAt)
+    assertEquals(5000L, reject.sentAt)
+
+    assertEquals("call-3", end.callId)
+    assertEquals("device-a", end.senderId)
+    assertEquals(6000L, end.createdAt)
+    assertEquals(7000L, end.sentAt)
+  }
+
+  @Test
+  fun encodeAndDecodeCallVoicePayloadPreservesAudioMetadata() {
+    val bytes =
+      ChatProtocol.encodeCallVoice(
+        callId = "call-1",
+        clipId = "clip-1",
+        senderId = "device-a",
+        audioBase64 = "AQIDBA==",
+        durationMs = 2300L,
+        mimeType = "audio/3gpp",
+        createdAt = 1234L,
+        sentAt = 5678L,
+      )
+
+    val decoded = ChatProtocol.decode(bytes)
+
+    assertTrue(decoded is DecodedWireMessage.CallVoice)
+    val voice = decoded as DecodedWireMessage.CallVoice
+    assertEquals("call-1", voice.callId)
+    assertEquals("clip-1", voice.clipId)
+    assertEquals("device-a", voice.senderId)
+    assertEquals("AQIDBA==", voice.audioBase64)
+    assertEquals(2300L, voice.durationMs)
+    assertEquals("audio/3gpp", voice.mimeType)
+    assertEquals(1234L, voice.createdAt)
+    assertEquals(5678L, voice.sentAt)
+  }
 }

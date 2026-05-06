@@ -6,6 +6,8 @@ import com.example.offlinelink.chat.ChatSessionStore
 import com.example.offlinelink.image.ImageCompressor
 import android.net.Uri
 import com.example.offlinelink.location.DeviceLocation
+import com.example.offlinelink.model.CallStatus
+import com.example.offlinelink.model.CallVoicePlayback
 import com.example.offlinelink.model.ConnectionStatus
 import com.example.offlinelink.model.GroupMember
 import com.example.offlinelink.model.NearbyEndpoint
@@ -31,6 +33,7 @@ class MainScreenViewModel(
   private val endpointMemberIds = mutableMapOf<String, String>()
   private var recoveryMode = false
   private val recoveryConnectionAttempts = mutableSetOf<String>()
+  private val handledCallVoiceClipIds = mutableSetOf<String>()
 
   val uiState: StateFlow<com.example.offlinelink.model.ChatUiState> = store.state
 
@@ -129,46 +132,43 @@ class MainScreenViewModel(
     durationMs: Long,
     mimeType: String = VOICE_MIME_TYPE,
   ) {
-    if (audioBytes.isEmpty()) return
-    val endpoints = uiState.value.connectedEndpoints
-    if (endpoints.isEmpty()) {
-      store.setStatus(ConnectionStatus.Error, "No connected device", "Connect to a nearby device first")
-      return
-    }
+    sendVoiceMessageTo(
+      endpoints = uiState.value.connectedEndpoints,
+      audioBytes = audioBytes,
+      durationMs = durationMs,
+      mimeType = mimeType,
+      failureStatus = "Voice message failed",
+    )
+  }
 
-    val message =
-      store.queueOutgoingVoiceMessage(
+  fun sendCallVoiceMessage(
+    audioBytes: ByteArray,
+    durationMs: Long,
+    mimeType: String = VOICE_MIME_TYPE,
+  ) {
+    if (audioBytes.isEmpty()) return
+    val callState = uiState.value.callState
+    if (callState.status != CallStatus.Active) return
+    val callId = callState.callId ?: return
+    val peerEndpointId = callState.peerEndpointId ?: return
+    val endpoint = uiState.value.connectedEndpoints.firstOrNull { it.id == peerEndpointId } ?: return
+
+    val clipId = UUID.randomUUID().toString()
+    val bytes =
+      ChatProtocol.encodeCallVoice(
+        callId = callId,
+        clipId = clipId,
+        senderId = uiState.value.localDeviceId,
         audioBase64 = Base64.Default.encode(audioBytes),
         durationMs = durationMs,
         mimeType = mimeType,
+        createdAt = System.currentTimeMillis(),
       )
-    val voice = message.voice ?: return
-    val bytes =
-      ChatProtocol.encodeVoiceMessage(
-        messageId = message.id,
-        conversationId = message.conversationId,
-        senderId = message.senderId,
-        audioBase64 = voice.audioBase64,
-        durationMs = voice.durationMs,
-        mimeType = voice.mimeType,
-        createdAt = message.createdAt,
-      )
-    val pendingEndpointIds = endpoints.map { it.id }.toMutableSet()
-    var hasFailure = false
-    endpoints.forEach { endpoint ->
-      transport.send(endpoint.id, bytes) { result ->
-        if (result.isFailure) {
-          hasFailure = true
-          store.setStatus(ConnectionStatus.Error, "Voice message failed", result.exceptionOrNull()?.message)
-        }
-        pendingEndpointIds.remove(endpoint.id)
-        if (pendingEndpointIds.isEmpty()) {
-          if (hasFailure) {
-            store.markFailed(message.id)
-          } else {
-            store.markSent(message.id)
-          }
-        }
+    transport.send(endpoint.id, bytes) { result ->
+      if (result.isSuccess) {
+        store.setCallActivity("Voice sent")
+      } else {
+        store.setStatus(ConnectionStatus.Error, "Call voice failed", result.exceptionOrNull()?.message)
       }
     }
   }
@@ -279,6 +279,90 @@ class MainScreenViewModel(
       }
   }
 
+  fun startCall() {
+    val endpoint = uiState.value.connectedEndpoints.firstOrNull()
+    if (endpoint == null) {
+      store.setStatus(ConnectionStatus.Error, "No connected device", "Connect to a nearby device first")
+      return
+    }
+    if (uiState.value.callState.status != CallStatus.Idle) return
+
+    val callId = UUID.randomUUID().toString()
+    store.startOutgoingCall(endpoint, callId)
+    transport.send(
+      endpoint.id,
+      ChatProtocol.encodeCallRequest(
+        callId = callId,
+        senderId = uiState.value.localDeviceId,
+        createdAt = System.currentTimeMillis(),
+      ),
+    ) { result ->
+      result.onFailure {
+        store.endCall(callId)
+        store.setStatus(ConnectionStatus.Error, "Call failed", it.message)
+      }
+    }
+  }
+
+  fun acceptCall() {
+    val callState = uiState.value.callState
+    val callId = callState.callId ?: return
+    val peerEndpointId = callState.peerEndpointId ?: return
+    if (callState.status != CallStatus.Incoming) return
+    if (!store.acceptCall(callId)) return
+    transport.send(
+      peerEndpointId,
+      ChatProtocol.encodeCallAccept(
+        callId = callId,
+        senderId = uiState.value.localDeviceId,
+        createdAt = System.currentTimeMillis(),
+      ),
+    ) { result ->
+      result.onFailure {
+        store.setStatus(ConnectionStatus.Error, "Could not accept call", it.message)
+      }
+    }
+  }
+
+  fun rejectCall() {
+    val callState = uiState.value.callState
+    val callId = callState.callId ?: return
+    val peerEndpointId = callState.peerEndpointId ?: return
+    if (callState.status != CallStatus.Incoming) return
+    store.rejectCall(callId)
+    handledCallVoiceClipIds.clear()
+    transport.send(
+      peerEndpointId,
+      ChatProtocol.encodeCallReject(
+        callId = callId,
+        senderId = uiState.value.localDeviceId,
+        reason = "rejected",
+        createdAt = System.currentTimeMillis(),
+      ),
+    ) { }
+  }
+
+  fun endCall() {
+    val callState = uiState.value.callState
+    val callId = callState.callId ?: return
+    val peerEndpointId = callState.peerEndpointId ?: return
+    if (callState.status == CallStatus.Idle) return
+    store.endCall(callId)
+    handledCallVoiceClipIds.clear()
+    transport.send(
+      peerEndpointId,
+      ChatProtocol.encodeCallEnd(
+        callId = callId,
+        senderId = uiState.value.localDeviceId,
+        createdAt = System.currentTimeMillis(),
+      ),
+    ) { }
+  }
+
+  fun finishCallVoicePlayback(clipId: String) {
+    store.finishCallPlayback(clipId)
+  }
+
   fun disconnect() {
     uiState.value.connectedEndpoints.forEach { endpoint ->
       transport.send(endpoint.id, ChatProtocol.encodeDisconnect("User disconnected")) { }
@@ -287,12 +371,63 @@ class MainScreenViewModel(
     recoveryMode = false
     recoveryConnectionAttempts.clear()
     endpointMemberIds.clear()
+    handledCallVoiceClipIds.clear()
     store.clearConnectedEndpoints()
   }
 
   override fun onCleared() {
     transport.stopAll()
     super.onCleared()
+  }
+
+  private fun sendVoiceMessageTo(
+    endpoints: List<NearbyEndpoint>,
+    audioBytes: ByteArray,
+    durationMs: Long,
+    mimeType: String,
+    failureStatus: String,
+  ) {
+    if (audioBytes.isEmpty()) return
+    if (endpoints.isEmpty()) {
+      store.setStatus(ConnectionStatus.Error, "No connected device", "Connect to a nearby device first")
+      return
+    }
+
+    val message =
+      store.queueOutgoingVoiceMessage(
+        audioBase64 = Base64.Default.encode(audioBytes),
+        durationMs = durationMs,
+        mimeType = mimeType,
+      )
+    val voice = message.voice ?: return
+    val bytes =
+      ChatProtocol.encodeVoiceMessage(
+        messageId = message.id,
+        conversationId = message.conversationId,
+        senderId = message.senderId,
+        audioBase64 = voice.audioBase64,
+        durationMs = voice.durationMs,
+        mimeType = voice.mimeType,
+        createdAt = message.createdAt,
+      )
+    val pendingEndpointIds = endpoints.map { it.id }.toMutableSet()
+    var hasFailure = false
+    endpoints.forEach { endpoint ->
+      transport.send(endpoint.id, bytes) { result ->
+        if (result.isFailure) {
+          hasFailure = true
+          store.setStatus(ConnectionStatus.Error, failureStatus, result.exceptionOrNull()?.message)
+        }
+        pendingEndpointIds.remove(endpoint.id)
+        if (pendingEndpointIds.isEmpty()) {
+          if (hasFailure) {
+            store.markFailed(message.id)
+          } else {
+            store.markSent(message.id)
+          }
+        }
+      }
+    }
   }
 
   private fun handleTransportEvent(event: TransportEvent) {
@@ -414,7 +549,66 @@ class MainScreenViewModel(
         }
         transport.send(endpointId, ChatProtocol.encodeAck(decoded.messageId)) { }
       }
+      is DecodedWireMessage.CallRequest -> handleIncomingCallRequest(endpointId, decoded)
+      is DecodedWireMessage.CallAccept -> store.acceptCall(decoded.callId)
+      is DecodedWireMessage.CallReject -> {
+        store.rejectCall(decoded.callId)
+        handledCallVoiceClipIds.clear()
+      }
+      is DecodedWireMessage.CallEnd -> {
+        store.endCall(decoded.callId)
+        handledCallVoiceClipIds.clear()
+      }
+      is DecodedWireMessage.CallVoice -> handleIncomingCallVoice(endpointId, decoded)
     }
+  }
+
+  private fun handleIncomingCallRequest(
+    endpointId: String,
+    request: DecodedWireMessage.CallRequest,
+  ) {
+    val existingCall = uiState.value.callState
+    if (existingCall.callId == request.callId) return
+    if (existingCall.status != CallStatus.Idle) {
+      transport.send(
+        endpointId,
+        ChatProtocol.encodeCallReject(
+          callId = request.callId,
+          senderId = uiState.value.localDeviceId,
+          reason = "busy",
+          createdAt = System.currentTimeMillis(),
+        ),
+      ) { }
+      return
+    }
+    val endpoint = uiState.value.connectedEndpoints.firstOrNull { it.id == endpointId } ?: NearbyEndpoint(endpointId, "Nearby device")
+    store.receiveIncomingCall(endpoint, request.callId)
+  }
+
+  private fun handleIncomingCallVoice(
+    endpointId: String,
+    voice: DecodedWireMessage.CallVoice,
+  ) {
+    val callState = uiState.value.callState
+    if (callState.status != CallStatus.Active) return
+    if (callState.callId != voice.callId) return
+    if (callState.peerEndpointId != endpointId) return
+    if (!handledCallVoiceClipIds.add(voice.clipId)) return
+
+    val peerName = callState.peerName ?: uiState.value.connectedEndpoints.firstOrNull { it.id == endpointId }?.name ?: "Nearby device"
+    store.showCallPlayback(
+      playback =
+        CallVoicePlayback(
+          callId = voice.callId,
+          clipId = voice.clipId,
+          senderId = voice.senderId,
+          audioBase64 = voice.audioBase64,
+          durationMs = voice.durationMs,
+          mimeType = voice.mimeType,
+          createdAt = voice.createdAt,
+        ),
+      activityLabel = "Playing $peerName",
+    )
   }
 
   private fun mergeIncomingRoster(endpointId: String, hello: DecodedWireMessage.Hello): Boolean {
