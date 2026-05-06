@@ -8,6 +8,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -31,6 +32,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
@@ -49,8 +51,8 @@ import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.material.icons.rounded.Visibility
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonColors
 import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -68,7 +70,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
@@ -207,8 +211,8 @@ private fun OfflineChatContent(
 
   Surface(modifier = rootModifier, color = MaterialTheme.colorScheme.background) {
     Column(
-      modifier = Modifier.fillMaxSize().padding(start = 16.dp, top = 16.dp, end = 16.dp, bottom = 10.dp),
-      verticalArrangement = Arrangement.spacedBy(10.dp),
+      modifier = Modifier.fillMaxSize().padding(start = 12.dp, top = 10.dp, end = 12.dp, bottom = 8.dp),
+      verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
       Header(state = state)
 
@@ -216,14 +220,18 @@ private fun OfflineChatContent(
         PermissionPanel(onRequestPermissions, modifier = Modifier.fillMaxWidth())
       } else {
         Alerts(groupWarning = state.groupWarning, lastError = state.lastError)
-        ConnectionConsole(
-          state = state,
-          onDisplayNameChange = onDisplayNameChange,
-          onGroupNameChange = onGroupNameChange,
-          onAdvertise = onAdvertise,
-          onDiscover = onDiscover,
-          onDisconnect = onDisconnect,
-        )
+        if (state.status == ConnectionStatus.Connected) {
+          ConnectedSummary(state = state, onDisconnect = onDisconnect)
+        } else {
+          ConnectionConsole(
+            state = state,
+            onDisplayNameChange = onDisplayNameChange,
+            onGroupNameChange = onGroupNameChange,
+            onAdvertise = onAdvertise,
+            onDiscover = onDiscover,
+            onDisconnect = onDisconnect,
+          )
+        }
         if (state.connectedEndpoints.isNotEmpty() || state.groupMembers.isNotEmpty()) {
           MembersPanel(localDisplayName = state.displayName, members = state.groupMembers)
         }
@@ -313,10 +321,7 @@ private fun Header(state: ChatUiState) {
     verticalAlignment = Alignment.CenterVertically,
     horizontalArrangement = Arrangement.SpaceBetween,
   ) {
-    Column(verticalArrangement = Arrangement.spacedBy(2.dp), modifier = Modifier.weight(1f)) {
-      Text("OfflineLink", style = MaterialTheme.typography.headlineMedium)
-      Text("Nearby chat without internet", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-    }
+    Text("OfflineLink", style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
     StatusChip(status = state.status)
   }
 }
@@ -420,7 +425,7 @@ private fun ConnectionConsole(
     border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
     modifier = Modifier.fillMaxWidth(),
   ) {
-    Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+    Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
       Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.SpaceBetween,
@@ -430,63 +435,123 @@ private fun ConnectionConsole(
           Text("Link setup", style = MaterialTheme.typography.titleMedium)
           Text(state.statusMessage, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
-        Surface(color = MaterialTheme.colorScheme.surfaceVariant, shape = CircleShape) {
-          Text("Group", modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp), style = MaterialTheme.typography.labelMedium)
-        }
       }
 
-      OutlinedTextField(
-        value = state.displayName,
-        onValueChange = onDisplayNameChange,
-        label = { Text("Display name") },
-        leadingIcon = { Icon(Icons.Rounded.Person, contentDescription = null) },
-        singleLine = true,
-        shape = RoundedCornerShape(8.dp),
-        modifier = Modifier.fillMaxWidth(),
-      )
-      OutlinedTextField(
-        value = state.groupName,
-        onValueChange = onGroupNameChange,
-        label = { Text("Group name") },
-        leadingIcon = { Icon(Icons.Rounded.Groups, contentDescription = null) },
-        singleLine = true,
-        shape = RoundedCornerShape(8.dp),
-        modifier = Modifier.fillMaxWidth(),
-      )
       Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-        Button(
+        OutlinedTextField(
+          value = state.displayName,
+          onValueChange = onDisplayNameChange,
+          label = { Text("Name") },
+          leadingIcon = { Icon(Icons.Rounded.Person, contentDescription = null, modifier = Modifier.size(18.dp)) },
+          singleLine = true,
+          textStyle = MaterialTheme.typography.bodyMedium,
+          shape = RoundedCornerShape(8.dp),
+          modifier = Modifier.weight(1f),
+        )
+        OutlinedTextField(
+          value = state.groupName,
+          onValueChange = onGroupNameChange,
+          label = { Text("Group") },
+          leadingIcon = { Icon(Icons.Rounded.Groups, contentDescription = null, modifier = Modifier.size(18.dp)) },
+          singleLine = true,
+          textStyle = MaterialTheme.typography.bodyMedium,
+          shape = RoundedCornerShape(8.dp),
+          modifier = Modifier.weight(1f),
+        )
+      }
+      Row(horizontalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.fillMaxWidth()) {
+        ConnectionActionButton(
+          icon = Icons.Rounded.Visibility,
+          label = "Visible",
           onClick = onAdvertise,
           enabled = state.status != ConnectionStatus.Connected,
+          selected = state.status == ConnectionStatus.Advertising,
           modifier = Modifier.weight(1f),
-          shape = RoundedCornerShape(8.dp),
-          contentPadding = PaddingValues(horizontal = 10.dp, vertical = 10.dp),
-        ) {
-          Icon(Icons.Rounded.Visibility, contentDescription = null, modifier = Modifier.size(18.dp))
-          Spacer(Modifier.width(6.dp))
-          Text("Visible")
-        }
-        FilledTonalButton(
+        )
+        ConnectionActionButton(
+          icon = Icons.Rounded.Search,
+          label = "Search",
           onClick = onDiscover,
           enabled = state.status != ConnectionStatus.Connected,
+          selected = state.status == ConnectionStatus.Discovering,
           modifier = Modifier.weight(1f),
-          shape = RoundedCornerShape(8.dp),
-          contentPadding = PaddingValues(horizontal = 10.dp, vertical = 10.dp),
-        ) {
-          Icon(Icons.Rounded.Search, contentDescription = null, modifier = Modifier.size(18.dp))
-          Spacer(Modifier.width(6.dp))
-          Text("Search")
-        }
-        OutlinedButton(
+        )
+        ConnectionActionButton(
+          icon = Icons.Rounded.Close,
+          label = "Leave",
           onClick = onDisconnect,
           enabled = state.status == ConnectionStatus.Connected,
+          selected = false,
           modifier = Modifier.weight(1f),
-          shape = RoundedCornerShape(8.dp),
-          contentPadding = PaddingValues(horizontal = 10.dp, vertical = 10.dp),
-        ) {
-          Icon(Icons.Rounded.Close, contentDescription = null, modifier = Modifier.size(18.dp))
-          Spacer(Modifier.width(6.dp))
-          Text("Leave")
-        }
+        )
+      }
+    }
+  }
+}
+
+@Composable
+private fun ConnectionActionButton(
+  icon: ImageVector,
+  label: String,
+  enabled: Boolean,
+  selected: Boolean,
+  onClick: () -> Unit,
+  modifier: Modifier = Modifier,
+) {
+  val container =
+    when {
+      selected -> MaterialTheme.colorScheme.primary
+      enabled -> MaterialTheme.colorScheme.surfaceVariant
+      else -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f)
+    }
+  val content =
+    when {
+      selected -> MaterialTheme.colorScheme.onPrimary
+      enabled -> MaterialTheme.colorScheme.onSurfaceVariant
+      else -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.45f)
+    }
+
+  Column(modifier = modifier, horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(4.dp)) {
+    Surface(color = container, contentColor = content, shape = CircleShape) {
+      IconButton(onClick = onClick, enabled = enabled, modifier = Modifier.size(42.dp)) {
+        Icon(icon, contentDescription = label, modifier = Modifier.size(20.dp))
+      }
+    }
+    Text(label, style = MaterialTheme.typography.labelMedium, color = content, maxLines = 1)
+  }
+}
+
+@Composable
+private fun ConnectedSummary(
+  state: ChatUiState,
+  onDisconnect: () -> Unit,
+) {
+  Surface(
+    color = MaterialTheme.colorScheme.surface,
+    shape = RoundedCornerShape(8.dp),
+    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+    modifier = Modifier.fillMaxWidth(),
+  ) {
+    Row(
+      modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+      horizontalArrangement = Arrangement.spacedBy(10.dp),
+      verticalAlignment = Alignment.CenterVertically,
+    ) {
+      Surface(color = MaterialTheme.colorScheme.primaryContainer, contentColor = MaterialTheme.colorScheme.primary, shape = CircleShape) {
+        Icon(Icons.Rounded.Groups, contentDescription = null, modifier = Modifier.padding(8.dp).size(18.dp))
+      }
+      Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(1.dp)) {
+        Text(state.statusMessage, style = MaterialTheme.typography.titleMedium)
+        Text("Group: ${state.groupName}", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+      }
+      OutlinedButton(
+        onClick = onDisconnect,
+        shape = RoundedCornerShape(8.dp),
+        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
+      ) {
+        Icon(Icons.Rounded.Close, contentDescription = null, modifier = Modifier.size(17.dp))
+        Spacer(Modifier.width(5.dp))
+        Text("Leave")
       }
     }
   }
@@ -658,11 +723,23 @@ private fun MessageRow(
   onOpenMaps: (Double, Double) -> Unit,
 ) {
   val isLocal = message.isLocal
-  val bubbleColor = if (isLocal) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surface
-  val contentColor = if (isLocal) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface
-  val border = if (isLocal) null else BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+  val isAttachment = message.kind != MessageKind.Text
+  val bubbleColor =
+    when {
+      isLocal && isAttachment -> MaterialTheme.colorScheme.surface
+      isLocal -> MaterialTheme.colorScheme.primaryContainer
+      else -> MaterialTheme.colorScheme.surface
+    }
+  val contentColor = MaterialTheme.colorScheme.onSurface
+  val accentColor = if (isLocal) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.secondary
+  val border = BorderStroke(1.dp, if (isLocal) MaterialTheme.colorScheme.primary.copy(alpha = 0.32f) else MaterialTheme.colorScheme.outlineVariant)
   val attachmentButtonBorder = BorderStroke(1.dp, contentColor.copy(alpha = 0.42f))
   val attachmentButtonColors = ButtonDefaults.outlinedButtonColors(contentColor = contentColor)
+
+  if (message.kind == MessageKind.Image && message.image != null) {
+    ImageMessageRow(message = message, isLocal = isLocal)
+    return
+  }
 
   Row(
     modifier = Modifier.fillMaxWidth(),
@@ -677,53 +754,25 @@ private fun MessageRow(
     ) {
       Column(Modifier.padding(horizontal = 12.dp, vertical = 9.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         when {
-          message.kind == MessageKind.Image && message.image != null -> {
-            val imageBitmap = remember(message.image.imageBase64) { decodeImageBitmap(message.image.imageBase64) }
-            Image(
-              bitmap = imageBitmap,
-              contentDescription = "Shared image",
-              contentScale = ContentScale.Crop,
-              modifier =
-                Modifier
-                  .widthIn(max = 280.dp)
-                  .heightIn(min = 120.dp, max = 260.dp)
-                  .clip(RoundedCornerShape(8.dp)),
+          message.kind == MessageKind.Location && message.location != null -> {
+            LocationMessageContent(
+              latitude = message.location.latitude,
+              longitude = message.location.longitude,
+              accuracy = message.location.accuracy,
+              contentColor = contentColor,
+              accentColor = accentColor,
+              onOpenMaps = onOpenMaps,
             )
           }
-          message.kind == MessageKind.Location && message.location != null -> {
-            val loc = message.location
-            Row(horizontalArrangement = Arrangement.spacedBy(7.dp), verticalAlignment = Alignment.CenterVertically) {
-              Icon(Icons.Rounded.Place, contentDescription = null, modifier = Modifier.size(18.dp))
-              Text("Shared location", fontWeight = FontWeight.Medium)
-            }
-            Text("%.6f, %.6f".format(loc.latitude, loc.longitude), style = MaterialTheme.typography.bodyMedium)
-            loc.accuracy?.let {
-              Text("Accuracy: ${"%.1f".format(it)}m", style = MaterialTheme.typography.labelMedium, color = contentColor.copy(alpha = 0.72f))
-            }
-            OutlinedButton(
-              onClick = { onOpenMaps(loc.latitude, loc.longitude) },
-              shape = RoundedCornerShape(8.dp),
-              border = attachmentButtonBorder,
-              colors = attachmentButtonColors,
-              contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
-            ) {
-              Icon(Icons.Rounded.Place, contentDescription = null, modifier = Modifier.size(17.dp))
-              Spacer(Modifier.width(6.dp))
-              Text("Open Maps")
-            }
-          }
           message.voice != null -> {
-            OutlinedButton(
-              onClick = { onPlayVoice(message.voice) },
-              shape = RoundedCornerShape(8.dp),
+            VoiceMessageContent(
+              durationMs = message.voice.durationMs,
+              contentColor = contentColor,
+              accentColor = accentColor,
               border = attachmentButtonBorder,
               colors = attachmentButtonColors,
-              contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
-            ) {
-              Icon(Icons.Rounded.PlayArrow, contentDescription = null, modifier = Modifier.size(18.dp))
-              Spacer(Modifier.width(6.dp))
-              Text("Voice ${formatDuration(message.voice.durationMs)}")
-            }
+              onPlay = { onPlayVoice(message.voice) },
+            )
           }
           else -> {
             Text(message.text, style = MaterialTheme.typography.bodyLarge)
@@ -731,6 +780,152 @@ private fun MessageRow(
         }
         Text(message.status.displayLabel(message.isLocal), style = MaterialTheme.typography.labelSmall, color = contentColor.copy(alpha = 0.68f))
       }
+    }
+  }
+}
+
+@Composable
+private fun ImageMessageRow(
+  message: ChatMessage,
+  isLocal: Boolean,
+) {
+  val image = message.image ?: return
+  val imageBitmap = remember(image.imageBase64) { decodeImageBitmap(image.imageBase64) }
+  val sourceWidth = image.width.coerceAtLeast(1)
+  val sourceHeight = image.height.coerceAtLeast(1)
+  val aspect = sourceWidth.toFloat() / sourceHeight.toFloat()
+  val previewWidth: Float
+  val previewHeight: Float
+  if (aspect < 0.75f) {
+    previewWidth = 188f
+    previewHeight = 250f
+  } else {
+    previewWidth = 238f
+    previewHeight = (previewWidth / aspect).coerceIn(116f, 250f)
+  }
+
+  Row(
+    modifier = Modifier.fillMaxWidth(),
+    horizontalArrangement = if (isLocal) Arrangement.End else Arrangement.Start,
+  ) {
+    Column(horizontalAlignment = if (isLocal) Alignment.End else Alignment.Start, verticalArrangement = Arrangement.spacedBy(3.dp)) {
+      Image(
+        bitmap = imageBitmap,
+        contentDescription = "Shared image",
+        contentScale = ContentScale.Crop,
+        modifier =
+          Modifier
+            .width(previewWidth.dp)
+            .height(previewHeight.dp)
+            .clip(messageBubbleShape(isLocal)),
+      )
+      Text(
+        message.status.displayLabel(message.isLocal),
+        style = MaterialTheme.typography.labelSmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(horizontal = 4.dp),
+      )
+    }
+  }
+}
+
+@Composable
+private fun VoiceMessageContent(
+  durationMs: Long,
+  contentColor: Color,
+  accentColor: Color,
+  border: BorderStroke,
+  colors: ButtonColors,
+  onPlay: () -> Unit,
+) {
+  OutlinedButton(
+    onClick = onPlay,
+    shape = RoundedCornerShape(8.dp),
+    border = border,
+    colors = colors,
+    contentPadding = PaddingValues(horizontal = 9.dp, vertical = 7.dp),
+    modifier = Modifier.width(194.dp),
+  ) {
+    Surface(color = accentColor, contentColor = MaterialTheme.colorScheme.onPrimary, shape = CircleShape, modifier = Modifier.size(28.dp)) {
+      Box(contentAlignment = Alignment.Center) {
+        Icon(Icons.Rounded.PlayArrow, contentDescription = null, modifier = Modifier.size(18.dp))
+      }
+    }
+    Spacer(Modifier.width(9.dp))
+    Waveform(color = accentColor, modifier = Modifier.weight(1f))
+    Spacer(Modifier.width(9.dp))
+    Text(formatDuration(durationMs), style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
+  }
+}
+
+@Composable
+private fun Waveform(
+  color: Color,
+  modifier: Modifier = Modifier,
+) {
+  val heights = listOf(10, 18, 13, 23, 15, 20, 11, 17, 24, 14, 19, 12)
+  Row(modifier = modifier, horizontalArrangement = Arrangement.spacedBy(3.dp), verticalAlignment = Alignment.CenterVertically) {
+    heights.forEachIndexed { index, height ->
+      Box(
+        modifier =
+          Modifier
+            .width(3.dp)
+            .height(height.dp)
+            .background(color.copy(alpha = if (index % 3 == 0) 0.82f else 0.52f), CircleShape),
+      )
+    }
+  }
+}
+
+@Composable
+private fun LocationMessageContent(
+  latitude: Double,
+  longitude: Double,
+  accuracy: Float?,
+  contentColor: Color,
+  accentColor: Color,
+  onOpenMaps: (Double, Double) -> Unit,
+) {
+  Column(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.width(238.dp)) {
+    Surface(color = accentColor.copy(alpha = 0.08f), shape = RoundedCornerShape(8.dp), modifier = Modifier.fillMaxWidth().height(86.dp)) {
+      Box(contentAlignment = Alignment.Center) {
+        Canvas(modifier = Modifier.fillMaxSize()) {
+          val gridColor = accentColor.copy(alpha = 0.13f)
+          val roadColor = accentColor.copy(alpha = 0.24f)
+          for (i in 1..3) {
+            val x = size.width * i / 4f
+            drawLine(gridColor, Offset(x, 0f), Offset(x, size.height))
+          }
+          for (i in 1..2) {
+            val y = size.height * i / 3f
+            drawLine(gridColor, Offset(0f, y), Offset(size.width, y))
+          }
+          drawLine(roadColor, Offset(0f, size.height * 0.7f), Offset(size.width, size.height * 0.38f), strokeWidth = 8f)
+          drawLine(roadColor, Offset(size.width * 0.22f, 0f), Offset(size.width * 0.68f, size.height), strokeWidth = 5f)
+        }
+        Surface(color = accentColor, contentColor = MaterialTheme.colorScheme.onPrimary, shape = CircleShape) {
+          Icon(Icons.Rounded.Place, contentDescription = null, modifier = Modifier.padding(8.dp).size(20.dp))
+        }
+      }
+    }
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+      Icon(Icons.Rounded.Place, contentDescription = null, tint = accentColor, modifier = Modifier.size(18.dp))
+      Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(1.dp)) {
+        Text("Shared location", style = MaterialTheme.typography.titleMedium)
+        Text("%.5f, %.5f".format(latitude, longitude), style = MaterialTheme.typography.labelMedium, color = contentColor.copy(alpha = 0.75f))
+        accuracy?.let {
+          Text("Accuracy ${"%.0f".format(it)}m", style = MaterialTheme.typography.labelSmall, color = contentColor.copy(alpha = 0.62f))
+        }
+      }
+    }
+    OutlinedButton(
+      onClick = { onOpenMaps(latitude, longitude) },
+      shape = RoundedCornerShape(8.dp),
+      border = BorderStroke(1.dp, accentColor.copy(alpha = 0.42f)),
+      colors = ButtonDefaults.outlinedButtonColors(contentColor = accentColor),
+      contentPadding = PaddingValues(horizontal = 10.dp, vertical = 7.dp),
+    ) {
+      Text("Open Maps", style = MaterialTheme.typography.labelMedium)
     }
   }
 }
@@ -754,7 +949,7 @@ private fun MessageComposer(
     border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
     modifier = Modifier.fillMaxWidth(),
   ) {
-    Column(verticalArrangement = Arrangement.spacedBy(7.dp), modifier = Modifier.padding(8.dp)) {
+    Column(verticalArrangement = Arrangement.spacedBy(5.dp), modifier = Modifier.padding(6.dp)) {
       if (isRecordingVoice) {
         Text("Recording voice...", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
       }
@@ -762,17 +957,14 @@ private fun MessageComposer(
         Text("Getting location...", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
       }
       voiceError?.let { Text(it, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.error) }
-      Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(7.dp), modifier = Modifier.fillMaxWidth()) {
-        OutlinedTextField(
+      Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
+        CompactMessageField(
           value = draft,
           onValueChange = onDraftChange,
           enabled = enabled && !isRecordingVoice,
-          placeholder = { Text("Type an offline message") },
           keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
           keyboardActions = KeyboardActions(onSend = { if (enabled && draft.isNotBlank()) onSend() }),
-          shape = RoundedCornerShape(8.dp),
           modifier = Modifier.weight(1f),
-          maxLines = 3,
         )
         ComposerActionButton(
           icon = if (isRecordingVoice) Icons.Rounded.Stop else Icons.Rounded.Mic,
@@ -793,18 +985,52 @@ private fun MessageComposer(
           enabled = enabled && !isRecordingVoice && !isSendingLocation,
           onClick = onPickImage,
         )
-        Button(
-          onClick = onSend,
+        ComposerActionButton(
+          icon = Icons.AutoMirrored.Rounded.Send,
+          contentDescription = "Send message",
           enabled = enabled && draft.isNotBlank() && !isRecordingVoice && !isSendingLocation,
-          shape = RoundedCornerShape(8.dp),
-          modifier = Modifier.height(50.dp),
-          contentPadding = PaddingValues(horizontal = 13.dp),
-          colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
-        ) {
-          Icon(Icons.AutoMirrored.Rounded.Send, contentDescription = null, modifier = Modifier.size(18.dp))
-        }
+          primary = true,
+          onClick = onSend,
+        )
       }
     }
+  }
+}
+
+@Composable
+private fun CompactMessageField(
+  value: String,
+  onValueChange: (String) -> Unit,
+  enabled: Boolean,
+  keyboardOptions: KeyboardOptions,
+  keyboardActions: KeyboardActions,
+  modifier: Modifier = Modifier,
+) {
+  Surface(
+    color = MaterialTheme.colorScheme.background,
+    contentColor = MaterialTheme.colorScheme.onSurface,
+    shape = RoundedCornerShape(8.dp),
+    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+    modifier = modifier.height(42.dp),
+  ) {
+    BasicTextField(
+      value = value,
+      onValueChange = onValueChange,
+      enabled = enabled,
+      singleLine = true,
+      textStyle = MaterialTheme.typography.bodyLarge.copy(color = if (enabled) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant),
+      keyboardOptions = keyboardOptions,
+      keyboardActions = keyboardActions,
+      cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+      decorationBox = { innerTextField ->
+        Box(modifier = Modifier.fillMaxSize().padding(horizontal = 13.dp), contentAlignment = Alignment.CenterStart) {
+          if (value.isEmpty()) {
+            Text("Message", style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.62f), maxLines = 1)
+          }
+          innerTextField()
+        }
+      },
+    )
   }
 }
 
@@ -814,23 +1040,26 @@ private fun ComposerActionButton(
   contentDescription: String,
   enabled: Boolean,
   selected: Boolean = false,
+  primary: Boolean = false,
   onClick: () -> Unit,
 ) {
   val container =
     when {
+      primary && enabled -> MaterialTheme.colorScheme.primary
       selected -> MaterialTheme.colorScheme.errorContainer
       else -> MaterialTheme.colorScheme.surfaceVariant
     }
   val content =
     when {
       !enabled -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.38f)
+      primary -> MaterialTheme.colorScheme.onPrimary
       selected -> MaterialTheme.colorScheme.error
       else -> MaterialTheme.colorScheme.onSurfaceVariant
     }
 
   Surface(shape = CircleShape, color = container, contentColor = content) {
-    IconButton(onClick = onClick, enabled = enabled, modifier = Modifier.size(46.dp)) {
-      Icon(icon, contentDescription = contentDescription, modifier = Modifier.size(21.dp))
+    IconButton(onClick = onClick, enabled = enabled, modifier = Modifier.size(36.dp)) {
+      Icon(icon, contentDescription = contentDescription, modifier = Modifier.size(17.dp))
     }
   }
 }
