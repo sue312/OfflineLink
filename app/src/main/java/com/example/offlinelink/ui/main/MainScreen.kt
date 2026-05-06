@@ -5,6 +5,8 @@ import android.content.pm.PackageManager
 import android.graphics.BitmapFactory
 import android.net.Uri
 import android.os.Build
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateContentSize
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -12,6 +14,7 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -43,6 +46,8 @@ import androidx.compose.material.icons.rounded.CallEnd
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.ErrorOutline
+import androidx.compose.material.icons.rounded.ExpandLess
+import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material.icons.rounded.Groups
 import androidx.compose.material.icons.rounded.Image
 import androidx.compose.material.icons.rounded.Lock
@@ -69,6 +74,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -220,6 +226,7 @@ private fun OfflineChatContent(
   var isRecordingCallVoice by remember { mutableStateOf(false) }
   var isSendingLocation by remember { mutableStateOf(false) }
   var voiceError by remember { mutableStateOf<String?>(null) }
+  var isSetupExpanded by rememberSaveable { mutableStateOf(defaultSetupExpanded(state.messages.size)) }
   val listState = rememberLazyListState()
   val keyboardController = LocalSoftwareKeyboardController.current
   val ctx = LocalContext.current
@@ -227,6 +234,12 @@ private fun OfflineChatContent(
   LaunchedEffect(state.messageRevision) {
     if (state.messages.isNotEmpty()) {
       listState.animateScrollToItem(state.messages.lastIndex)
+    }
+  }
+
+  LaunchedEffect(state.pendingConnection?.endpointId, state.callState.status) {
+    if (state.pendingConnection != null || state.callState.status != CallStatus.Idle) {
+      isSetupExpanded = true
     }
   }
 
@@ -258,29 +271,20 @@ private fun OfflineChatContent(
         PermissionPanel(onRequestPermissions, modifier = Modifier.fillMaxWidth())
       } else {
         Alerts(groupWarning = state.groupWarning, lastError = state.lastError)
-        if (state.status == ConnectionStatus.Connected) {
-          ConnectedSummary(state = state, onDisconnect = onDisconnect, onStartCall = onStartCall)
-        } else {
-          ConnectionConsole(
-            state = state,
-            onDisplayNameChange = onDisplayNameChange,
-            onGroupNameChange = onGroupNameChange,
-            onAdvertise = onAdvertise,
-            onDiscover = onDiscover,
-            onDisconnect = onDisconnect,
-          )
-        }
-        if (state.connectedEndpoints.isNotEmpty() || state.groupMembers.isNotEmpty()) {
-          MembersPanel(localDisplayName = state.displayName, members = state.groupMembers)
-        }
-        state.pendingConnection?.let { pending ->
-          PendingConnectionPanel(
-            title = pending.endpointName,
-            token = pending.authenticationToken,
-            onAccept = onAccept,
-            onReject = onReject,
-          )
-        }
+        SetupDisclosure(
+          state = state,
+          expanded = isSetupExpanded,
+          onToggle = { isSetupExpanded = !isSetupExpanded },
+          onDisplayNameChange = onDisplayNameChange,
+          onGroupNameChange = onGroupNameChange,
+          onAdvertise = onAdvertise,
+          onDiscover = onDiscover,
+          onDisconnect = onDisconnect,
+          onStartCall = onStartCall,
+          onConnect = onConnect,
+          onAccept = onAccept,
+          onReject = onReject,
+        )
         if (state.callState.status != CallStatus.Idle) {
           CallPanel(
             callState = state.callState,
@@ -320,9 +324,6 @@ private fun OfflineChatContent(
               }
             },
           )
-        }
-        if (state.status != ConnectionStatus.Connected) {
-          EndpointList(endpoints = state.discoveredEndpoints, onConnect = onConnect)
         }
         MessageList(
           messages = state.messages,
@@ -487,6 +488,104 @@ private fun PermissionPanel(
       }
       Text("Nearby, Bluetooth, location, and microphone access are required before this phone can find devices or send voice messages.")
       Button(onClick = onRequestPermissions, shape = RoundedCornerShape(8.dp)) { Text("Grant permissions") }
+    }
+  }
+}
+
+@Composable
+private fun SetupDisclosure(
+  state: ChatUiState,
+  expanded: Boolean,
+  onToggle: () -> Unit,
+  onDisplayNameChange: (String) -> Unit,
+  onGroupNameChange: (String) -> Unit,
+  onAdvertise: () -> Unit,
+  onDiscover: () -> Unit,
+  onDisconnect: () -> Unit,
+  onStartCall: () -> Unit,
+  onConnect: (NearbyEndpoint) -> Unit,
+  onAccept: () -> Unit,
+  onReject: () -> Unit,
+) {
+  Column(
+    modifier = Modifier.fillMaxWidth().animateContentSize(),
+    verticalArrangement = Arrangement.spacedBy(8.dp),
+  ) {
+    SetupToggleHeader(state = state, expanded = expanded, onToggle = onToggle)
+    AnimatedVisibility(visible = expanded) {
+      Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        if (state.status == ConnectionStatus.Connected) {
+          ConnectedSummary(state = state, onDisconnect = onDisconnect, onStartCall = onStartCall)
+        } else {
+          ConnectionConsole(
+            state = state,
+            onDisplayNameChange = onDisplayNameChange,
+            onGroupNameChange = onGroupNameChange,
+            onAdvertise = onAdvertise,
+            onDiscover = onDiscover,
+            onDisconnect = onDisconnect,
+          )
+        }
+        if (state.connectedEndpoints.isNotEmpty() || state.groupMembers.isNotEmpty()) {
+          MembersPanel(localDisplayName = state.displayName, members = state.groupMembers)
+        }
+        state.pendingConnection?.let { pending ->
+          PendingConnectionPanel(
+            title = pending.endpointName,
+            token = pending.authenticationToken,
+            onAccept = onAccept,
+            onReject = onReject,
+          )
+        }
+        if (state.status != ConnectionStatus.Connected) {
+          EndpointList(endpoints = state.discoveredEndpoints, onConnect = onConnect)
+        }
+      }
+    }
+  }
+}
+
+@Composable
+private fun SetupToggleHeader(
+  state: ChatUiState,
+  expanded: Boolean,
+  onToggle: () -> Unit,
+) {
+  val dotColor =
+    when (state.status) {
+      ConnectionStatus.Connected -> MaterialTheme.colorScheme.primary
+      ConnectionStatus.Advertising, ConnectionStatus.Discovering, ConnectionStatus.Connecting -> MaterialTheme.colorScheme.secondary
+      ConnectionStatus.Error -> MaterialTheme.colorScheme.error
+      else -> MaterialTheme.colorScheme.outline
+    }
+
+  Surface(
+    color = MaterialTheme.colorScheme.surface,
+    contentColor = MaterialTheme.colorScheme.onSurface,
+    shape = RoundedCornerShape(8.dp),
+    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+    modifier = Modifier.fillMaxWidth(),
+  ) {
+    Row(
+      modifier =
+        Modifier
+          .fillMaxWidth()
+          .clickable(onClick = onToggle)
+          .padding(horizontal = 12.dp, vertical = 9.dp),
+      horizontalArrangement = Arrangement.spacedBy(10.dp),
+      verticalAlignment = Alignment.CenterVertically,
+    ) {
+      Box(modifier = Modifier.size(8.dp).background(dotColor, CircleShape))
+      Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(1.dp)) {
+        Text("Setup", style = MaterialTheme.typography.titleMedium)
+        Text(setupSummaryText(state), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
+      }
+      Icon(
+        imageVector = if (expanded) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore,
+        contentDescription = if (expanded) "Collapse setup" else "Expand setup",
+        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.size(22.dp),
+      )
     }
   }
 }
@@ -1354,6 +1453,24 @@ internal fun avatarInitials(name: String): String {
 
 internal fun defaultDeviceDisplayName(modelName: String): String =
   modelName.trim().ifBlank { "OfflineLink" }
+
+internal fun defaultSetupExpanded(messageCount: Int): Boolean = messageCount == 0
+
+internal fun setupSummaryText(state: ChatUiState): String {
+  val memberCount = state.groupMembers.size + 1
+  return when {
+    state.pendingConnection != null -> "Request from ${state.pendingConnection.endpointName}"
+    state.status == ConnectionStatus.Connected -> "${state.statusMessage} - ${countLabel(memberCount, "member")}"
+    state.discoveredEndpoints.isNotEmpty() -> "${countLabel(state.discoveredEndpoints.size, "nearby device")} - ${state.statusMessage}"
+    state.groupMembers.isNotEmpty() -> "${countLabel(memberCount, "member")} - ${state.statusMessage}"
+    else -> state.statusMessage
+  }
+}
+
+private fun countLabel(
+  count: Int,
+  singular: String,
+): String = "$count $singular${if (count == 1) "" else "s"}"
 
 private fun ConnectionStatus.label(): String =
   when (this) {

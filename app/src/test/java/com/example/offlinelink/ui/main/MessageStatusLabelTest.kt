@@ -26,6 +26,12 @@ class MessageStatusLabelTest {
   }
 
   @Test
+  fun setupPanelDefaultsCollapsedWhenMessagesExist() {
+    assertEquals(true, defaultSetupExpanded(messageCount = 0))
+    assertEquals(false, defaultSetupExpanded(messageCount = 1))
+  }
+
+  @Test
   fun senderDisplayNameResolvesLocalAndKnownGroupMembers() {
     assertEquals(
       "You",
