@@ -243,7 +243,6 @@ fun MainScreen(
       viewModel.setAvatarName(avatarName)
     },
     onDiscover = viewModel::startDiscovery,
-    onRecoverGroup = viewModel::recoverGroup,
     onConnect = viewModel::connectTo,
     onAccept = viewModel::acceptPendingConnection,
     onReject = viewModel::rejectPendingConnection,
@@ -289,7 +288,6 @@ private fun OfflineChatContent(
   onDisplayNameChange: (String) -> Unit,
   onAvatarNameChange: (String) -> Unit,
   onDiscover: () -> Unit,
-  onRecoverGroup: () -> Unit,
   onConnect: (NearbyEndpoint) -> Unit,
   onAccept: () -> Unit,
   onReject: () -> Unit,
@@ -429,7 +427,6 @@ private fun OfflineChatContent(
           expanded = isSetupExpanded,
           onToggle = { isSetupExpanded = !isSetupExpanded },
           onDiscover = onDiscover,
-          onRecoverGroup = onRecoverGroup,
           onDisconnect = onDisconnect,
           onStartCall = onStartCall,
           onConnect = onConnect,
@@ -771,7 +768,6 @@ private fun SetupDisclosure(
   expanded: Boolean,
   onToggle: () -> Unit,
   onDiscover: () -> Unit,
-  onRecoverGroup: () -> Unit,
   onDisconnect: () -> Unit,
   onStartCall: (String?) -> Unit,
   onConnect: (NearbyEndpoint) -> Unit,
@@ -786,18 +782,19 @@ private fun SetupDisclosure(
     AnimatedVisibility(visible = expanded) {
       Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         if (state.status == ConnectionStatus.Connected) {
-          ConnectedSummary(state = state, onDisconnect = onDisconnect, onStartCall = onStartCall)
+          MembersPanel(
+            state = state,
+            onDisconnect = onDisconnect,
+            onStartCall = onStartCall,
+          )
         } else {
           ConnectionConsole(
             state = state,
             onDiscover = onDiscover,
           )
-        }
-        if (state.connectedEndpoints.isNotEmpty() || state.groupMembers.isNotEmpty()) {
-          MembersPanel(localDisplayName = state.displayName, localAvatarName = state.avatarName, members = state.groupMembers)
-        }
-        if (state.groupMembers.isNotEmpty() || state.status == ConnectionStatus.Disconnected || state.status == ConnectionStatus.Error) {
-          RecoveryPanel(state = state, onRecoverGroup = onRecoverGroup)
+          if (state.connectedEndpoints.isNotEmpty() || state.groupMembers.isNotEmpty()) {
+            MembersPanel(state = state)
+          }
         }
         state.pendingConnection?.let { pending ->
           PendingConnectionPanel(
@@ -847,7 +844,7 @@ private fun SetupToggleHeader(
     ) {
       Box(modifier = Modifier.size(8.dp).background(dotColor, CircleShape))
       Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(1.dp)) {
-        Text("Setup", style = MaterialTheme.typography.titleMedium)
+        Text(setupHeaderTitle(state), style = MaterialTheme.typography.titleMedium)
         Text(setupSummaryText(state), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
       }
       Icon(
@@ -936,114 +933,6 @@ private fun ConnectionActionButton(
       }
     if (label.isNotEmpty()) {
       Text(label, style = MaterialTheme.typography.labelMedium, color = labelColor, maxLines = 1, softWrap = false)
-    }
-  }
-}
-
-@Composable
-private fun ConnectedSummary(
-  state: ChatUiState,
-  onDisconnect: () -> Unit,
-  onStartCall: (String?) -> Unit,
-) {
-  var callMenuExpanded by remember { mutableStateOf(false) }
-  val callTargets = callTargetOptions(state)
-  val canStartCall = state.callState.status == CallStatus.Idle && state.connectedEndpoints.isNotEmpty() && callTargets.isNotEmpty()
-  Surface(
-    color = MaterialTheme.colorScheme.surface,
-    shape = RoundedCornerShape(8.dp),
-    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-    modifier = Modifier.fillMaxWidth(),
-  ) {
-    Row(
-      modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
-      horizontalArrangement = Arrangement.spacedBy(10.dp),
-      verticalAlignment = Alignment.CenterVertically,
-    ) {
-      Surface(color = MaterialTheme.colorScheme.primaryContainer, contentColor = MaterialTheme.colorScheme.primary, shape = CircleShape) {
-        Icon(Icons.Rounded.Groups, contentDescription = null, modifier = Modifier.padding(8.dp).size(18.dp))
-      }
-      Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(1.dp)) {
-        Text(state.statusMessage, style = MaterialTheme.typography.titleMedium)
-        Text(connectedSummarySubtitle(state), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-      }
-      Box {
-        ComposerActionButton(
-          icon = Icons.Rounded.Call,
-          contentDescription = "Start call",
-          enabled = canStartCall,
-          primary = canStartCall,
-          onClick = {
-            if (callTargets.size <= 1) {
-              onStartCall(callTargets.firstOrNull()?.id)
-            } else {
-              callMenuExpanded = true
-            }
-          },
-        )
-        DropdownMenu(expanded = callMenuExpanded, onDismissRequest = { callMenuExpanded = false }) {
-          callTargets.forEach { target ->
-            DropdownMenuItem(
-              text = {
-                Column(verticalArrangement = Arrangement.spacedBy(1.dp)) {
-                  Text("Call ${target.name}")
-                  if (!target.isDirect) {
-                    Text("via relay", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                  }
-                }
-              },
-              leadingIcon = { Icon(Icons.Rounded.Call, contentDescription = null, modifier = Modifier.size(18.dp)) },
-              onClick = {
-                callMenuExpanded = false
-                onStartCall(target.id)
-              },
-            )
-          }
-        }
-      }
-      OutlinedButton(
-        onClick = onDisconnect,
-        shape = RoundedCornerShape(8.dp),
-        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
-      ) {
-        Icon(Icons.Rounded.Close, contentDescription = null, modifier = Modifier.size(17.dp))
-        Spacer(Modifier.width(5.dp))
-        Text("Leave")
-      }
-    }
-  }
-}
-
-@Composable
-private fun RecoveryPanel(
-  state: ChatUiState,
-  onRecoverGroup: () -> Unit,
-) {
-  Surface(
-    color = MaterialTheme.colorScheme.surface,
-    shape = RoundedCornerShape(8.dp),
-    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-    modifier = Modifier.fillMaxWidth(),
-  ) {
-    Row(
-      modifier = Modifier.padding(horizontal = 12.dp, vertical = 9.dp),
-      horizontalArrangement = Arrangement.spacedBy(10.dp),
-      verticalAlignment = Alignment.CenterVertically,
-    ) {
-      Icon(Icons.Rounded.Refresh, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(20.dp))
-      Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(1.dp)) {
-        Text("Reconnect members", style = MaterialTheme.typography.titleMedium)
-        Text(recoveryHint(state), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2)
-      }
-      OutlinedButton(
-        onClick = onRecoverGroup,
-        shape = RoundedCornerShape(8.dp),
-        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 7.dp),
-      ) {
-        Icon(Icons.Rounded.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
-        Spacer(Modifier.width(5.dp))
-        Text("Reconnect")
-      }
     }
   }
 }
@@ -1231,12 +1120,17 @@ private fun CallPanel(
 
 @Composable
 private fun MembersPanel(
-  localDisplayName: String,
-  localAvatarName: String,
-  members: List<GroupMember>,
+  state: ChatUiState,
+  onDisconnect: (() -> Unit)? = null,
+  onStartCall: ((String?) -> Unit)? = null,
 ) {
+  var callMenuExpanded by remember { mutableStateOf(false) }
+  val members = state.groupMembers
   val visibleMembers = members.take(3)
   val overflow = members.size - visibleMembers.size
+  val canShowActions = onDisconnect != null && onStartCall != null
+  val callTargets = if (canShowActions) callTargetOptions(state) else emptyList()
+  val canStartCall = canShowActions && state.callState.status == CallStatus.Idle && state.connectedEndpoints.isNotEmpty() && callTargets.isNotEmpty()
 
   Surface(
     color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.55f),
@@ -1252,9 +1146,9 @@ private fun MembersPanel(
       Icon(Icons.Rounded.Groups, contentDescription = null, modifier = Modifier.size(20.dp))
       Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(1.dp)) {
         Text("Members (${members.size + 1})", style = MaterialTheme.typography.titleMedium)
-        Text(localMemberSubtitle(localDisplayName), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(localMemberSubtitle(state.displayName), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
       }
-      Avatar(localAvatarName.ifBlank { localDisplayName }, color = MaterialTheme.colorScheme.primary)
+      Avatar(state.avatarName.ifBlank { state.displayName }, color = MaterialTheme.colorScheme.primary)
       visibleMembers.forEach { member ->
         MemberAvatar(member)
       }
@@ -1262,6 +1156,48 @@ private fun MembersPanel(
         Surface(color = MaterialTheme.colorScheme.surface, shape = CircleShape) {
           Text("+$overflow", modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp), style = MaterialTheme.typography.labelMedium)
         }
+      }
+      if (canShowActions) {
+        Box {
+          ComposerActionButton(
+            icon = Icons.Rounded.Call,
+            contentDescription = "Start call",
+            enabled = canStartCall,
+            primary = canStartCall,
+            onClick = {
+              if (callTargets.size <= 1) {
+                onStartCall(callTargets.firstOrNull()?.id)
+              } else {
+                callMenuExpanded = true
+              }
+            },
+          )
+          DropdownMenu(expanded = callMenuExpanded, onDismissRequest = { callMenuExpanded = false }) {
+            callTargets.forEach { target ->
+              DropdownMenuItem(
+                text = {
+                  Column(verticalArrangement = Arrangement.spacedBy(1.dp)) {
+                    Text("Call ${target.name}")
+                    if (!target.isDirect) {
+                      Text("via relay", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                  }
+                },
+                leadingIcon = { Icon(Icons.Rounded.Call, contentDescription = null, modifier = Modifier.size(18.dp)) },
+                onClick = {
+                  callMenuExpanded = false
+                  onStartCall(target.id)
+                },
+              )
+            }
+          }
+        }
+        ComposerActionButton(
+          icon = Icons.Rounded.Close,
+          contentDescription = "Leave",
+          enabled = true,
+          onClick = onDisconnect,
+        )
       }
     }
   }
@@ -1967,21 +1903,30 @@ internal fun connectionSetupActionLabels(status: ConnectionStatus): List<String>
 internal fun connectionSetupFieldLabels(status: ConnectionStatus): List<String> =
   emptyList()
 
+internal fun connectionRecoveryActionLabels(state: ChatUiState): List<String> =
+  emptyList()
+
 internal fun nearbyEmptyStateText(): String =
   "No devices found yet. Keep this screen open while another phone taps Search."
 
 internal fun connectedSummarySubtitle(state: ChatUiState): String =
   countLabel(state.groupMembers.size + 1, "member")
 
+internal fun connectedSetupSectionLabels(state: ChatUiState): List<String> =
+  if (state.status == ConnectionStatus.Connected) listOf("Members") else emptyList()
+
 internal fun localMemberSubtitle(localDisplayName: String): String = "You: ${localDisplayName.ifBlank { "OfflineLink" }}"
 
 internal fun groupMemberStatusText(status: GroupMemberStatus): String? = null
+
+internal fun setupHeaderTitle(state: ChatUiState): String =
+  if (state.status == ConnectionStatus.Connected) "Connection" else "Setup"
 
 internal fun setupSummaryText(state: ChatUiState): String {
   val memberCount = state.groupMembers.size + 1
   return when {
     state.pendingConnection != null -> "Request from ${state.pendingConnection.endpointName}"
-    state.status == ConnectionStatus.Connected -> "${state.statusMessage} - ${countLabel(memberCount, "member")}"
+    state.status == ConnectionStatus.Connected -> countLabel(memberCount, "member")
     state.discoveredEndpoints.isNotEmpty() -> "${countLabel(state.discoveredEndpoints.size, "nearby device")} - ${state.statusMessage}"
     state.groupMembers.isNotEmpty() -> "${countLabel(memberCount, "member")} - ${state.statusMessage}"
     else -> state.statusMessage
@@ -1992,14 +1937,6 @@ private fun countLabel(
   count: Int,
   singular: String,
 ): String = "$count $singular${if (count == 1) "" else "s"}"
-
-private fun recoveryHint(state: ChatUiState): String =
-  when {
-    state.connectedEndpoints.isNotEmpty() -> "Refresh member status and retry pending messages."
-    state.groupMembers.any { it.status == GroupMemberStatus.Reconnecting } -> "Keep nearby phones open while members reconnect."
-    state.groupMembers.isNotEmpty() -> "Try to find the last known members again."
-    else -> "Search nearby devices again."
-  }
 
 private fun ChatMessage.copyText(): String =
   when (kind) {
@@ -2173,7 +2110,6 @@ private fun OfflineChatContentPreview() {
       onDisplayNameChange = {},
       onAvatarNameChange = {},
       onDiscover = {},
-      onRecoverGroup = {},
       onConnect = {},
       onAccept = {},
       onReject = {},

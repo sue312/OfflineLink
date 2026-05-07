@@ -58,6 +58,29 @@ class MessageStatusLabelTest {
   }
 
   @Test
+  fun setupDoesNotShowSeparateReconnectAction() {
+    assertEquals(
+      emptyList<String>(),
+      connectionRecoveryActionLabels(
+        ChatUiState(
+          localDeviceId = "device-a",
+          status = ConnectionStatus.Disconnected,
+        ),
+      ),
+    )
+    assertEquals(
+      emptyList<String>(),
+      connectionRecoveryActionLabels(
+        ChatUiState(
+          localDeviceId = "device-a",
+          status = ConnectionStatus.Error,
+          groupMembers = listOf(GroupMember("device-b", "Phone B")),
+        ),
+      ),
+    )
+  }
+
+  @Test
   fun searchEmptyStateDoesNotMentionVisibleMode() {
     assertEquals(
       "No devices found yet. Keep this screen open while another phone taps Search.",
@@ -78,6 +101,25 @@ class MessageStatusLabelTest {
         ),
       ),
     )
+  }
+
+  @Test
+  fun connectedSetupUsesSingleMembersSection() {
+    val state =
+      ChatUiState(
+        localDeviceId = "device-a",
+        status = ConnectionStatus.Connected,
+        statusMessage = "Connected to Phone B",
+        connectedEndpoints = listOf(com.example.offlinelink.model.NearbyEndpoint("device-b", "Phone B")),
+        groupMembers = listOf(GroupMember("device-b", "Phone B")),
+      )
+
+    assertEquals(
+      listOf("Members"),
+      connectedSetupSectionLabels(state),
+    )
+    assertEquals("Connection", setupHeaderTitle(state))
+    assertEquals("2 members", setupSummaryText(state))
   }
 
   @Test
