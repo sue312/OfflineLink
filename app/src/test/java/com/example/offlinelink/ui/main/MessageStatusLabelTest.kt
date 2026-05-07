@@ -3,9 +3,11 @@ package com.example.offlinelink.ui.main
 import com.example.offlinelink.model.GroupMember
 import com.example.offlinelink.model.GroupMemberStatus
 import com.example.offlinelink.model.CallStatus
+import com.example.offlinelink.model.CallToneMode
 import com.example.offlinelink.model.ChatUiState
 import com.example.offlinelink.model.ConnectionStatus
 import com.example.offlinelink.model.MessageStatus
+import com.example.offlinelink.model.callToneModeFor
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
@@ -142,6 +144,14 @@ class MessageStatusLabelTest {
     assertEquals(true, shouldUseFullScreenCallUi(CallStatus.Active))
     assertEquals(true, shouldUseFullScreenCallUi(CallStatus.Incoming))
     assertEquals(false, shouldUseFullScreenCallUi(CallStatus.Idle))
+  }
+
+  @Test
+  fun callToneOnlyPlaysWhileRingingOrCalling() {
+    assertEquals(CallToneMode.Outgoing, callToneModeFor(CallStatus.Outgoing))
+    assertEquals(CallToneMode.Incoming, callToneModeFor(CallStatus.Incoming))
+    assertEquals(CallToneMode.None, callToneModeFor(CallStatus.Active))
+    assertEquals(CallToneMode.None, callToneModeFor(CallStatus.Idle))
   }
 
   @Test

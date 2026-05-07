@@ -134,6 +134,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation3.runtime.NavKey
 import com.example.offlinelink.audio.CallAudioFrame
 import com.example.offlinelink.audio.CallAudioStream
+import com.example.offlinelink.audio.CallTonePlayer
 import com.example.offlinelink.audio.RecordedVoiceClip
 import com.example.offlinelink.audio.VoicePlayer
 import com.example.offlinelink.audio.VoiceRecorder
@@ -153,6 +154,7 @@ import com.example.offlinelink.model.MessageKind
 import com.example.offlinelink.model.MessageStatus
 import com.example.offlinelink.model.NearbyEndpoint
 import com.example.offlinelink.model.VoiceAttachment
+import com.example.offlinelink.model.callToneModeFor
 import com.example.offlinelink.permissions.requiredNearbyRuntimePermissions
 import com.example.offlinelink.service.OfflineKeepAliveService
 import com.example.offlinelink.theme.MyApplicationTheme
@@ -209,6 +211,7 @@ fun MainScreen(
   val voiceRecorder = remember(context) { VoiceRecorder(context.applicationContext) }
   val voicePlayer = remember(context) { VoicePlayer(context.applicationContext) }
   val callAudioStream = remember(context) { CallAudioStream(context.applicationContext) }
+  val callTonePlayer = remember(context) { CallTonePlayer(context.applicationContext) }
   val state by viewModel.uiState.collectAsStateWithLifecycle()
   val requiredPermissions = remember { requiredNearbyRuntimePermissions() }
   var hasPermissions by remember {
@@ -222,12 +225,16 @@ fun MainScreen(
     rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
       if (uri != null) viewModel.sendImage(uri) { }
     }
-  DisposableEffect(voiceRecorder, voicePlayer, callAudioStream) {
+  DisposableEffect(voiceRecorder, voicePlayer, callAudioStream, callTonePlayer) {
     onDispose {
       voiceRecorder.cancel()
       voicePlayer.stop()
       callAudioStream.stop()
+      callTonePlayer.release()
     }
+  }
+  LaunchedEffect(state.callState.status) {
+    callTonePlayer.play(callToneModeFor(state.callState.status))
   }
   LaunchedEffect(state.connectedEndpoints.isNotEmpty(), state.callState.status) {
     val shouldKeepAlive = state.connectedEndpoints.isNotEmpty() || state.callState.status != CallStatus.Idle
