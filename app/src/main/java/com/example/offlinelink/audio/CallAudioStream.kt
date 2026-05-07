@@ -16,6 +16,7 @@ import android.media.audiofx.AudioEffect
 import android.media.audiofx.AutomaticGainControl
 import android.media.audiofx.NoiseSuppressor
 import android.os.Build
+import android.os.Process
 import androidx.core.content.ContextCompat
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -164,6 +165,7 @@ class CallAudioStream(context: Context) {
     record: AudioRecord,
     onFrame: (CallAudioFrame) -> Unit,
   ) {
+    runCatching { Process.setThreadPriority(Process.THREAD_PRIORITY_AUDIO) }
     val buffer = ByteArray(FRAME_BYTES)
     while (running.get()) {
       val read = record.read(buffer, 0, buffer.size, AudioRecord.READ_BLOCKING)

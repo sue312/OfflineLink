@@ -12,6 +12,8 @@ sealed interface DecodedWireMessage {
     val groupName: String,
     override val sentAt: Long,
     val members: List<WireMember> = emptyList(),
+    val protocolVersion: Int = ChatProtocol.CURRENT_PROTOCOL_VERSION,
+    val capabilities: Set<String> = emptySet(),
   ) : DecodedWireMessage
 
   data class Message(
@@ -113,7 +115,11 @@ data class WireMember(
 )
 
 object ChatProtocol {
-  private const val PROTOCOL_VERSION = 1
+  const val CURRENT_PROTOCOL_VERSION = 1
+  const val CAPABILITY_CALL_TARGETING = "call_targeting"
+  const val CAPABILITY_PRIORITY_QUEUE = "priority_queue"
+  val DEFAULT_CAPABILITIES: Set<String> = setOf(CAPABILITY_CALL_TARGETING)
+
   private const val TYPE_HELLO = "hello"
   private const val TYPE_MESSAGE = "message"
   private const val TYPE_VOICE_MESSAGE = "voice_message"
@@ -131,6 +137,12 @@ object ChatProtocol {
     ignoreUnknownKeys = true
     encodeDefaults = true
   }
+
+  fun supportsCallTargeting(capabilities: Collection<String>): Boolean =
+    CAPABILITY_CALL_TARGETING in capabilities
+
+  fun supportsPriorityQueue(capabilities: Collection<String>): Boolean =
+    CAPABILITY_PRIORITY_QUEUE in capabilities
 
   fun encodeHello(
     senderId: String,
@@ -250,7 +262,7 @@ object ChatProtocol {
 
   fun decode(bytes: ByteArray): DecodedWireMessage {
     val envelope = json.decodeFromString(WireEnvelope.serializer(), bytes.decodeToString())
-    require(envelope.protocolVersion == PROTOCOL_VERSION) {
+    require(envelope.protocolVersion <= CURRENT_PROTOCOL_VERSION) {
       "Unsupported protocol version ${envelope.protocolVersion}"
     }
     return when (envelope.type) {
@@ -262,6 +274,8 @@ object ChatProtocol {
           payload.groupName,
           envelope.sentAt,
           payload.members.map { WireMember(it.id, it.displayName) },
+          envelope.protocolVersion,
+          envelope.capabilities.toSet(),
         )
       }
       TYPE_MESSAGE -> {
@@ -386,7 +400,8 @@ object ChatProtocol {
     val envelope =
       WireEnvelope(
         type = type,
-        protocolVersion = PROTOCOL_VERSION,
+        protocolVersion = CURRENT_PROTOCOL_VERSION,
+        capabilities = DEFAULT_CAPABILITIES.toList(),
         payload = json.encodeToString(payload),
         sentAt = sentAt,
       )
@@ -397,7 +412,8 @@ object ChatProtocol {
 @Serializable
 private data class WireEnvelope(
   val type: String,
-  val protocolVersion: Int,
+  val protocolVersion: Int = ChatProtocol.CURRENT_PROTOCOL_VERSION,
+  val capabilities: List<String> = emptyList(),
   val payload: String,
   val sentAt: Long,
 )

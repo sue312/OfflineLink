@@ -1,5 +1,6 @@
 package com.example.offlinelink.ui.main
 
+import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.offlinelink.audio.isStreamingCallAudioMimeType
@@ -7,7 +8,6 @@ import com.example.offlinelink.chat.ChatSessionStore
 import com.example.offlinelink.data.ChatHistoryRepository
 import com.example.offlinelink.data.NoOpChatHistoryRepository
 import com.example.offlinelink.image.ImageCompressor
-import android.net.Uri
 import com.example.offlinelink.location.DeviceLocation
 import com.example.offlinelink.model.CallAudioPlaybackFrame
 import com.example.offlinelink.model.CallStatus
@@ -23,6 +23,8 @@ import com.example.offlinelink.protocol.ChatProtocol
 import com.example.offlinelink.protocol.DecodedWireMessage
 import com.example.offlinelink.protocol.WireMember
 import com.example.offlinelink.transport.ChatTransport
+import com.example.offlinelink.transport.PriorityPayloadSender
+import com.example.offlinelink.transport.PriorityPayloadSender.PayloadPriority
 import com.example.offlinelink.transport.TransportEvent
 import java.util.UUID
 import kotlin.io.encoding.Base64
@@ -47,6 +49,7 @@ class MainScreenViewModel(
   private val historyRepository: ChatHistoryRepository = NoOpChatHistoryRepository,
 ) : ViewModel() {
   private val store = ChatSessionStore(localDeviceId = localDeviceId)
+  private val payloadSender = PriorityPayloadSender(transport)
   private val endpointMemberIds = mutableMapOf<String, String>()
   private var recoveryMode = false
   private val recoveryConnectionAttempts = mutableSetOf<String>()
@@ -163,7 +166,7 @@ class MainScreenViewModel(
     val pendingEndpointIds = endpoints.map { it.id }.toMutableSet()
     var hasFailure = false
     endpoints.forEach { endpoint ->
-      transport.send(endpoint.id, bytes) { result ->
+      sendPayload(endpoint.id, bytes, PayloadPriority.Text) { result ->
         if (result.isFailure) {
           hasFailure = true
           store.setStatus(ConnectionStatus.Error, "Message failed", result.exceptionOrNull()?.message)
@@ -218,7 +221,7 @@ class MainScreenViewModel(
         mimeType = mimeType,
         createdAt = System.currentTimeMillis(),
       )
-    transport.send(endpoint.id, bytes) { result ->
+    sendPayload(endpoint.id, bytes, callVoicePriority(mimeType)) { result ->
       if (result.isSuccess) {
         store.setCallActivity(if (isStreamingCallAudioMimeType(mimeType)) "Live voice" else "Voice sent")
       } else {
@@ -256,7 +259,7 @@ class MainScreenViewModel(
           val pendingEndpointIds = endpoints.map { it.id }.toMutableSet()
           var hasFailure = false
           endpoints.forEach { endpoint ->
-            transport.send(endpoint.id, bytes) { result ->
+            sendPayload(endpoint.id, bytes, PayloadPriority.Location) { result ->
               if (result.isFailure) {
                 hasFailure = true
                 store.setStatus(ConnectionStatus.Error, "Location send failed", result.exceptionOrNull()?.message)
@@ -310,7 +313,7 @@ class MainScreenViewModel(
         val pendingEndpointIds = endpoints.map { it.id }.toMutableSet()
         var hasFailure = false
         endpoints.forEach { endpoint ->
-          transport.send(endpoint.id, bytes) { result ->
+          sendPayload(endpoint.id, bytes, PayloadPriority.Image) { result ->
             if (result.isFailure) {
               hasFailure = true
               store.setStatus(ConnectionStatus.Error, "Image send failed", result.exceptionOrNull()?.message)
@@ -353,7 +356,7 @@ class MainScreenViewModel(
       peerMemberId = targetMemberId,
       peerName = callTargetName(peerEndpointId, endpoint),
     )
-    transport.send(
+    sendPayload(
       endpoint.id,
       ChatProtocol.encodeCallRequest(
         callId = callId,
@@ -361,6 +364,7 @@ class MainScreenViewModel(
         targetId = targetMemberId,
         createdAt = System.currentTimeMillis(),
       ),
+      PayloadPriority.CallSignal,
     ) { result ->
       result.onFailure {
         store.endCall(callId)
@@ -375,7 +379,7 @@ class MainScreenViewModel(
     val peerEndpointId = callState.peerEndpointId ?: return
     if (callState.status != CallStatus.Incoming) return
     if (!store.acceptCall(callId)) return
-    transport.send(
+    sendPayload(
       peerEndpointId,
       ChatProtocol.encodeCallAccept(
         callId = callId,
@@ -383,6 +387,7 @@ class MainScreenViewModel(
         targetId = callState.peerMemberId,
         createdAt = System.currentTimeMillis(),
       ),
+      PayloadPriority.CallSignal,
     ) { result ->
       result.onFailure {
         store.setStatus(ConnectionStatus.Error, "Could not accept call", it.message)
@@ -397,7 +402,7 @@ class MainScreenViewModel(
     if (callState.status != CallStatus.Incoming) return
     store.rejectCall(callId)
     handledCallVoiceClipIds.clear()
-    transport.send(
+    sendPayload(
       peerEndpointId,
       ChatProtocol.encodeCallReject(
         callId = callId,
@@ -406,6 +411,7 @@ class MainScreenViewModel(
         reason = "rejected",
         createdAt = System.currentTimeMillis(),
       ),
+      PayloadPriority.CallSignal,
     ) { }
   }
 
@@ -416,7 +422,7 @@ class MainScreenViewModel(
     if (callState.status == CallStatus.Idle) return
     store.endCall(callId)
     handledCallVoiceClipIds.clear()
-    transport.send(
+    sendPayload(
       peerEndpointId,
       ChatProtocol.encodeCallEnd(
         callId = callId,
@@ -424,6 +430,7 @@ class MainScreenViewModel(
         targetId = callState.peerMemberId,
         createdAt = System.currentTimeMillis(),
       ),
+      PayloadPriority.CallSignal,
     ) { }
   }
 
@@ -432,10 +439,12 @@ class MainScreenViewModel(
   }
 
   fun disconnect() {
-    uiState.value.connectedEndpoints.forEach { endpoint ->
-      transport.send(endpoint.id, ChatProtocol.encodeDisconnect("User disconnected")) { }
+    val endpoints = uiState.value.connectedEndpoints
+    endpoints.forEach { endpoint ->
+      sendPayload(endpoint.id, ChatProtocol.encodeDisconnect("User disconnected"), PayloadPriority.Control) { }
     }
     transport.stopAll()
+    endpoints.forEach { payloadSender.clearEndpoint(it.id) }
     recoveryMode = false
     recoveryConnectionAttempts.clear()
     endpointMemberIds.clear()
@@ -505,7 +514,7 @@ class MainScreenViewModel(
     val pendingEndpointIds = endpoints.map { it.id }.toMutableSet()
     var hasFailure = false
     endpoints.forEach { endpoint ->
-      transport.send(endpoint.id, bytes) { result ->
+      sendPayload(endpoint.id, bytes, PayloadPriority.Voice) { result ->
         if (result.isFailure) {
           hasFailure = true
           store.setStatus(ConnectionStatus.Error, failureStatus, result.exceptionOrNull()?.message)
@@ -521,6 +530,30 @@ class MainScreenViewModel(
       }
     }
   }
+
+  private fun sendPayload(
+    endpointId: String,
+    bytes: ByteArray,
+    priority: PayloadPriority,
+    onResult: (Result<Unit>) -> Unit = {},
+  ) {
+    if (priority == PayloadPriority.CallAudio) {
+      transport.send(endpointId, bytes, onResult)
+      return
+    }
+    payloadSender.enqueue(endpointId = endpointId, bytes = bytes, priority = priority, onResult = onResult)
+  }
+
+  private fun messagePriority(kind: MessageKind): PayloadPriority =
+    when (kind) {
+      MessageKind.Text -> PayloadPriority.Text
+      MessageKind.Voice -> PayloadPriority.Voice
+      MessageKind.Location -> PayloadPriority.Location
+      MessageKind.Image -> PayloadPriority.Image
+    }
+
+  private fun callVoicePriority(mimeType: String): PayloadPriority =
+    if (isStreamingCallAudioMimeType(mimeType)) PayloadPriority.CallAudio else PayloadPriority.Voice
 
   private fun retryUndeliveredMessages() {
     val endpoints = uiState.value.connectedEndpoints
@@ -588,7 +621,7 @@ class MainScreenViewModel(
     val pendingEndpointIds = endpoints.map { it.id }.toMutableSet()
     var hasFailure = false
     endpoints.forEach { endpoint ->
-      transport.send(endpoint.id, bytes) { result ->
+      sendPayload(endpoint.id, bytes, messagePriority(message.kind)) { result ->
         if (result.isFailure) {
           hasFailure = true
         }
@@ -677,7 +710,7 @@ class MainScreenViewModel(
         if (wasNewMessage) {
           forwardIncomingMessage(endpointId, decoded)
         }
-        transport.send(endpointId, ChatProtocol.encodeAck(decoded.messageId)) { }
+        sendPayload(endpointId, ChatProtocol.encodeAck(decoded.messageId), PayloadPriority.Control) { }
       }
       is DecodedWireMessage.VoiceMessage -> {
         val wasNewMessage =
@@ -693,7 +726,7 @@ class MainScreenViewModel(
         if (wasNewMessage) {
           forwardIncomingVoiceMessage(endpointId, decoded)
         }
-        transport.send(endpointId, ChatProtocol.encodeAck(decoded.messageId)) { }
+        sendPayload(endpointId, ChatProtocol.encodeAck(decoded.messageId), PayloadPriority.Control) { }
       }
       is DecodedWireMessage.Ack -> store.acknowledge(decoded.messageId)
       is DecodedWireMessage.Disconnect -> handleEndpointDisconnected(endpointId)
@@ -712,7 +745,7 @@ class MainScreenViewModel(
         if (wasNewMessage) {
           forwardIncomingImageMessage(endpointId, decoded)
         }
-        transport.send(endpointId, ChatProtocol.encodeAck(decoded.messageId)) { }
+        sendPayload(endpointId, ChatProtocol.encodeAck(decoded.messageId), PayloadPriority.Control) { }
       }
       is DecodedWireMessage.LocationMessage -> {
         val wasNewMessage =
@@ -728,7 +761,7 @@ class MainScreenViewModel(
         if (wasNewMessage) {
           forwardIncomingLocationMessage(endpointId, decoded)
         }
-        transport.send(endpointId, ChatProtocol.encodeAck(decoded.messageId)) { }
+        sendPayload(endpointId, ChatProtocol.encodeAck(decoded.messageId), PayloadPriority.Control) { }
       }
       is DecodedWireMessage.CallRequest -> handleIncomingCallRequest(endpointId, decoded)
       is DecodedWireMessage.CallAccept -> {
@@ -760,7 +793,7 @@ class MainScreenViewModel(
     val existingCall = uiState.value.callState
     if (existingCall.callId == request.callId) return
     if (existingCall.status != CallStatus.Idle) {
-      transport.send(
+      sendPayload(
         endpointId,
         ChatProtocol.encodeCallReject(
           callId = request.callId,
@@ -769,6 +802,7 @@ class MainScreenViewModel(
           reason = "busy",
           createdAt = System.currentTimeMillis(),
         ),
+        PayloadPriority.CallSignal,
       ) { }
       return
     }
@@ -823,10 +857,11 @@ class MainScreenViewModel(
     sourceEndpointId: String,
     targetId: String?,
     bytes: ByteArray,
+    priority: PayloadPriority = PayloadPriority.CallSignal,
   ): Boolean {
     if (!shouldRelayToTarget(targetId)) return false
     relayEndpointsForTarget(sourceEndpointId, targetId!!).forEach { endpoint ->
-      transport.send(endpoint.id, bytes) { }
+      sendPayload(endpoint.id, bytes, priority) { }
     }
     return true
   }
@@ -907,6 +942,7 @@ class MainScreenViewModel(
     forwardCallBytesIfNeeded(
       sourceEndpointId = sourceEndpointId,
       targetId = voice.targetId,
+      priority = callVoicePriority(voice.mimeType),
       bytes =
         ChatProtocol.encodeCallVoice(
           callId = voice.callId,
@@ -988,7 +1024,7 @@ class MainScreenViewModel(
     uiState.value.connectedEndpoints
       .filterNot { it.id == sourceEndpointId }
       .forEach { endpoint ->
-        transport.send(endpoint.id, bytes) { }
+        sendPayload(endpoint.id, bytes, PayloadPriority.Text) { }
       }
   }
 
@@ -1006,7 +1042,7 @@ class MainScreenViewModel(
     uiState.value.connectedEndpoints
       .filterNot { it.id == sourceEndpointId }
       .forEach { endpoint ->
-        transport.send(endpoint.id, bytes) { }
+        sendPayload(endpoint.id, bytes, PayloadPriority.Voice) { }
       }
   }
 
@@ -1025,7 +1061,7 @@ class MainScreenViewModel(
     uiState.value.connectedEndpoints
       .filterNot { it.id == sourceEndpointId }
       .forEach { endpoint ->
-        transport.send(endpoint.id, bytes) { }
+        sendPayload(endpoint.id, bytes, PayloadPriority.Image) { }
       }
   }
 
@@ -1043,7 +1079,7 @@ class MainScreenViewModel(
     uiState.value.connectedEndpoints
       .filterNot { it.id == sourceEndpointId }
       .forEach { endpoint ->
-        transport.send(endpoint.id, bytes) { }
+        sendPayload(endpoint.id, bytes, PayloadPriority.Location) { }
       }
   }
 
@@ -1054,7 +1090,7 @@ class MainScreenViewModel(
   }
 
   private fun sendHello(endpointId: String) {
-    transport.send(
+    sendPayload(
       endpointId,
       ChatProtocol.encodeHello(
         senderId = uiState.value.localDeviceId,
@@ -1062,6 +1098,7 @@ class MainScreenViewModel(
         groupName = uiState.value.groupName,
         members = currentRosterMembers(),
       ),
+      PayloadPriority.Control,
     ) { }
   }
 
@@ -1079,6 +1116,7 @@ class MainScreenViewModel(
   }
 
   private fun handleEndpointDisconnected(endpointId: String) {
+    payloadSender.clearEndpoint(endpointId)
     val wasConnected = uiState.value.connectedEndpoints.any { it.id == endpointId }
     val mappedMemberId = endpointMemberIds.remove(endpointId)
     val memberId = mappedMemberId ?: endpointId

@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.ui.Modifier
+import com.example.offlinelink.service.OfflineKeepAliveService
 import com.example.offlinelink.theme.MyApplicationTheme
 
 class MainActivity : ComponentActivity() {
@@ -18,5 +19,13 @@ class MainActivity : ComponentActivity() {
     setContent {
       MyApplicationTheme { Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) { MainNavigation() } }
     }
+  }
+
+  fun startOfflineKeepAliveService(message: String = "OfflineLink active") {
+    OfflineKeepAliveService.start(this, message)
+  }
+
+  fun stopOfflineKeepAliveService() {
+    OfflineKeepAliveService.stop(this)
   }
 }

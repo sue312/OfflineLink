@@ -58,6 +58,7 @@ import androidx.compose.material.icons.rounded.ErrorOutline
 import androidx.compose.material.icons.rounded.ExpandLess
 import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material.icons.rounded.Groups
+import androidx.compose.material.icons.rounded.Hearing
 import androidx.compose.material.icons.rounded.Image
 import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.Mic
@@ -97,6 +98,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -136,6 +138,7 @@ import com.example.offlinelink.model.MessageStatus
 import com.example.offlinelink.model.NearbyEndpoint
 import com.example.offlinelink.model.VoiceAttachment
 import com.example.offlinelink.permissions.requiredNearbyRuntimePermissions
+import com.example.offlinelink.service.OfflineKeepAliveService
 import com.example.offlinelink.theme.MyApplicationTheme
 import com.example.offlinelink.transport.NearbyChatTransport
 import java.io.File
@@ -202,6 +205,20 @@ fun MainScreen(
       voiceRecorder.cancel()
       voicePlayer.stop()
       callAudioStream.stop()
+    }
+  }
+  LaunchedEffect(state.connectedEndpoints.isNotEmpty(), state.callState.status) {
+    val shouldKeepAlive = state.connectedEndpoints.isNotEmpty() || state.callState.status != CallStatus.Idle
+    if (shouldKeepAlive) {
+      val message = if (state.callState.status == CallStatus.Idle) "Connected to nearby devices" else "Call active"
+      runCatching { OfflineKeepAliveService.start(context.applicationContext, message) }
+    } else {
+      runCatching { OfflineKeepAliveService.stop(context.applicationContext) }
+    }
+  }
+  DisposableEffect(context) {
+    onDispose {
+      runCatching { OfflineKeepAliveService.stop(context.applicationContext) }
     }
   }
 
@@ -303,6 +320,7 @@ private fun OfflineChatContent(
   var showSettings by rememberSaveable { mutableStateOf(false) }
   var previewImageMessage by remember { mutableStateOf<ChatMessage?>(null) }
   val listState = rememberLazyListState()
+  val imageBitmapCache = remember { Base64DecodedImageCache<ImageBitmap>(maxEntries = IMAGE_BITMAP_CACHE_SIZE) }
   val keyboardController = LocalSoftwareKeyboardController.current
   val ctx = LocalContext.current
   val coroutineScope = rememberCoroutineScope()
@@ -435,6 +453,7 @@ private fun OfflineChatContent(
           localAvatarName = state.avatarName,
           groupMembers = state.groupMembers,
           listState = listState,
+          imageBitmapCache = imageBitmapCache,
           onRetryMessage = onRetryMessage,
           onDeleteMessage = onDeleteMessage,
           onPreviewImage = { previewImageMessage = it },
@@ -515,7 +534,11 @@ private fun OfflineChatContent(
       )
     }
     previewImageMessage?.let { message ->
-      ImagePreviewDialog(message = message, onDismiss = { previewImageMessage = null })
+      ImagePreviewDialog(
+        message = message,
+        imageBitmapCache = imageBitmapCache,
+        onDismiss = { previewImageMessage = null },
+      )
     }
   }
 }
@@ -714,10 +737,11 @@ private fun SettingsSection(
 @Composable
 private fun ImagePreviewDialog(
   message: ChatMessage,
+  imageBitmapCache: Base64DecodedImageCache<ImageBitmap>,
   onDismiss: () -> Unit,
 ) {
   val image = message.image ?: return
-  val imageBitmap = remember(image.imageBase64) { decodeImageBitmap(image.imageBase64) }
+  val imageBitmap = rememberDecodedImageBitmap(image.imageBase64, imageBitmapCache)
   Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
     Surface(color = MaterialTheme.colorScheme.scrim.copy(alpha = 0.92f), modifier = Modifier.fillMaxSize()) {
       Box(modifier = Modifier.fillMaxSize().padding(12.dp)) {
@@ -926,6 +950,7 @@ private fun ConnectionActionButton(
   selected: Boolean,
   onClick: () -> Unit,
   modifier: Modifier = Modifier,
+  contentDescription: String = label,
 ) {
   val container =
     when {
@@ -943,10 +968,18 @@ private fun ConnectionActionButton(
   Column(modifier = modifier, horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(4.dp)) {
     Surface(color = container, contentColor = content, shape = CircleShape) {
       IconButton(onClick = onClick, enabled = enabled, modifier = Modifier.size(42.dp)) {
-        Icon(icon, contentDescription = label, modifier = Modifier.size(20.dp))
+        Icon(icon, contentDescription = contentDescription, modifier = Modifier.size(20.dp))
       }
     }
-    Text(label, style = MaterialTheme.typography.labelMedium, color = content, maxLines = 1)
+    val labelColor =
+      if (enabled) {
+        MaterialTheme.colorScheme.onSurfaceVariant
+      } else {
+        MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.45f)
+      }
+    if (label.isNotEmpty()) {
+      Text(label, style = MaterialTheme.typography.labelMedium, color = labelColor, maxLines = 1, softWrap = false)
+    }
   }
 }
 
@@ -1092,16 +1125,7 @@ private fun CallPanel(
     }
   val subtitle =
     when (callState.status) {
-      CallStatus.Active -> {
-        val voiceLabel =
-          when {
-            isCallMuted -> "Muted"
-            isCallAudioLive -> "Live voice"
-            callState.activityLabel != null -> callState.activityLabel
-            else -> "Connecting voice"
-          }
-        listOfNotNull(peerName, durationLabel, routeLabel, voiceLabel).joinToString(" - ")
-      }
+      CallStatus.Active -> peerName
       CallStatus.Outgoing -> peerName
       CallStatus.Incoming -> peerName
       CallStatus.Idle -> ""
@@ -1129,79 +1153,120 @@ private fun CallPanel(
     border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
     modifier = Modifier.fillMaxWidth(),
   ) {
-    Row(
-      modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
-      horizontalArrangement = Arrangement.spacedBy(10.dp),
-      verticalAlignment = Alignment.CenterVertically,
-    ) {
-      Surface(color = accent, contentColor = accentContent, shape = CircleShape) {
-        Icon(Icons.Rounded.Call, contentDescription = null, modifier = Modifier.padding(8.dp).size(18.dp))
-      }
-      Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(1.dp)) {
-        Text(title, style = MaterialTheme.typography.titleMedium)
-        Text(subtitle, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
-      }
-      when (callState.status) {
-        CallStatus.Incoming -> {
-          Button(
-            onClick = onAcceptCall,
-            shape = RoundedCornerShape(8.dp),
-            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary, contentColor = MaterialTheme.colorScheme.onSecondary),
-            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
-          ) {
-            Icon(Icons.Rounded.Check, contentDescription = null, modifier = Modifier.size(17.dp))
-            Spacer(Modifier.width(5.dp))
-            Text("Accept")
+    if (callState.status == CallStatus.Active) {
+      Column(
+        modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+      ) {
+        Row(
+          horizontalArrangement = Arrangement.spacedBy(10.dp),
+          verticalAlignment = Alignment.CenterVertically,
+        ) {
+          Surface(color = accent, contentColor = accentContent, shape = CircleShape) {
+            Icon(Icons.Rounded.Call, contentDescription = null, modifier = Modifier.padding(8.dp).size(18.dp))
           }
-          OutlinedButton(
-            onClick = onRejectCall,
+          Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(1.dp)) {
+            Text(title, style = MaterialTheme.typography.titleMedium, maxLines = 1)
+            Text(subtitle, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
+          }
+          Surface(
+            color = MaterialTheme.colorScheme.secondaryContainer,
+            contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
             shape = RoundedCornerShape(8.dp),
-            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
           ) {
-            Icon(Icons.Rounded.Close, contentDescription = null, modifier = Modifier.size(17.dp))
-            Spacer(Modifier.width(5.dp))
-            Text("Reject")
+            Text(
+              text = durationLabel ?: "0:00",
+              modifier = Modifier.widthIn(min = 58.dp).padding(horizontal = 10.dp, vertical = 6.dp),
+              style = MaterialTheme.typography.titleSmall,
+              fontWeight = FontWeight.SemiBold,
+              maxLines = 1,
+              softWrap = false,
+            )
           }
         }
-        CallStatus.Outgoing -> {
-          OutlinedButton(
-            onClick = onEndCall,
-            shape = RoundedCornerShape(8.dp),
-            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
-          ) {
-            Icon(Icons.Rounded.CallEnd, contentDescription = null, modifier = Modifier.size(17.dp))
-            Spacer(Modifier.width(5.dp))
-            Text("Cancel")
-          }
-        }
-        CallStatus.Active -> {
+        Row(
+          modifier = Modifier.fillMaxWidth(),
+          horizontalArrangement = Arrangement.spacedBy(8.dp),
+          verticalAlignment = Alignment.CenterVertically,
+        ) {
           ConnectionActionButton(
             icon = if (isCallMuted) Icons.Rounded.MicOff else Icons.Rounded.Mic,
-            label = if (isCallMuted) "Muted" else "Mic",
+            label = "",
             enabled = true,
             selected = isCallMuted,
             onClick = onToggleMute,
-            modifier = Modifier.widthIn(min = 52.dp),
+            modifier = Modifier.weight(1f),
+            contentDescription = if (isCallMuted) "Muted" else "Mic",
           )
           ConnectionActionButton(
-            icon = if (isSpeakerOn) Icons.AutoMirrored.Rounded.VolumeUp else Icons.Rounded.Call,
-            label = routeLabel,
+            icon = if (isSpeakerOn) Icons.AutoMirrored.Rounded.VolumeUp else Icons.Rounded.Hearing,
+            label = "",
             enabled = true,
             selected = isSpeakerOn,
             onClick = onToggleSpeaker,
-            modifier = Modifier.widthIn(min = 68.dp),
+            modifier = Modifier.weight(1f),
+            contentDescription = routeLabel,
           )
-          OutlinedButton(
+          ConnectionActionButton(
+            icon = Icons.Rounded.CallEnd,
+            label = "",
+            enabled = true,
+            selected = false,
             onClick = onEndCall,
-            shape = RoundedCornerShape(8.dp),
-            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
-          ) {
-            Icon(Icons.Rounded.CallEnd, contentDescription = null, modifier = Modifier.size(17.dp))
-            Spacer(Modifier.width(5.dp))
-            Text("End")
-          }
+            modifier = Modifier.weight(1f),
+            contentDescription = "End",
+          )
         }
-        CallStatus.Idle -> Unit
+      }
+    } else {
+      Row(
+        modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+      ) {
+        Surface(color = accent, contentColor = accentContent, shape = CircleShape) {
+          Icon(Icons.Rounded.Call, contentDescription = null, modifier = Modifier.padding(8.dp).size(18.dp))
+        }
+        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(1.dp)) {
+          Text(title, style = MaterialTheme.typography.titleMedium)
+          Text(subtitle, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
+        }
+        when (callState.status) {
+          CallStatus.Incoming -> {
+            Button(
+              onClick = onAcceptCall,
+              shape = RoundedCornerShape(8.dp),
+              colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary, contentColor = MaterialTheme.colorScheme.onSecondary),
+              contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
+            ) {
+              Icon(Icons.Rounded.Check, contentDescription = null, modifier = Modifier.size(17.dp))
+              Spacer(Modifier.width(5.dp))
+              Text("Accept")
+            }
+            OutlinedButton(
+              onClick = onRejectCall,
+              shape = RoundedCornerShape(8.dp),
+              contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
+            ) {
+              Icon(Icons.Rounded.Close, contentDescription = null, modifier = Modifier.size(17.dp))
+              Spacer(Modifier.width(5.dp))
+              Text("Reject")
+            }
+          }
+          CallStatus.Outgoing -> {
+            OutlinedButton(
+              onClick = onEndCall,
+              shape = RoundedCornerShape(8.dp),
+              contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
+            ) {
+              Icon(Icons.Rounded.CallEnd, contentDescription = null, modifier = Modifier.size(17.dp))
+              Spacer(Modifier.width(5.dp))
+              Text("Cancel")
+            }
+          }
+          CallStatus.Active -> Unit
+          CallStatus.Idle -> Unit
+        }
       }
     }
   }
@@ -1346,6 +1411,7 @@ private fun MessageList(
   localAvatarName: String,
   groupMembers: List<GroupMember>,
   listState: LazyListState,
+  imageBitmapCache: Base64DecodedImageCache<ImageBitmap>,
   onRetryMessage: (String) -> Unit,
   onDeleteMessage: (String) -> Unit,
   onPreviewImage: (ChatMessage) -> Unit,
@@ -1360,9 +1426,13 @@ private fun MessageList(
     verticalArrangement = Arrangement.spacedBy(8.dp),
   ) {
     if (messages.isEmpty()) {
-      item { EmptyChatState() }
+      item(contentType = "empty") { EmptyChatState() }
     } else {
-      items(messages, key = { it.id }) { message ->
+      items(
+        items = messages,
+        key = { it.id },
+        contentType = { it.kind },
+      ) { message ->
         val senderName =
           senderDisplayName(
             senderId = message.senderId,
@@ -1371,7 +1441,7 @@ private fun MessageList(
             groupMembers = groupMembers,
           )
         val avatarName = if (message.isLocal) localAvatarName.ifBlank { localDisplayName } else senderName
-        MessageRow(message, senderName, avatarName, onRetryMessage, onDeleteMessage, onPreviewImage, onPlayVoice, onOpenMaps)
+        MessageRow(message, senderName, avatarName, imageBitmapCache, onRetryMessage, onDeleteMessage, onPreviewImage, onPlayVoice, onOpenMaps)
       }
     }
   }
@@ -1402,6 +1472,7 @@ private fun MessageRow(
   message: ChatMessage,
   senderName: String,
   avatarName: String,
+  imageBitmapCache: Base64DecodedImageCache<ImageBitmap>,
   onRetryMessage: (String) -> Unit,
   onDeleteMessage: (String) -> Unit,
   onPreviewImage: (ChatMessage) -> Unit,
@@ -1430,6 +1501,7 @@ private fun MessageRow(
       isLocal = isLocal,
       senderName = senderName,
       avatarName = avatarName,
+      imageBitmapCache = imageBitmapCache,
       onRetryMessage = onRetryMessage,
       onDeleteMessage = onDeleteMessage,
       onPreviewImage = onPreviewImage,
@@ -1522,12 +1594,13 @@ private fun ImageMessageRow(
   isLocal: Boolean,
   senderName: String,
   avatarName: String,
+  imageBitmapCache: Base64DecodedImageCache<ImageBitmap>,
   onRetryMessage: (String) -> Unit,
   onDeleteMessage: (String) -> Unit,
   onPreviewImage: (ChatMessage) -> Unit,
 ) {
   val image = message.image ?: return
-  val imageBitmap = remember(image.imageBase64) { decodeImageBitmap(image.imageBase64) }
+  val imageBitmap = rememberDecodedImageBitmap(image.imageBase64, imageBitmapCache)
   var menuExpanded by remember { mutableStateOf(false) }
   val clipboardManager = LocalClipboardManager.current
   val sourceWidth = image.width.coerceAtLeast(1)
@@ -2066,13 +2139,40 @@ internal fun callTargetOptions(state: ChatUiState): List<CallTargetOption> {
 }
 
 @OptIn(ExperimentalEncodingApi::class)
-private fun decodeImageBitmap(imageBase64: String): androidx.compose.ui.graphics.ImageBitmap {
+private fun decodeImageBitmap(imageBase64: String): ImageBitmap {
   val bytes = Base64.Default.decode(imageBase64)
   return BitmapFactory.decodeByteArray(bytes, 0, bytes.size).asImageBitmap()
 }
 
+@Composable
+private fun rememberDecodedImageBitmap(
+  imageBase64: String,
+  cache: Base64DecodedImageCache<ImageBitmap>,
+): ImageBitmap =
+  remember(imageBase64, cache) {
+    cache.getOrPut(imageBase64) {
+      decodeImageBitmap(imageBase64)
+    }
+  }
+
+internal class Base64DecodedImageCache<T>(
+  private val maxEntries: Int,
+) {
+  private val values =
+    object : LinkedHashMap<String, T>(maxEntries, 0.75f, true) {
+      override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, T>?): Boolean = size > maxEntries
+    }
+
+  fun getOrPut(
+    imageBase64: String,
+    decode: () -> T,
+  ): T =
+    values.getOrPut(imageBase64, decode)
+}
+
 internal fun shouldApplyRootImePadding(windowResizesForKeyboard: Boolean): Boolean = !windowResizesForKeyboard
 
+private const val IMAGE_BITMAP_CACHE_SIZE = 24
 private const val SETTINGS_PREFS_NAME = "offline-link-settings"
 private const val KEY_DISPLAY_NAME = "display_name"
 private const val KEY_AVATAR_NAME = "avatar_name"

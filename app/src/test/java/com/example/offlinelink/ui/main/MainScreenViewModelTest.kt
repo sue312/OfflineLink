@@ -302,6 +302,38 @@ class MainScreenViewModelTest {
   }
 
   @Test
+  fun disconnectedRelayMarksRemainingMembersReconnectingDuringRecovery() = runTest {
+    val transport = FakeChatTransport()
+    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage("", "image/jpeg", 1, 1)) }, localDeviceId = "device-c")
+
+    advanceUntilIdle()
+    transport.emit(TransportEvent.Connected(NearbyEndpoint("endpoint-a", "Phone A")))
+    advanceUntilIdle()
+    transport.emit(
+      TransportEvent.BytesReceived(
+        endpointId = "endpoint-a",
+        bytes =
+          ChatProtocol.encodeHello(
+            senderId = "device-a",
+            displayName = "Phone A",
+            members =
+              listOf(
+                WireMember("device-a", "Phone A"),
+                WireMember("device-b", "Phone B"),
+                WireMember("device-c", "Phone C"),
+              ),
+          ),
+      ),
+    )
+    advanceUntilIdle()
+
+    transport.emit(TransportEvent.Disconnected("endpoint-a"))
+    advanceUntilIdle()
+
+    assertEquals(listOf(GroupMemberStatus.Reconnecting), viewModel.uiState.value.groupMembers.map { it.status })
+  }
+
+  @Test
   fun recoveryDiscoveryIgnoresEndpointsOutsideRemainingRoster() = runTest {
     val transport = FakeChatTransport()
     val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage("", "image/jpeg", 1, 1)) }, localDeviceId = "device-c")
@@ -1171,6 +1203,36 @@ class MainScreenViewModelTest {
   }
 
   @Test
+  fun streamingCallAudioBypassesPendingQueuedSends() = runTest {
+    val transport = FakeChatTransport(autoCompleteSends = false)
+    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage("", "image/jpeg", 1, 1)) }, localDeviceId = "local")
+
+    advanceUntilIdle()
+    transport.emit(TransportEvent.Connected(NearbyEndpoint("endpoint-b", "Phone B")))
+    advanceUntilIdle()
+    transport.completeNextSend()
+    transport.emit(
+      TransportEvent.BytesReceived(
+        endpointId = "endpoint-b",
+        bytes = ChatProtocol.encodeCallRequest(callId = "call-1", senderId = "device-b", createdAt = 1000L),
+      ),
+    )
+    advanceUntilIdle()
+    viewModel.acceptCall()
+    advanceUntilIdle()
+
+    viewModel.sendCallVoiceMessage(
+      audioBytes = byteArrayOf(1, 2, 3, 4),
+      durationMs = 40L,
+      mimeType = "audio/pcm;rate=8000;encoding=pcm16",
+    )
+
+    assertTrue(
+      transport.sentPayloads.any { ChatProtocol.decode(it.bytes) is DecodedWireMessage.CallVoice },
+    )
+  }
+
+  @Test
   fun incomingCallVoiceMessageCreatesPlaybackEventWithoutAppendingChatMessage() = runTest {
     val transport = FakeChatTransport()
     val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage("", "image/jpeg", 1, 1)) }, localDeviceId = "local")
@@ -1402,7 +1464,9 @@ class MainScreenViewModelTest {
 
 private data class SentPayload(val endpointId: String, val bytes: ByteArray)
 
-private class FakeChatTransport : ChatTransport {
+private class FakeChatTransport(
+  private val autoCompleteSends: Boolean = true,
+) : ChatTransport {
   private val mutableEvents = MutableSharedFlow<TransportEvent>(extraBufferCapacity = 16)
   override val events: Flow<TransportEvent> = mutableEvents
   var advertisingStarted = false
@@ -1420,6 +1484,7 @@ private class FakeChatTransport : ChatTransport {
   var rejectedConnections: List<String> = emptyList()
     private set
   private val queuedSendResults = ArrayDeque<Result<Unit>>()
+  private val pendingSendCallbacks = ArrayDeque<(Result<Unit>) -> Unit>()
 
   suspend fun emit(event: TransportEvent) {
     mutableEvents.emit(event)
@@ -1431,6 +1496,10 @@ private class FakeChatTransport : ChatTransport {
 
   fun queueSendResult(result: Result<Unit>) {
     queuedSendResults.addLast(result)
+  }
+
+  fun completeNextSend(result: Result<Unit>? = null) {
+    pendingSendCallbacks.removeFirst().invoke(result ?: nextSendResult())
   }
 
   override fun startAdvertising(displayName: String) {
@@ -1456,16 +1525,21 @@ private class FakeChatTransport : ChatTransport {
 
   override fun send(endpointId: String, bytes: ByteArray, onResult: (Result<Unit>) -> Unit) {
     sentPayloads = sentPayloads + SentPayload(endpointId, bytes)
-    val result =
-      if (queuedSendResults.isEmpty()) {
-        Result.success(Unit)
-      } else {
-        queuedSendResults.removeFirst()
-      }
-    onResult(result)
+    if (autoCompleteSends) {
+      onResult(nextSendResult())
+    } else {
+      pendingSendCallbacks.addLast(onResult)
+    }
   }
 
   override fun stopAll() = Unit
+
+  private fun nextSendResult(): Result<Unit> =
+    if (queuedSendResults.isEmpty()) {
+      Result.success(Unit)
+    } else {
+      queuedSendResults.removeFirst()
+    }
 }
 
 private class FakeChatHistoryRepository(

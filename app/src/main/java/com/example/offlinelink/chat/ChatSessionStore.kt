@@ -118,7 +118,7 @@ class ChatSessionStore(
       mutableState.value.copy(
         groupMembers =
           mutableState.value.groupMembers.map { member ->
-            if (member.status == GroupMemberStatus.Online) member else member.copy(status = GroupMemberStatus.Reconnecting)
+            if (member.status == GroupMemberStatus.Reconnecting) member else member.copy(status = GroupMemberStatus.Reconnecting)
           },
       )
   }

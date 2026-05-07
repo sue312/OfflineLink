@@ -24,7 +24,79 @@ class ChatProtocolTest {
     assertEquals("Phone A", hello.displayName)
     assertEquals("Field Team", hello.groupName)
     assertEquals(listOf(WireMember("device-a", "Phone A"), WireMember("device-b", "Phone B")), hello.members)
+    assertEquals(ChatProtocol.CURRENT_PROTOCOL_VERSION, hello.protocolVersion)
+    assertEquals(ChatProtocol.DEFAULT_CAPABILITIES, hello.capabilities)
     assertEquals(1234L, hello.sentAt)
+  }
+
+  @Test
+  fun decodeLegacyHelloWithoutVersionOrCapabilitiesUsesDefaults() {
+    val legacyJson =
+      """
+      {
+        "type": "hello",
+        "payload": "{\"senderId\":\"device-a\",\"displayName\":\"Phone A\"}",
+        "sentAt": 1234
+      }
+      """.trimIndent()
+
+    val decoded = ChatProtocol.decode(legacyJson.encodeToByteArray())
+
+    assertTrue(decoded is DecodedWireMessage.Hello)
+    val hello = decoded as DecodedWireMessage.Hello
+    assertEquals("device-a", hello.senderId)
+    assertEquals("Phone A", hello.displayName)
+    assertEquals("Offline group", hello.groupName)
+    assertEquals(emptyList<WireMember>(), hello.members)
+    assertEquals(ChatProtocol.CURRENT_PROTOCOL_VERSION, hello.protocolVersion)
+    assertEquals(emptySet<String>(), hello.capabilities)
+    assertEquals(1234L, hello.sentAt)
+  }
+
+  @Test
+  fun encodeAndDecodeHelloPreservesProtocolVersionAndCapabilities() {
+    val bytes =
+      ChatProtocol.encodeHello(
+        senderId = "device-a",
+        displayName = "Phone A",
+        sentAt = 1234L,
+      )
+
+    val encoded = bytes.decodeToString()
+    assertTrue(encoded.contains("\"protocolVersion\":${ChatProtocol.CURRENT_PROTOCOL_VERSION}"))
+    assertTrue(encoded.contains(ChatProtocol.CAPABILITY_CALL_TARGETING))
+
+    val decoded = ChatProtocol.decode(bytes)
+
+    assertTrue(decoded is DecodedWireMessage.Hello)
+    val hello = decoded as DecodedWireMessage.Hello
+    assertEquals(ChatProtocol.CURRENT_PROTOCOL_VERSION, hello.protocolVersion)
+    assertEquals(ChatProtocol.DEFAULT_CAPABILITIES, hello.capabilities)
+    assertTrue(ChatProtocol.supportsCallTargeting(hello.capabilities))
+    assertEquals(ChatProtocol.DEFAULT_CAPABILITIES.contains(ChatProtocol.CAPABILITY_PRIORITY_QUEUE), ChatProtocol.supportsPriorityQueue(hello.capabilities))
+  }
+
+  @Test
+  fun decodeIgnoresUnknownEnvelopeAndPayloadFields() {
+    val json =
+      """
+      {
+        "type": "hello",
+        "protocolVersion": ${ChatProtocol.CURRENT_PROTOCOL_VERSION},
+        "capabilities": ["${ChatProtocol.CAPABILITY_CALL_TARGETING}", "future_feature"],
+        "payload": "{\"senderId\":\"device-a\",\"displayName\":\"Phone A\",\"groupName\":\"Field Team\",\"futurePayload\":true}",
+        "sentAt": 1234,
+        "futureEnvelope": {"ignored": true}
+      }
+      """.trimIndent()
+
+    val decoded = ChatProtocol.decode(json.encodeToByteArray())
+
+    assertTrue(decoded is DecodedWireMessage.Hello)
+    val hello = decoded as DecodedWireMessage.Hello
+    assertEquals("Field Team", hello.groupName)
+    assertEquals(setOf(ChatProtocol.CAPABILITY_CALL_TARGETING, "future_feature"), hello.capabilities)
+    assertTrue(ChatProtocol.supportsCallTargeting(hello.capabilities))
   }
 
   @Test
