@@ -5,17 +5,14 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
 import java.io.ByteArrayOutputStream
-import kotlin.io.encoding.Base64
-import kotlin.io.encoding.ExperimentalEncodingApi
 
 data class CompressedImage(
-  val imageBase64: String,
+  val bytes: ByteArray,
   val mimeType: String,
   val width: Int,
   val height: Int,
 )
 
-@OptIn(ExperimentalEncodingApi::class)
 object ImageCompressor {
   private const val MAX_DIMENSION = 1024
   private const val JPEG_QUALITY = 80
@@ -54,7 +51,7 @@ object ImageCompressor {
       outputStream.close()
 
       val result = CompressedImage(
-        imageBase64 = Base64.Default.encode(bytes),
+        bytes = bytes,
         mimeType = "image/jpeg",
         width = scaled.width,
         height = scaled.height,

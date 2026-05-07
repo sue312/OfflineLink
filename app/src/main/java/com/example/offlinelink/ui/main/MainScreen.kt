@@ -123,6 +123,7 @@ import com.example.offlinelink.audio.RecordedVoiceClip
 import com.example.offlinelink.audio.VoicePlayer
 import com.example.offlinelink.audio.VoiceRecorder
 import com.example.offlinelink.data.JsonChatHistoryRepository
+import com.example.offlinelink.data.PayloadCache
 import com.example.offlinelink.image.ImageCompressor
 import com.example.offlinelink.location.LocationHelper
 import com.example.offlinelink.model.CallAudioPlaybackFrame
@@ -151,6 +152,10 @@ import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
+private val LocalPayloadCache = androidx.compose.runtime.staticCompositionLocalOf<PayloadCache> {
+  error("No PayloadCache provided")
+}
+
 @Composable
 fun MainScreen(
   onItemClick: (NavKey) -> Unit,
@@ -163,6 +168,7 @@ fun MainScreen(
     remember(context) {
       JsonChatHistoryRepository(File(context.applicationContext.filesDir, "offline-link-chat-history.json"))
     }
+  val payloadCache = remember(context) { PayloadCache(context.applicationContext.filesDir) }
   val preferences = remember(context) { context.applicationContext.getSharedPreferences(SETTINGS_PREFS_NAME, Context.MODE_PRIVATE) }
   val defaultDisplayName =
     remember(preferences) {
@@ -182,6 +188,7 @@ fun MainScreen(
         defaultDisplayName = defaultDisplayName,
         defaultAvatarName = defaultAvatarName,
         historyRepository = historyRepository,
+        payloadCache = payloadCache,
       )
     }
   val voiceRecorder = remember(context) { VoiceRecorder(context.applicationContext) }
@@ -222,7 +229,8 @@ fun MainScreen(
     }
   }
 
-  OfflineChatContent(
+  androidx.compose.runtime.CompositionLocalProvider(LocalPayloadCache provides payloadCache) {
+    OfflineChatContent(
     state = state,
     callAudioFrames = viewModel.callAudioFrames,
     hasPermissions = hasPermissions,
@@ -253,7 +261,11 @@ fun MainScreen(
     onSendLocation = viewModel::sendLocation,
     onStartVoiceRecording = voiceRecorder::start,
     onStopVoiceRecording = voiceRecorder::stop,
-    onPlayVoice = voicePlayer::play,
+    onPlayVoice = { voice ->
+      val bytes = payloadCache.get(voice.payloadKey)
+      if (bytes != null) voicePlayer.play(bytes)
+      else Result.failure(IllegalStateException("Voice payload not found"))
+    },
     onDisconnect = viewModel::disconnect,
     onStartCall = viewModel::startCall,
     onAcceptCall = viewModel::acceptCall,
@@ -266,9 +278,11 @@ fun MainScreen(
     diagnostics = diagnosticsFor(context, hasPermissions, state),
     onPickImage = { imagePickerLauncher.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) },
     modifier = modifier.fillMaxSize(),
-  )
+    )
+  }
 }
 
+@OptIn(ExperimentalEncodingApi::class)
 @Composable
 private fun OfflineChatContent(
   state: ChatUiState,
@@ -388,7 +402,8 @@ private fun OfflineChatContent(
 
   LaunchedEffect(state.callPlayback?.clipId) {
     val playback = state.callPlayback ?: return@LaunchedEffect
-    onPlayVoice(VoiceAttachment(playback.audioBase64, playback.durationMs, playback.mimeType))
+    val callAudioBytes = Base64.Default.decode(playback.audioBase64)
+    onPlayCallAudio(CallAudioFrame(callAudioBytes, playback.durationMs, playback.mimeType))
       .onFailure {
         voiceError = "Could not play call voice"
       }
@@ -741,7 +756,8 @@ private fun ImagePreviewDialog(
   onDismiss: () -> Unit,
 ) {
   val image = message.image ?: return
-  val imageBitmap = rememberDecodedImageBitmap(image.imageBase64, imageBitmapCache)
+  val payloadCache = LocalPayloadCache.current
+  val imageBitmap = rememberDecodedImageBitmap(image.payloadKey, payloadCache, imageBitmapCache)
   Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
     Surface(color = MaterialTheme.colorScheme.scrim.copy(alpha = 0.92f), modifier = Modifier.fillMaxSize()) {
       Box(modifier = Modifier.fillMaxSize().padding(12.dp)) {
@@ -1295,7 +1311,7 @@ private fun MembersPanel(
       Icon(Icons.Rounded.Groups, contentDescription = null, modifier = Modifier.size(20.dp))
       Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(1.dp)) {
         Text("Members (${members.size + 1})", style = MaterialTheme.typography.titleMedium)
-        Text("You: $localDisplayName - online", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(localMemberSubtitle(localDisplayName), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
       }
       Avatar(localAvatarName.ifBlank { localDisplayName }, color = MaterialTheme.colorScheme.primary)
       visibleMembers.forEach { member ->
@@ -1317,10 +1333,12 @@ private fun MemberAvatar(member: GroupMember) {
       GroupMemberStatus.Online -> MaterialTheme.colorScheme.secondary
       GroupMemberStatus.Reconnecting -> MaterialTheme.colorScheme.tertiary
       GroupMemberStatus.Offline -> MaterialTheme.colorScheme.outline
-    }
+  }
   Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(2.dp)) {
     Avatar(member.displayName, color = color)
-    Text(member.status.label(), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
+    groupMemberStatusText(member.status)?.let { statusText ->
+      Text(statusText, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
+    }
   }
 }
 
@@ -1600,7 +1618,8 @@ private fun ImageMessageRow(
   onPreviewImage: (ChatMessage) -> Unit,
 ) {
   val image = message.image ?: return
-  val imageBitmap = rememberDecodedImageBitmap(image.imageBase64, imageBitmapCache)
+  val payloadCache = LocalPayloadCache.current
+  val imageBitmap = rememberDecodedImageBitmap(image.payloadKey, payloadCache, imageBitmapCache)
   var menuExpanded by remember { mutableStateOf(false) }
   val clipboardManager = LocalClipboardManager.current
   val sourceWidth = image.width.coerceAtLeast(1)
@@ -2001,6 +2020,10 @@ internal fun defaultDeviceDisplayName(modelName: String): String =
 
 internal fun defaultSetupExpanded(messageCount: Int): Boolean = messageCount == 0
 
+internal fun localMemberSubtitle(localDisplayName: String): String = "You: ${localDisplayName.ifBlank { "OfflineLink" }}"
+
+internal fun groupMemberStatusText(status: GroupMemberStatus): String? = null
+
 internal fun setupSummaryText(state: ChatUiState): String {
   val memberCount = state.groupMembers.size + 1
   return when {
@@ -2138,20 +2161,20 @@ internal fun callTargetOptions(state: ChatUiState): List<CallTargetOption> {
   return options.values.toList()
 }
 
-@OptIn(ExperimentalEncodingApi::class)
-private fun decodeImageBitmap(imageBase64: String): ImageBitmap {
-  val bytes = Base64.Default.decode(imageBase64)
-  return BitmapFactory.decodeByteArray(bytes, 0, bytes.size).asImageBitmap()
+private fun decodeImageBitmap(rawBytes: ByteArray): ImageBitmap {
+  return BitmapFactory.decodeByteArray(rawBytes, 0, rawBytes.size).asImageBitmap()
 }
 
 @Composable
 private fun rememberDecodedImageBitmap(
-  imageBase64: String,
+  payloadKey: String,
+  payloadCache: PayloadCache,
   cache: Base64DecodedImageCache<ImageBitmap>,
 ): ImageBitmap =
-  remember(imageBase64, cache) {
-    cache.getOrPut(imageBase64) {
-      decodeImageBitmap(imageBase64)
+  remember(payloadKey, cache) {
+    cache.getOrPut(payloadKey) {
+      val bytes = payloadCache.get(payloadKey) ?: ByteArray(0)
+      decodeImageBitmap(bytes)
     }
   }
 
@@ -2164,10 +2187,10 @@ internal class Base64DecodedImageCache<T>(
     }
 
   fun getOrPut(
-    imageBase64: String,
+    key: String,
     decode: () -> T,
   ): T =
-    values.getOrPut(imageBase64, decode)
+    values.getOrPut(key, decode)
 }
 
 internal fun shouldApplyRootImePadding(windowResizesForKeyboard: Boolean): Boolean = !windowResizesForKeyboard

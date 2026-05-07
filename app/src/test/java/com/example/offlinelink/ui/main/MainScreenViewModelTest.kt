@@ -50,12 +50,52 @@ class MainScreenViewModelTest {
   @Test
   fun startDiscoveryUpdatesStateAndDelegatesToTransport() = runTest {
     val transport = FakeChatTransport()
-    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage("", "image/jpeg", 1, 1)) }, localDeviceId = "local")
+    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) }, payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads")), localDeviceId = "local")
 
     viewModel.startDiscovery()
 
     assertEquals(ConnectionStatus.Discovering, viewModel.uiState.value.status)
     assertTrue(transport.discoveryStarted)
+  }
+
+  @Test
+  fun startDiscoveryAlsoAdvertisesForFasterPairing() = runTest {
+    val transport = FakeChatTransport()
+    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) }, payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads")), localDeviceId = "local")
+
+    viewModel.startDiscovery()
+
+    assertTrue(transport.discoveryStarted)
+    assertTrue(transport.advertisingStarted)
+  }
+
+  @Test
+  fun connectedEventStopsDiscoveryToProtectEstablishedLink() = runTest {
+    val transport = FakeChatTransport()
+    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) }, payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads")), localDeviceId = "local")
+
+    viewModel.startDiscovery()
+    transport.clearDiscoveryState()
+    advanceUntilIdle()
+
+    transport.emit(TransportEvent.Connected(NearbyEndpoint("endpoint-b", "Phone B")))
+    advanceUntilIdle()
+
+    assertTrue(transport.discoveryStopped)
+  }
+
+  @Test
+  fun endpointFoundWithLocalDeviceIdIsIgnored() = runTest {
+    val transport = FakeChatTransport()
+    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) }, payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads")), localDeviceId = "local", defaultDisplayName = "T517D")
+
+    viewModel.startDiscovery()
+    advanceUntilIdle()
+    transport.emit(TransportEvent.EndpointFound(NearbyEndpoint("loopback", "T517D", deviceId = "local")))
+    transport.emit(TransportEvent.EndpointFound(NearbyEndpoint("endpoint-b", "T517D", deviceId = "remote")))
+    advanceUntilIdle()
+
+    assertEquals(listOf(NearbyEndpoint("endpoint-b", "T517D", deviceId = "remote")), viewModel.uiState.value.discoveredEndpoints)
   }
 
   @Test
@@ -74,7 +114,7 @@ class MainScreenViewModelTest {
       )
     val historyRepository = FakeChatHistoryRepository(persisted)
 
-    val viewModel = MainScreenViewModel(FakeChatTransport(), requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage("", "image/jpeg", 1, 1)) }, localDeviceId = "local", historyRepository = historyRepository)
+    val viewModel = MainScreenViewModel(FakeChatTransport(), requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) }, payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads")), localDeviceId = "local", historyRepository = historyRepository)
 
     assertEquals(persisted, viewModel.uiState.value.messages)
   }
@@ -85,7 +125,8 @@ class MainScreenViewModelTest {
       MainScreenViewModel(
         FakeChatTransport(),
         requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) },
-        compressImage = { Result.success(com.example.offlinelink.image.CompressedImage("", "image/jpeg", 1, 1)) },
+        compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) },
+        payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads")),
         localDeviceId = "local",
         defaultDisplayName = "Pixel 8",
       )
@@ -99,7 +140,8 @@ class MainScreenViewModelTest {
       MainScreenViewModel(
         FakeChatTransport(),
         requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) },
-        compressImage = { Result.success(com.example.offlinelink.image.CompressedImage("", "image/jpeg", 1, 1)) },
+        compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) },
+        payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads")),
         localDeviceId = "local",
         defaultAvatarName = "Team Lead",
       )
@@ -110,7 +152,7 @@ class MainScreenViewModelTest {
   @Test
   fun connectedEventSendsHelloWithCurrentGroupName() = runTest {
     val transport = FakeChatTransport()
-    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage("", "image/jpeg", 1, 1)) }, localDeviceId = "local")
+    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) }, payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads")), localDeviceId = "local")
 
     viewModel.setGroupName("Field Team")
     advanceUntilIdle()
@@ -124,7 +166,7 @@ class MainScreenViewModelTest {
   @Test
   fun connectedEventDoesNotAdvertiseTemporaryEndpointIdAsGroupMember() = runTest {
     val transport = FakeChatTransport()
-    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage("", "image/jpeg", 1, 1)) }, localDeviceId = "device-a")
+    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) }, payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads")), localDeviceId = "device-a")
 
     advanceUntilIdle()
     transport.emit(TransportEvent.Connected(NearbyEndpoint("endpoint-b", "Phone B")))
@@ -137,7 +179,7 @@ class MainScreenViewModelTest {
   @Test
   fun setGroupNameWhileConnectedBroadcastsUpdatedHello() = runTest {
     val transport = FakeChatTransport()
-    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage("", "image/jpeg", 1, 1)) }, localDeviceId = "local")
+    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) }, payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads")), localDeviceId = "local")
 
     advanceUntilIdle()
     transport.emit(TransportEvent.Connected(NearbyEndpoint("endpoint-b", "Phone B")))
@@ -157,7 +199,7 @@ class MainScreenViewModelTest {
   @Test
   fun incomingHelloUpdatesGroupNameAndConnectedMemberName() = runTest {
     val transport = FakeChatTransport()
-    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage("", "image/jpeg", 1, 1)) }, localDeviceId = "local")
+    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) }, payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads")), localDeviceId = "local")
 
     advanceUntilIdle()
     transport.emit(TransportEvent.Connected(NearbyEndpoint("endpoint-b", "Nearby device")))
@@ -183,7 +225,7 @@ class MainScreenViewModelTest {
   @Test
   fun incomingHelloFromNewEndpointRebroadcastsRosterToExistingEndpoints() = runTest {
     val transport = FakeChatTransport()
-    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage("", "image/jpeg", 1, 1)) }, localDeviceId = "device-a")
+    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) }, payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads")), localDeviceId = "device-a")
 
     advanceUntilIdle()
     transport.emit(TransportEvent.Connected(NearbyEndpoint("endpoint-b", "Phone B")))
@@ -234,7 +276,7 @@ class MainScreenViewModelTest {
   @Test
   fun disconnectedRelayStartsAdvertisingWhenLocalDeviceIsLowestRemainingMember() = runTest {
     val transport = FakeChatTransport()
-    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage("", "image/jpeg", 1, 1)) }, localDeviceId = "device-b")
+    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) }, payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads")), localDeviceId = "device-b")
 
     advanceUntilIdle()
     transport.emit(TransportEvent.Connected(NearbyEndpoint("endpoint-a", "Phone A")))
@@ -268,7 +310,7 @@ class MainScreenViewModelTest {
   @Test
   fun disconnectedRelayStartsDiscoveryAndAutoConnectsWhenLocalDeviceIsNotLowestRemainingMember() = runTest {
     val transport = FakeChatTransport()
-    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage("", "image/jpeg", 1, 1)) }, localDeviceId = "device-c")
+    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) }, payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads")), localDeviceId = "device-c")
 
     advanceUntilIdle()
     transport.emit(TransportEvent.Connected(NearbyEndpoint("endpoint-a", "Phone A")))
@@ -302,9 +344,64 @@ class MainScreenViewModelTest {
   }
 
   @Test
+  fun disconnectingOneMemberKeepsGroupMemberAndStartsDiscoveryForReconnect() = runTest {
+    val transport = FakeChatTransport()
+    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) }, payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads")), localDeviceId = "device-a")
+
+    advanceUntilIdle()
+    transport.emit(TransportEvent.Connected(NearbyEndpoint("endpoint-b", "Phone B")))
+    advanceUntilIdle()
+    transport.emit(
+      TransportEvent.BytesReceived(
+        endpointId = "endpoint-b",
+        bytes =
+          ChatProtocol.encodeHello(
+            senderId = "device-b",
+            displayName = "Phone B",
+            members =
+              listOf(
+                WireMember("device-a", "Phone A"),
+                WireMember("device-b", "Phone B"),
+                WireMember("device-c", "Phone C"),
+              ),
+          ),
+      ),
+    )
+    advanceUntilIdle()
+    transport.emit(TransportEvent.Connected(NearbyEndpoint("endpoint-c", "Phone C")))
+    advanceUntilIdle()
+    transport.emit(
+      TransportEvent.BytesReceived(
+        endpointId = "endpoint-c",
+        bytes =
+          ChatProtocol.encodeHello(
+            senderId = "device-c",
+            displayName = "Phone C",
+            members =
+              listOf(
+                WireMember("device-a", "Phone A"),
+                WireMember("device-b", "Phone B"),
+                WireMember("device-c", "Phone C"),
+              ),
+          ),
+      ),
+    )
+    advanceUntilIdle()
+    transport.clearDiscoveryState()
+
+    transport.emit(TransportEvent.Disconnected("endpoint-b"))
+    advanceUntilIdle()
+
+    assertEquals(listOf("Phone B", "Phone C"), viewModel.uiState.value.groupMembers.map { it.displayName })
+    assertEquals(listOf(GroupMemberStatus.Reconnecting, GroupMemberStatus.Online), viewModel.uiState.value.groupMembers.map { it.status })
+    assertTrue(transport.discoveryStarted)
+    assertEquals(ConnectionStatus.Connected, viewModel.uiState.value.status)
+  }
+
+  @Test
   fun disconnectedRelayMarksRemainingMembersReconnectingDuringRecovery() = runTest {
     val transport = FakeChatTransport()
-    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage("", "image/jpeg", 1, 1)) }, localDeviceId = "device-c")
+    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) }, payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads")), localDeviceId = "device-c")
 
     advanceUntilIdle()
     transport.emit(TransportEvent.Connected(NearbyEndpoint("endpoint-a", "Phone A")))
@@ -336,7 +433,7 @@ class MainScreenViewModelTest {
   @Test
   fun recoveryDiscoveryIgnoresEndpointsOutsideRemainingRoster() = runTest {
     val transport = FakeChatTransport()
-    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage("", "image/jpeg", 1, 1)) }, localDeviceId = "device-c")
+    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) }, payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads")), localDeviceId = "device-c")
 
     advanceUntilIdle()
     transport.emit(TransportEvent.Connected(NearbyEndpoint("endpoint-a", "Phone A")))
@@ -375,7 +472,7 @@ class MainScreenViewModelTest {
   @Test
   fun recoveryModeRejectsIncomingConnectionOutsideRemainingRoster() = runTest {
     val transport = FakeChatTransport()
-    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage("", "image/jpeg", 1, 1)) }, localDeviceId = "device-b")
+    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) }, payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads")), localDeviceId = "device-b")
 
     advanceUntilIdle()
     transport.emit(TransportEvent.Connected(NearbyEndpoint("endpoint-a", "Phone A")))
@@ -432,7 +529,7 @@ class MainScreenViewModelTest {
   @Test
   fun recoveryModeAutomaticallyAcceptsIncomingConnectionRequest() = runTest {
     val transport = FakeChatTransport()
-    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage("", "image/jpeg", 1, 1)) }, localDeviceId = "device-b")
+    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) }, payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads")), localDeviceId = "device-b")
 
     advanceUntilIdle()
     transport.emit(TransportEvent.Connected(NearbyEndpoint("endpoint-a", "Phone A")))
@@ -475,7 +572,7 @@ class MainScreenViewModelTest {
   @Test
   fun duplicateDisconnectEventDoesNotRestartGroupRecovery() = runTest {
     val transport = FakeChatTransport()
-    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage("", "image/jpeg", 1, 1)) }, localDeviceId = "device-b")
+    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) }, payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads")), localDeviceId = "device-b")
 
     advanceUntilIdle()
     transport.emit(TransportEvent.Connected(NearbyEndpoint("endpoint-a", "Phone A")))
@@ -515,7 +612,7 @@ class MainScreenViewModelTest {
   @Test
   fun alreadyAdvertisingFailureDoesNotReplaceRecoveryStatus() = runTest {
     val transport = FakeChatTransport()
-    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage("", "image/jpeg", 1, 1)) }, localDeviceId = "device-b")
+    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) }, payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads")), localDeviceId = "device-b")
 
     advanceUntilIdle()
     transport.emit(TransportEvent.Connected(NearbyEndpoint("endpoint-a", "Phone A")))
@@ -550,7 +647,7 @@ class MainScreenViewModelTest {
   @Test
   fun alreadyDiscoveringFailureDoesNotReplaceRecoveryStatus() = runTest {
     val transport = FakeChatTransport()
-    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage("", "image/jpeg", 1, 1)) }, localDeviceId = "device-c")
+    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) }, payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads")), localDeviceId = "device-c")
 
     advanceUntilIdle()
     transport.emit(TransportEvent.Connected(NearbyEndpoint("endpoint-a", "Phone A")))
@@ -585,7 +682,7 @@ class MainScreenViewModelTest {
   @Test
   fun incomingDefaultGroupNameDoesNotReplaceLocalCustomGroupName() = runTest {
     val transport = FakeChatTransport()
-    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage("", "image/jpeg", 1, 1)) }, localDeviceId = "local")
+    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) }, payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads")), localDeviceId = "local")
 
     viewModel.setGroupName("Field Team")
     advanceUntilIdle()
@@ -611,7 +708,7 @@ class MainScreenViewModelTest {
   @Test
   fun incomingDifferentCustomGroupNameKeepsLocalGroupAndShowsWarning() = runTest {
     val transport = FakeChatTransport()
-    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage("", "image/jpeg", 1, 1)) }, localDeviceId = "local")
+    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) }, payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads")), localDeviceId = "local")
 
     viewModel.setGroupName("Field Team")
     advanceUntilIdle()
@@ -639,7 +736,7 @@ class MainScreenViewModelTest {
   @Test
   fun incomingMatchingGroupNameClearsMismatchWarning() = runTest {
     val transport = FakeChatTransport()
-    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage("", "image/jpeg", 1, 1)) }, localDeviceId = "local")
+    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) }, payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads")), localDeviceId = "local")
 
     viewModel.setGroupName("Field Team")
     advanceUntilIdle()
@@ -681,7 +778,7 @@ class MainScreenViewModelTest {
   @Test
   fun setGroupNameClearsExistingGroupMismatchWarning() = runTest {
     val transport = FakeChatTransport()
-    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage("", "image/jpeg", 1, 1)) }, localDeviceId = "local")
+    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) }, payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads")), localDeviceId = "local")
 
     viewModel.setGroupName("Field Team")
     advanceUntilIdle()
@@ -711,7 +808,7 @@ class MainScreenViewModelTest {
   @Test
   fun sendMessageQueuesAndSendsPayloadWhenConnected() = runTest {
     val transport = FakeChatTransport()
-    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage("", "image/jpeg", 1, 1)) }, localDeviceId = "local")
+    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) }, payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads")), localDeviceId = "local")
 
     advanceUntilIdle()
     transport.emit(TransportEvent.Connected(NearbyEndpoint("endpoint-b", "Phone B")))
@@ -729,7 +826,7 @@ class MainScreenViewModelTest {
   fun sendMessagePersistsUpdatedMessageStatus() = runTest {
     val transport = FakeChatTransport()
     val historyRepository = FakeChatHistoryRepository()
-    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage("", "image/jpeg", 1, 1)) }, localDeviceId = "local", historyRepository = historyRepository)
+    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) }, payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads")), localDeviceId = "local", historyRepository = historyRepository)
 
     advanceUntilIdle()
     transport.emit(TransportEvent.Connected(NearbyEndpoint("endpoint-b", "Phone B")))
@@ -760,7 +857,7 @@ class MainScreenViewModelTest {
         status = MessageStatus.Received,
       )
     val transport = FakeChatTransport()
-    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage("", "image/jpeg", 1, 1)) }, localDeviceId = "local", historyRepository = FakeChatHistoryRepository(listOf(pendingMessage, deliveredMessage)))
+    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) }, payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads")), localDeviceId = "local", historyRepository = FakeChatHistoryRepository(listOf(pendingMessage, deliveredMessage)))
 
     advanceUntilIdle()
     transport.emit(TransportEvent.Connected(NearbyEndpoint("endpoint-b", "Phone B")))
@@ -777,7 +874,7 @@ class MainScreenViewModelTest {
   @Test
   fun retryMessageResendsFailedLocalMessageToConnectedEndpoints() = runTest {
     val transport = FakeChatTransport()
-    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage("", "image/jpeg", 1, 1)) }, localDeviceId = "local")
+    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) }, payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads")), localDeviceId = "local")
 
     advanceUntilIdle()
     transport.emit(TransportEvent.Connected(NearbyEndpoint("endpoint-b", "Phone B")))
@@ -815,7 +912,7 @@ class MainScreenViewModelTest {
         ),
       )
     val historyRepository = FakeChatHistoryRepository(persisted)
-    val viewModel = MainScreenViewModel(FakeChatTransport(), requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage("", "image/jpeg", 1, 1)) }, localDeviceId = "local", historyRepository = historyRepository)
+    val viewModel = MainScreenViewModel(FakeChatTransport(), requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) }, payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads")), localDeviceId = "local", historyRepository = historyRepository)
 
     viewModel.clearMessages()
     advanceUntilIdle()
@@ -837,7 +934,7 @@ class MainScreenViewModelTest {
         isLocal = true,
       )
     val transport = FakeChatTransport()
-    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage("", "image/jpeg", 1, 1)) }, localDeviceId = "local", historyRepository = FakeChatHistoryRepository(listOf(pendingMessage)))
+    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) }, payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads")), localDeviceId = "local", historyRepository = FakeChatHistoryRepository(listOf(pendingMessage)))
 
     advanceUntilIdle()
     transport.emit(TransportEvent.Connected(NearbyEndpoint("endpoint-b", "Phone B")))
@@ -856,7 +953,7 @@ class MainScreenViewModelTest {
   @Test
   fun sendMessageBroadcastsPayloadToEveryConnectedEndpoint() = runTest {
     val transport = FakeChatTransport()
-    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage("", "image/jpeg", 1, 1)) }, localDeviceId = "local")
+    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) }, payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads")), localDeviceId = "local")
 
     advanceUntilIdle()
     transport.emit(TransportEvent.Connected(NearbyEndpoint("endpoint-b", "Phone B")))
@@ -876,7 +973,7 @@ class MainScreenViewModelTest {
   @Test
   fun sendVoiceMessageBroadcastsPayloadToEveryConnectedEndpoint() = runTest {
     val transport = FakeChatTransport()
-    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage("", "image/jpeg", 1, 1)) }, localDeviceId = "local")
+    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) }, payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads")), localDeviceId = "local")
 
     advanceUntilIdle()
     transport.emit(TransportEvent.Connected(NearbyEndpoint("endpoint-b", "Phone B")))
@@ -930,7 +1027,7 @@ class MainScreenViewModelTest {
   @Test
   fun startCallSendsCallRequestToConnectedEndpoint() = runTest {
     val transport = FakeChatTransport()
-    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage("", "image/jpeg", 1, 1)) }, localDeviceId = "local")
+    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) }, payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads")), localDeviceId = "local")
 
     advanceUntilIdle()
     transport.emit(TransportEvent.Connected(NearbyEndpoint("endpoint-b", "Phone B")))
@@ -950,7 +1047,7 @@ class MainScreenViewModelTest {
   @Test
   fun startCallCanTargetSelectedConnectedEndpoint() = runTest {
     val transport = FakeChatTransport()
-    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage("", "image/jpeg", 1, 1)) }, localDeviceId = "local")
+    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) }, payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads")), localDeviceId = "local")
 
     advanceUntilIdle()
     transport.emit(TransportEvent.Connected(NearbyEndpoint("endpoint-b", "Phone B")))
@@ -969,7 +1066,7 @@ class MainScreenViewModelTest {
   @Test
   fun startCallCanTargetKnownGroupMemberThroughRelayEndpoint() = runTest {
     val transport = FakeChatTransport()
-    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage("", "image/jpeg", 1, 1)) }, localDeviceId = "device-a")
+    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) }, payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads")), localDeviceId = "device-a")
 
     advanceUntilIdle()
     transport.emit(TransportEvent.Connected(NearbyEndpoint("endpoint-b", "Phone B")))
@@ -1007,7 +1104,7 @@ class MainScreenViewModelTest {
   @Test
   fun startCallWithMissingTargetDoesNotSendCallRequest() = runTest {
     val transport = FakeChatTransport()
-    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage("", "image/jpeg", 1, 1)) }, localDeviceId = "local")
+    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) }, payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads")), localDeviceId = "local")
 
     advanceUntilIdle()
     transport.emit(TransportEvent.Connected(NearbyEndpoint("endpoint-b", "Phone B")))
@@ -1025,7 +1122,7 @@ class MainScreenViewModelTest {
   @Test
   fun incomingCallRequestForAnotherMemberIsForwardedToTargetEndpoint() = runTest {
     val transport = FakeChatTransport()
-    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage("", "image/jpeg", 1, 1)) }, localDeviceId = "device-b")
+    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) }, payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads")), localDeviceId = "device-b")
 
     advanceUntilIdle()
     transport.emit(TransportEvent.Connected(NearbyEndpoint("endpoint-a", "Phone A")))
@@ -1061,7 +1158,7 @@ class MainScreenViewModelTest {
   @Test
   fun incomingCallRequestShowsIncomingCallState() = runTest {
     val transport = FakeChatTransport()
-    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage("", "image/jpeg", 1, 1)) }, localDeviceId = "local")
+    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) }, payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads")), localDeviceId = "local")
 
     advanceUntilIdle()
     transport.emit(TransportEvent.Connected(NearbyEndpoint("endpoint-b", "Phone B")))
@@ -1088,7 +1185,7 @@ class MainScreenViewModelTest {
   @Test
   fun acceptIncomingCallSendsCallAcceptAndActivatesCall() = runTest {
     val transport = FakeChatTransport()
-    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage("", "image/jpeg", 1, 1)) }, localDeviceId = "local")
+    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) }, payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads")), localDeviceId = "local")
 
     advanceUntilIdle()
     transport.emit(TransportEvent.Connected(NearbyEndpoint("endpoint-b", "Phone B")))
@@ -1114,7 +1211,7 @@ class MainScreenViewModelTest {
   @Test
   fun endActiveCallSendsCallEndAndClearsState() = runTest {
     val transport = FakeChatTransport()
-    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage("", "image/jpeg", 1, 1)) }, localDeviceId = "local")
+    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) }, payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads")), localDeviceId = "local")
 
     advanceUntilIdle()
     transport.emit(TransportEvent.Connected(NearbyEndpoint("endpoint-b", "Phone B")))
@@ -1141,7 +1238,7 @@ class MainScreenViewModelTest {
   @Test
   fun sendCallVoiceMessageTargetsActiveCallPeerOnly() = runTest {
     val transport = FakeChatTransport()
-    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage("", "image/jpeg", 1, 1)) }, localDeviceId = "local")
+    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) }, payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads")), localDeviceId = "local")
 
     advanceUntilIdle()
     transport.emit(TransportEvent.Connected(NearbyEndpoint("endpoint-b", "Phone B")))
@@ -1170,7 +1267,7 @@ class MainScreenViewModelTest {
   @Test
   fun sendStreamingCallAudioFrameShowsLiveVoiceActivity() = runTest {
     val transport = FakeChatTransport()
-    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage("", "image/jpeg", 1, 1)) }, localDeviceId = "local")
+    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) }, payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads")), localDeviceId = "local")
 
     advanceUntilIdle()
     transport.emit(TransportEvent.Connected(NearbyEndpoint("endpoint-b", "Phone B")))
@@ -1205,7 +1302,7 @@ class MainScreenViewModelTest {
   @Test
   fun streamingCallAudioBypassesPendingQueuedSends() = runTest {
     val transport = FakeChatTransport(autoCompleteSends = false)
-    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage("", "image/jpeg", 1, 1)) }, localDeviceId = "local")
+    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) }, payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads")), localDeviceId = "local")
 
     advanceUntilIdle()
     transport.emit(TransportEvent.Connected(NearbyEndpoint("endpoint-b", "Phone B")))
@@ -1235,7 +1332,7 @@ class MainScreenViewModelTest {
   @Test
   fun incomingCallVoiceMessageCreatesPlaybackEventWithoutAppendingChatMessage() = runTest {
     val transport = FakeChatTransport()
-    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage("", "image/jpeg", 1, 1)) }, localDeviceId = "local")
+    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) }, payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads")), localDeviceId = "local")
 
     advanceUntilIdle()
     transport.emit(TransportEvent.Connected(NearbyEndpoint("endpoint-b", "Phone B")))
@@ -1279,7 +1376,7 @@ class MainScreenViewModelTest {
   @Test
   fun incomingStreamingCallAudioFrameShowsLiveVoicePlayback() = runTest {
     val transport = FakeChatTransport()
-    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage("", "image/jpeg", 1, 1)) }, localDeviceId = "local")
+    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) }, payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads")), localDeviceId = "local")
 
     advanceUntilIdle()
     transport.emit(TransportEvent.Connected(NearbyEndpoint("endpoint-b", "Phone B")))
@@ -1327,7 +1424,7 @@ class MainScreenViewModelTest {
   @Test
   fun finishingCallVoicePlaybackClearsPlaybackEvent() = runTest {
     val transport = FakeChatTransport()
-    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage("", "image/jpeg", 1, 1)) }, localDeviceId = "local")
+    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) }, payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads")), localDeviceId = "local")
 
     advanceUntilIdle()
     transport.emit(TransportEvent.Connected(NearbyEndpoint("endpoint-b", "Phone B")))
@@ -1361,7 +1458,7 @@ class MainScreenViewModelTest {
   @Test
   fun incomingMessageIsForwardedToOtherConnectedEndpoints() = runTest {
     val transport = FakeChatTransport()
-    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage("", "image/jpeg", 1, 1)) }, localDeviceId = "local")
+    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) }, payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads")), localDeviceId = "local")
 
     advanceUntilIdle()
     transport.emit(TransportEvent.Connected(NearbyEndpoint("endpoint-b", "Phone B")))
@@ -1402,7 +1499,7 @@ class MainScreenViewModelTest {
   @Test
   fun incomingVoiceMessageIsForwardedToOtherConnectedEndpoints() = runTest {
     val transport = FakeChatTransport()
-    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage("", "image/jpeg", 1, 1)) }, localDeviceId = "local")
+    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) }, payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads")), localDeviceId = "local")
 
     advanceUntilIdle()
     transport.emit(TransportEvent.Connected(NearbyEndpoint("endpoint-b", "Phone B")))
@@ -1445,7 +1542,7 @@ class MainScreenViewModelTest {
   @Test
   fun connectedEventClearsDiscoveredEndpoints() = runTest {
     val transport = FakeChatTransport()
-    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage("", "image/jpeg", 1, 1)) }, localDeviceId = "local")
+    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) }, payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads")), localDeviceId = "local")
     val endpoint = NearbyEndpoint("endpoint-b", "Phone B")
 
     advanceUntilIdle()
@@ -1475,6 +1572,10 @@ private class FakeChatTransport(
     private set
   var discoveryStarted = false
     private set
+  var discoveryStartCount = 0
+    private set
+  var discoveryStopped = false
+    private set
   var sentPayloads: List<SentPayload> = emptyList()
     private set
   var requestedConnections: List<NearbyEndpoint> = emptyList()
@@ -1494,6 +1595,12 @@ private class FakeChatTransport(
     sentPayloads = emptyList()
   }
 
+  fun clearDiscoveryState() {
+    discoveryStarted = false
+    discoveryStartCount = 0
+    discoveryStopped = false
+  }
+
   fun queueSendResult(result: Result<Unit>) {
     queuedSendResults.addLast(result)
   }
@@ -1502,13 +1609,23 @@ private class FakeChatTransport(
     pendingSendCallbacks.removeFirst().invoke(result ?: nextSendResult())
   }
 
-  override fun startAdvertising(displayName: String) {
+  override fun startAdvertising(
+    displayName: String,
+    deviceId: String,
+  ) {
     advertisingStarted = true
     advertisingStartCount += 1
   }
 
   override fun startDiscovery() {
     discoveryStarted = true
+    discoveryStartCount += 1
+    discoveryStopped = false
+  }
+
+  override fun stopDiscovery() {
+    discoveryStopped = true
+    discoveryStarted = false
   }
 
   override fun requestConnection(endpoint: NearbyEndpoint, displayName: String) {

@@ -7,6 +7,7 @@ import com.example.offlinelink.audio.isStreamingCallAudioMimeType
 import com.example.offlinelink.chat.ChatSessionStore
 import com.example.offlinelink.data.ChatHistoryRepository
 import com.example.offlinelink.data.NoOpChatHistoryRepository
+import com.example.offlinelink.data.PayloadCache
 import com.example.offlinelink.image.ImageCompressor
 import com.example.offlinelink.location.DeviceLocation
 import com.example.offlinelink.model.CallAudioPlaybackFrame
@@ -47,8 +48,9 @@ class MainScreenViewModel(
   defaultDisplayName: String = "OfflineLink",
   defaultAvatarName: String = "",
   private val historyRepository: ChatHistoryRepository = NoOpChatHistoryRepository,
+  private val payloadCache: PayloadCache,
 ) : ViewModel() {
-  private val store = ChatSessionStore(localDeviceId = localDeviceId)
+  private val store = ChatSessionStore(localDeviceId = localDeviceId, payloadCache = payloadCache)
   private val payloadSender = PriorityPayloadSender(transport)
   private val endpointMemberIds = mutableMapOf<String, String>()
   private var recoveryMode = false
@@ -98,15 +100,17 @@ class MainScreenViewModel(
   fun startAdvertising() {
     recoveryMode = false
     recoveryConnectionAttempts.clear()
-    store.setStatus(ConnectionStatus.Advertising, "Visible as ${uiState.value.displayName}")
-    transport.startAdvertising(uiState.value.displayName)
+    store.setStatus(ConnectionStatus.Advertising, "Visible and searching as ${uiState.value.displayName}")
+    transport.startAdvertising(uiState.value.displayName, uiState.value.localDeviceId)
+    transport.startDiscovery()
   }
 
   fun startDiscovery() {
     recoveryMode = false
     recoveryConnectionAttempts.clear()
-    store.setStatus(ConnectionStatus.Discovering, "Searching nearby devices")
+    store.setStatus(ConnectionStatus.Discovering, "Visible and searching nearby devices")
     store.setDiscoveredEndpoints(emptyList())
+    transport.startAdvertising(uiState.value.displayName, uiState.value.localDeviceId)
     transport.startDiscovery()
   }
 
@@ -292,9 +296,11 @@ class MainScreenViewModel(
     }
     compressImage(uri)
       .onSuccess { img ->
+        val payloadKey = payloadCache.put(img.bytes)
+        val base64ForWire = Base64.Default.encode(img.bytes)
         val message =
           store.queueOutgoingImageMessage(
-            imageBase64 = img.imageBase64,
+            payloadKey = payloadKey,
             mimeType = img.mimeType,
             width = img.width,
             height = img.height,
@@ -304,7 +310,7 @@ class MainScreenViewModel(
             messageId = message.id,
             conversationId = message.conversationId,
             senderId = message.senderId,
-            imageBase64 = img.imageBase64,
+            imageBase64 = base64ForWire,
             mimeType = img.mimeType,
             width = img.width,
             height = img.height,
@@ -494,21 +500,22 @@ class MainScreenViewModel(
       return
     }
 
+    val payloadKey = payloadCache.put(audioBytes)
     val message =
       store.queueOutgoingVoiceMessage(
-        audioBase64 = Base64.Default.encode(audioBytes),
+        payloadKey = payloadKey,
         durationMs = durationMs,
         mimeType = mimeType,
       )
-    val voice = message.voice ?: return
+    val base64ForWire = Base64.Default.encode(audioBytes)
     val bytes =
       ChatProtocol.encodeVoiceMessage(
         messageId = message.id,
         conversationId = message.conversationId,
         senderId = message.senderId,
-        audioBase64 = voice.audioBase64,
-        durationMs = voice.durationMs,
-        mimeType = voice.mimeType,
+        audioBase64 = base64ForWire,
+        durationMs = durationMs,
+        mimeType = mimeType,
         createdAt = message.createdAt,
       )
     val pendingEndpointIds = endpoints.map { it.id }.toMutableSet()
@@ -582,11 +589,12 @@ class MainScreenViewModel(
           )
         MessageKind.Voice -> {
           val voice = message.voice ?: return
+          val rawBytes = payloadCache.get(voice.payloadKey) ?: return
           ChatProtocol.encodeVoiceMessage(
             messageId = message.id,
             conversationId = message.conversationId,
             senderId = message.senderId,
-            audioBase64 = voice.audioBase64,
+            audioBase64 = Base64.Default.encode(rawBytes),
             durationMs = voice.durationMs,
             mimeType = voice.mimeType,
             createdAt = message.createdAt,
@@ -606,11 +614,12 @@ class MainScreenViewModel(
         }
         MessageKind.Image -> {
           val image = message.image ?: return
+          val rawBytes = payloadCache.get(image.payloadKey) ?: return
           ChatProtocol.encodeImage(
             messageId = message.id,
             conversationId = message.conversationId,
             senderId = message.senderId,
-            imageBase64 = image.imageBase64,
+            imageBase64 = Base64.Default.encode(rawBytes),
             mimeType = image.mimeType,
             width = image.width,
             height = image.height,
@@ -641,11 +650,20 @@ class MainScreenViewModel(
   private fun handleTransportEvent(event: TransportEvent) {
     when (event) {
       is TransportEvent.EndpointFound -> {
+        if (event.endpoint.isLocalDevice()) {
+          store.removeEndpoint(event.endpoint.id)
+          return
+        }
         store.upsertEndpoint(event.endpoint)
         maybeConnectToRecoveryEndpoint(event.endpoint)
       }
       is TransportEvent.EndpointLost -> store.removeEndpoint(event.endpointId)
       is TransportEvent.ConnectionInitiated -> {
+        if (event.pendingConnection.deviceId == uiState.value.localDeviceId) {
+          transport.rejectConnection(event.pendingConnection.endpointId)
+          store.setPendingConnection(null)
+          return
+        }
         if (recoveryMode) {
           if (!isExpectedRecoveryEndpoint(event.pendingConnection.endpointName)) {
             transport.rejectConnection(event.pendingConnection.endpointId)
@@ -661,8 +679,13 @@ class MainScreenViewModel(
         }
       }
       is TransportEvent.Connected -> {
+        if (event.endpoint.isLocalDevice()) {
+          payloadSender.clearEndpoint(event.endpoint.id)
+          return
+        }
         recoveryMode = false
         recoveryConnectionAttempts.remove(event.endpoint.id)
+        transport.stopDiscovery()
         store.addConnectedEndpoint(event.endpoint)
         sendHello(event.endpoint.id)
         retryUndeliveredMessages()
@@ -713,12 +736,13 @@ class MainScreenViewModel(
         sendPayload(endpointId, ChatProtocol.encodeAck(decoded.messageId), PayloadPriority.Control) { }
       }
       is DecodedWireMessage.VoiceMessage -> {
+        val payloadKey = payloadCache.put(Base64.Default.decode(decoded.audioBase64))
         val wasNewMessage =
           store.receiveRemoteVoiceMessage(
             messageId = decoded.messageId,
             conversationId = decoded.conversationId,
             senderId = decoded.senderId,
-            audioBase64 = decoded.audioBase64,
+            payloadKey = payloadKey,
             durationMs = decoded.durationMs,
             mimeType = decoded.mimeType,
             createdAt = decoded.createdAt,
@@ -729,14 +753,15 @@ class MainScreenViewModel(
         sendPayload(endpointId, ChatProtocol.encodeAck(decoded.messageId), PayloadPriority.Control) { }
       }
       is DecodedWireMessage.Ack -> store.acknowledge(decoded.messageId)
-      is DecodedWireMessage.Disconnect -> handleEndpointDisconnected(endpointId)
+      is DecodedWireMessage.Disconnect -> handleEndpointDisconnected(endpointId, shouldReconnect = false)
       is DecodedWireMessage.ImageMessage -> {
+        val payloadKey = payloadCache.put(Base64.Default.decode(decoded.imageBase64))
         val wasNewMessage =
           store.receiveRemoteImageMessage(
             messageId = decoded.messageId,
             conversationId = decoded.conversationId,
             senderId = decoded.senderId,
-            imageBase64 = decoded.imageBase64,
+            payloadKey = payloadKey,
             mimeType = decoded.mimeType,
             width = decoded.width,
             height = decoded.height,
@@ -1115,23 +1140,54 @@ class MainScreenViewModel(
       .toList()
   }
 
-  private fun handleEndpointDisconnected(endpointId: String) {
+  private fun handleEndpointDisconnected(
+    endpointId: String,
+    shouldReconnect: Boolean = true,
+  ) {
     payloadSender.clearEndpoint(endpointId)
-    val wasConnected = uiState.value.connectedEndpoints.any { it.id == endpointId }
+    val stateBeforeRemoval = uiState.value
+    val wasConnected = stateBeforeRemoval.connectedEndpoints.any { it.id == endpointId }
     val mappedMemberId = endpointMemberIds.remove(endpointId)
     val memberId = mappedMemberId ?: endpointId
-    val hadMember = uiState.value.groupMembers.any { it.id == memberId }
-    val hadTemporaryMember = memberId != endpointId && uiState.value.groupMembers.any { it.id == endpointId }
+    val disconnectedDisplayName =
+      stateBeforeRemoval.groupMembers.firstOrNull { it.id == memberId }?.displayName
+        ?: stateBeforeRemoval.connectedEndpoints.firstOrNull { it.id == endpointId }?.name
+        ?: "Nearby device"
+    val hadMember = stateBeforeRemoval.groupMembers.any { it.id == memberId }
+    val hadTemporaryMember = memberId != endpointId && stateBeforeRemoval.groupMembers.any { it.id == endpointId }
     if (!wasConnected && mappedMemberId == null && !hadMember && !hadTemporaryMember) return
     store.removeConnectedEndpoint(endpointId)
+    if (uiState.value.connectedEndpoints.isNotEmpty()) {
+      val rosterChanged =
+        if (shouldReconnect) {
+          store.markGroupMemberReconnecting(memberId, disconnectedDisplayName) ||
+            (memberId != endpointId && store.removeGroupMember(endpointId))
+        } else {
+          store.removeGroupMember(memberId) || (memberId != endpointId && store.removeGroupMember(endpointId))
+        }
+      if (rosterChanged) {
+        broadcastHello()
+      }
+      if (shouldReconnect && (hadMember || mappedMemberId != null || hadTemporaryMember)) {
+        startPartialGroupRecovery(disconnectedDisplayName)
+      }
+      return
+    }
     val removedMember = store.removeGroupMember(memberId)
     val removedTemporaryMember = memberId != endpointId && store.removeGroupMember(endpointId)
-    if ((removedMember || removedTemporaryMember) && uiState.value.connectedEndpoints.isNotEmpty()) {
-      broadcastHello()
-    }
-    if (uiState.value.connectedEndpoints.isEmpty() && uiState.value.groupMembers.isNotEmpty()) {
+    if (uiState.value.groupMembers.isNotEmpty()) {
       startGroupRecovery()
+    } else if (removedMember || removedTemporaryMember) {
+      store.setStatus(ConnectionStatus.Disconnected, "Disconnected")
     }
+  }
+
+  private fun startPartialGroupRecovery(memberName: String) {
+    recoveryMode = true
+    recoveryConnectionAttempts.clear()
+    store.setStatus(ConnectionStatus.Connected, "Reconnecting $memberName")
+    store.setDiscoveredEndpoints(emptyList())
+    transport.startDiscovery()
   }
 
   private fun startGroupRecovery() {
@@ -1140,7 +1196,7 @@ class MainScreenViewModel(
     store.markGroupMembersReconnecting()
     if (shouldAdvertiseDuringRecovery()) {
       store.setStatus(ConnectionStatus.Advertising, "Reforming group: visible as ${uiState.value.displayName}")
-      transport.startAdvertising(uiState.value.displayName)
+      transport.startAdvertising(uiState.value.displayName, uiState.value.localDeviceId)
     } else {
       store.setStatus(ConnectionStatus.Discovering, "Reforming group: searching nearby members")
       store.setDiscoveredEndpoints(emptyList())
@@ -1156,7 +1212,6 @@ class MainScreenViewModel(
 
   private fun maybeConnectToRecoveryEndpoint(endpoint: NearbyEndpoint) {
     if (!recoveryMode) return
-    if (uiState.value.status != ConnectionStatus.Discovering) return
     if (uiState.value.connectedEndpoints.any { it.id == endpoint.id }) return
     if (!isExpectedRecoveryEndpoint(endpoint.name)) return
     if (!recoveryConnectionAttempts.add(endpoint.id)) return
@@ -1165,11 +1220,20 @@ class MainScreenViewModel(
 
   private fun isExpectedRecoveryEndpoint(endpointName: String): Boolean {
     if (!recoveryMode) return true
-    val expectedNames =
-      uiState.value.groupMembers
+    val members = uiState.value.groupMembers
+    val reconnectingNames =
+      members
+        .filter { it.status == GroupMemberStatus.Reconnecting }
         .map { it.displayName.trim() }
         .filter { it.isNotEmpty() }
         .toSet()
+    val expectedNames =
+      reconnectingNames.ifEmpty {
+        members
+          .map { it.displayName.trim() }
+          .filter { it.isNotEmpty() }
+          .toSet()
+      }
     return expectedNames.isEmpty() || endpointName.trim() in expectedNames
   }
 
@@ -1182,6 +1246,8 @@ class MainScreenViewModel(
     val details = "${message} ${throwable?.message.orEmpty()}"
     return "STATUS_ALREADY_ADVERTISING" in details || "STATUS_ALREADY_DISCOVERING" in details
   }
+
+  private fun NearbyEndpoint.isLocalDevice(): Boolean = deviceId == uiState.value.localDeviceId
 
   private companion object {
     const val DEFAULT_GROUP_NAME = "Offline group"

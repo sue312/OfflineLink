@@ -1,5 +1,6 @@
 package com.example.offlinelink.chat
 
+import com.example.offlinelink.data.PayloadCache
 import com.example.offlinelink.model.ChatMessage
 import com.example.offlinelink.model.ChatUiState
 import com.example.offlinelink.model.CallState
@@ -23,6 +24,7 @@ import kotlinx.coroutines.flow.asStateFlow
 class ChatSessionStore(
   private val localDeviceId: String,
   private val conversationId: String = "one-to-one",
+  private val payloadCache: PayloadCache? = null,
 ) {
   private val mutableState = MutableStateFlow(ChatUiState(localDeviceId = localDeviceId))
   val state: StateFlow<ChatUiState> = mutableState.asStateFlow()
@@ -123,6 +125,31 @@ class ChatSessionStore(
       )
   }
 
+  fun markGroupMemberReconnecting(
+    memberId: String,
+    displayName: String,
+  ): Boolean {
+    val current = mutableState.value
+    if (memberId == localDeviceId) return false
+    val cleanedName = displayName.ifBlank { "Nearby device" }
+    val existing = current.groupMembers.firstOrNull { it.id == memberId }
+    val groupMembers =
+      if (existing == null) {
+        current.groupMembers + GroupMember(memberId, cleanedName, GroupMemberStatus.Reconnecting)
+      } else {
+        current.groupMembers.map { member ->
+          if (member.id == memberId) {
+            member.copy(displayName = member.displayName.ifBlank { cleanedName }, status = GroupMemberStatus.Reconnecting)
+          } else {
+            member
+          }
+        }
+      }
+    if (groupMembers == current.groupMembers) return false
+    mutableState.value = current.copy(groupMembers = groupMembers)
+    return true
+  }
+
   fun removeConnectedEndpoint(endpointId: String) {
     val connectedEndpoints = mutableState.value.connectedEndpoints.filterNot { it.id == endpointId }
     val callState =
@@ -192,6 +219,7 @@ class ChatSessionStore(
   }
 
   fun clearMessages() {
+    mutableState.value.messages.forEach { deletePayloadFor(it) }
     mutableState.value =
       mutableState.value.copy(
         messages = emptyList(),
@@ -200,12 +228,20 @@ class ChatSessionStore(
   }
 
   fun deleteMessage(messageId: String) {
+    val message = mutableState.value.messages.firstOrNull { it.id == messageId }
+    message?.let { deletePayloadFor(it) }
     val messages = mutableState.value.messages.filterNot { it.id == messageId }
     mutableState.value =
       mutableState.value.copy(
         messages = messages,
         messageRevision = mutableState.value.messageRevision + 1,
       )
+  }
+
+  private fun deletePayloadFor(message: ChatMessage) {
+    val cache = payloadCache ?: return
+    message.voice?.let { cache.remove(it.payloadKey) }
+    message.image?.let { cache.remove(it.payloadKey) }
   }
 
   fun localMessagesPendingDelivery(): List<ChatMessage> =
@@ -326,7 +362,7 @@ class ChatSessionStore(
   }
 
   fun queueOutgoingVoiceMessage(
-    audioBase64: String,
+    payloadKey: String,
     durationMs: Long,
     mimeType: String,
     now: Long = System.currentTimeMillis(),
@@ -341,7 +377,7 @@ class ChatSessionStore(
         status = MessageStatus.Queued,
         isLocal = true,
         kind = MessageKind.Voice,
-        voice = VoiceAttachment(audioBase64, durationMs, mimeType),
+        voice = VoiceAttachment(payloadKey, durationMs, mimeType),
       )
     mutableState.value =
       mutableState.value.copy(
@@ -381,7 +417,7 @@ class ChatSessionStore(
     messageId: String,
     conversationId: String,
     senderId: String,
-    audioBase64: String,
+    payloadKey: String,
     durationMs: Long,
     mimeType: String,
     createdAt: Long,
@@ -397,7 +433,7 @@ class ChatSessionStore(
         status = MessageStatus.Received,
         isLocal = false,
         kind = MessageKind.Voice,
-        voice = VoiceAttachment(audioBase64, durationMs, mimeType),
+        voice = VoiceAttachment(payloadKey, durationMs, mimeType),
       )
     mutableState.value =
       mutableState.value.copy(
@@ -464,7 +500,7 @@ class ChatSessionStore(
   }
 
   fun queueOutgoingImageMessage(
-    imageBase64: String,
+    payloadKey: String,
     mimeType: String,
     width: Int,
     height: Int,
@@ -480,7 +516,7 @@ class ChatSessionStore(
         status = MessageStatus.Queued,
         isLocal = true,
         kind = MessageKind.Image,
-        image = ImageAttachment(imageBase64, mimeType, width, height),
+        image = ImageAttachment(payloadKey, mimeType, width, height),
       )
     mutableState.value =
       mutableState.value.copy(
@@ -494,7 +530,7 @@ class ChatSessionStore(
     messageId: String,
     conversationId: String,
     senderId: String,
-    imageBase64: String,
+    payloadKey: String,
     mimeType: String,
     width: Int,
     height: Int,
@@ -511,7 +547,7 @@ class ChatSessionStore(
         status = MessageStatus.Received,
         isLocal = false,
         kind = MessageKind.Image,
-        image = ImageAttachment(imageBase64, mimeType, width, height),
+        image = ImageAttachment(payloadKey, mimeType, width, height),
       )
     mutableState.value =
       mutableState.value.copy(
@@ -552,10 +588,10 @@ class ChatSessionStore(
       .values
       .map { member ->
         val existing = currentById[member.id]
-        if (existing?.status == GroupMemberStatus.Online && member.status != GroupMemberStatus.Online) {
-          member.copy(status = GroupMemberStatus.Online)
-        } else {
-          member
+        when {
+          existing?.status == GroupMemberStatus.Online && member.status != GroupMemberStatus.Online -> member.copy(status = GroupMemberStatus.Online)
+          existing?.status == GroupMemberStatus.Reconnecting && member.status != GroupMemberStatus.Online -> member.copy(status = GroupMemberStatus.Reconnecting)
+          else -> member
         }
       }
       .toList()

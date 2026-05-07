@@ -41,7 +41,7 @@ class ChatSessionStoreTest {
 
     val message =
       store.queueOutgoingVoiceMessage(
-        audioBase64 = "AQIDBA==",
+        payloadKey = "voice-key",
         durationMs = 2300L,
         mimeType = "audio/3gpp",
         now = 1000L,
@@ -49,7 +49,7 @@ class ChatSessionStoreTest {
 
     assertEquals(MessageKind.Voice, message.kind)
     assertEquals("Voice 3s", message.text)
-    assertEquals(VoiceAttachment("AQIDBA==", 2300L, "audio/3gpp"), message.voice)
+    assertEquals(VoiceAttachment("voice-key", 2300L, "audio/3gpp"), message.voice)
     assertEquals(MessageStatus.Queued, message.status)
     assertEquals(listOf(message), store.state.value.messages)
   }
@@ -161,7 +161,7 @@ class ChatSessionStoreTest {
         messageId = "voice-1",
         conversationId = "one-to-one",
         senderId = "device-b",
-        audioBase64 = "AQIDBA==",
+        payloadKey = "voice-key",
         durationMs = 2300L,
         mimeType = "audio/3gpp",
         createdAt = 2000L,
@@ -171,7 +171,7 @@ class ChatSessionStoreTest {
         messageId = "voice-1",
         conversationId = "one-to-one",
         senderId = "device-b",
-        audioBase64 = "AQIDBA==",
+        payloadKey = "voice-key",
         durationMs = 2300L,
         mimeType = "audio/3gpp",
         createdAt = 2000L,
@@ -181,7 +181,7 @@ class ChatSessionStoreTest {
     assertEquals(false, secondInsert)
     assertEquals(1, store.state.value.messages.size)
     assertEquals(MessageKind.Voice, store.state.value.messages.single().kind)
-    assertEquals(VoiceAttachment("AQIDBA==", 2300L, "audio/3gpp"), store.state.value.messages.single().voice)
+    assertEquals(VoiceAttachment("voice-key", 2300L, "audio/3gpp"), store.state.value.messages.single().voice)
   }
 
   @Test

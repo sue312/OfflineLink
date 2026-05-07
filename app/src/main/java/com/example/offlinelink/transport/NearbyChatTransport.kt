@@ -23,15 +23,19 @@ import kotlinx.coroutines.flow.asSharedFlow
 class NearbyChatTransport(context: Context) : ChatTransport {
   private val client: ConnectionsClient = Nearby.getConnectionsClient(context)
   private val mutableEvents = MutableSharedFlow<TransportEvent>(extraBufferCapacity = 64)
-  private val endpointNames = mutableMapOf<String, String>()
+  private val endpoints = mutableMapOf<String, AdvertisedEndpoint>()
+  private var localAdvertisedName = advertisedEndpointName("OfflineLink", "")
 
   override val events: Flow<TransportEvent> = mutableEvents.asSharedFlow()
 
-  override fun startAdvertising(displayName: String) {
-    client.stopDiscovery()
+  override fun startAdvertising(
+    displayName: String,
+    deviceId: String,
+  ) {
+    localAdvertisedName = advertisedEndpointName(displayName, deviceId)
     client
       .startAdvertising(
-        displayName,
+        localAdvertisedName,
         SERVICE_ID,
         connectionLifecycleCallback,
         AdvertisingOptions.Builder().setStrategy(STRATEGY).build(),
@@ -40,7 +44,6 @@ class NearbyChatTransport(context: Context) : ChatTransport {
   }
 
   override fun startDiscovery() {
-    client.stopAdvertising()
     client
       .startDiscovery(
         SERVICE_ID,
@@ -50,10 +53,14 @@ class NearbyChatTransport(context: Context) : ChatTransport {
       .addOnFailureListener { emitFailure("Could not start discovery", it) }
   }
 
+  override fun stopDiscovery() {
+    client.stopDiscovery()
+  }
+
   override fun requestConnection(endpoint: NearbyEndpoint, displayName: String) {
-    endpointNames[endpoint.id] = endpoint.name
+    endpoints[endpoint.id] = AdvertisedEndpoint(endpoint.name, endpoint.deviceId)
     client
-      .requestConnection(displayName, endpoint.id, connectionLifecycleCallback)
+      .requestConnection(localAdvertisedName, endpoint.id, connectionLifecycleCallback)
       .addOnFailureListener { emitFailure("Could not request connection", it) }
   }
 
@@ -81,12 +88,13 @@ class NearbyChatTransport(context: Context) : ChatTransport {
   private val endpointDiscoveryCallback =
     object : EndpointDiscoveryCallback() {
       override fun onEndpointFound(endpointId: String, info: DiscoveredEndpointInfo) {
-        endpointNames[endpointId] = info.endpointName
-        emit(TransportEvent.EndpointFound(NearbyEndpoint(endpointId, info.endpointName)))
+        val endpoint = parseAdvertisedEndpoint(info.endpointName)
+        endpoints[endpointId] = endpoint
+        emit(TransportEvent.EndpointFound(NearbyEndpoint(endpointId, endpoint.displayName, endpoint.deviceId)))
       }
 
       override fun onEndpointLost(endpointId: String) {
-        endpointNames.remove(endpointId)
+        endpoints.remove(endpointId)
         emit(TransportEvent.EndpointLost(endpointId))
       }
     }
@@ -94,13 +102,15 @@ class NearbyChatTransport(context: Context) : ChatTransport {
   private val connectionLifecycleCallback =
     object : ConnectionLifecycleCallback() {
       override fun onConnectionInitiated(endpointId: String, info: ConnectionInfo) {
-        endpointNames[endpointId] = info.endpointName
+        val endpoint = parseAdvertisedEndpoint(info.endpointName)
+        endpoints[endpointId] = endpoint
         emit(
           TransportEvent.ConnectionInitiated(
             PendingConnection(
               endpointId = endpointId,
-              endpointName = info.endpointName,
+              endpointName = endpoint.displayName,
               authenticationToken = info.authenticationDigits,
+              deviceId = endpoint.deviceId,
             ),
           ),
         )
@@ -108,7 +118,8 @@ class NearbyChatTransport(context: Context) : ChatTransport {
 
       override fun onConnectionResult(endpointId: String, resolution: ConnectionResolution) {
         if (resolution.status.isSuccess) {
-          emit(TransportEvent.Connected(NearbyEndpoint(endpointId, endpointNames[endpointId] ?: "Nearby device")))
+          val endpoint = endpoints[endpointId]
+          emit(TransportEvent.Connected(NearbyEndpoint(endpointId, endpoint?.displayName ?: "Nearby device", endpoint?.deviceId)))
         } else {
           emitFailure("Connection failed: ${resolution.status.statusMessage ?: resolution.status.statusCode}")
         }
@@ -137,8 +148,33 @@ class NearbyChatTransport(context: Context) : ChatTransport {
     mutableEvents.tryEmit(event)
   }
 
+  private data class AdvertisedEndpoint(
+    val displayName: String,
+    val deviceId: String?,
+  )
+
   private companion object {
     const val SERVICE_ID = "com.example.offlinelink.NEARBY_CHAT"
+    const val ADVERTISED_NAME_PREFIX = "OL1:"
     val STRATEGY: Strategy = Strategy.P2P_CLUSTER
+
+    fun advertisedEndpointName(
+      displayName: String,
+      deviceId: String,
+    ): String = "$ADVERTISED_NAME_PREFIX$deviceId:${displayName.ifBlank { "Nearby device" }}"
+
+    fun parseAdvertisedEndpoint(endpointName: String): AdvertisedEndpoint {
+      if (!endpointName.startsWith(ADVERTISED_NAME_PREFIX)) {
+        return AdvertisedEndpoint(displayName = endpointName.ifBlank { "Nearby device" }, deviceId = null)
+      }
+      val payload = endpointName.removePrefix(ADVERTISED_NAME_PREFIX)
+      val separatorIndex = payload.indexOf(':')
+      if (separatorIndex <= 0) {
+        return AdvertisedEndpoint(displayName = endpointName.ifBlank { "Nearby device" }, deviceId = null)
+      }
+      val deviceId = payload.substring(0, separatorIndex).ifBlank { null }
+      val displayName = payload.substring(separatorIndex + 1).ifBlank { "Nearby device" }
+      return AdvertisedEndpoint(displayName = displayName, deviceId = deviceId)
+    }
   }
 }

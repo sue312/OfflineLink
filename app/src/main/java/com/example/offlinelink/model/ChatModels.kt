@@ -5,6 +5,7 @@ import kotlinx.serialization.Serializable
 data class NearbyEndpoint(
   val id: String,
   val name: String,
+  val deviceId: String? = null,
 )
 
 data class GroupMember(
@@ -23,6 +24,7 @@ data class PendingConnection(
   val endpointId: String,
   val endpointName: String,
   val authenticationToken: String,
+  val deviceId: String? = null,
 )
 
 enum class ConnectionStatus {
@@ -60,7 +62,7 @@ enum class CallStatus {
 
 @Serializable
 data class VoiceAttachment(
-  val audioBase64: String,
+  val payloadKey: String,
   val durationMs: Long,
   val mimeType: String,
 )
@@ -74,7 +76,7 @@ data class LocationAttachment(
 
 @Serializable
 data class ImageAttachment(
-  val imageBase64: String,
+  val payloadKey: String,
   val mimeType: String,
   val width: Int,
   val height: Int,

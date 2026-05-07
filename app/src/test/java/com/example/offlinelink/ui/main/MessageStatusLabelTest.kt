@@ -1,8 +1,10 @@
 package com.example.offlinelink.ui.main
 
 import com.example.offlinelink.model.GroupMember
+import com.example.offlinelink.model.GroupMemberStatus
 import com.example.offlinelink.model.MessageStatus
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Test
 
 class MessageStatusLabelTest {
@@ -29,6 +31,14 @@ class MessageStatusLabelTest {
   fun setupPanelDefaultsCollapsedWhenMessagesExist() {
     assertEquals(true, defaultSetupExpanded(messageCount = 0))
     assertEquals(false, defaultSetupExpanded(messageCount = 1))
+  }
+
+  @Test
+  fun memberPanelHidesConnectionStatusWords() {
+    assertEquals("You: Phone A", localMemberSubtitle("Phone A"))
+    assertNull(groupMemberStatusText(GroupMemberStatus.Online))
+    assertNull(groupMemberStatusText(GroupMemberStatus.Reconnecting))
+    assertNull(groupMemberStatusText(GroupMemberStatus.Offline))
   }
 
   @Test

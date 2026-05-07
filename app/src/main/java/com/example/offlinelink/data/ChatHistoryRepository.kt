@@ -20,6 +20,7 @@ object NoOpChatHistoryRepository : ChatHistoryRepository {
 
 class JsonChatHistoryRepository(
   private val file: File,
+  private val maxMessages: Int = DEFAULT_MAX_MESSAGES,
 ) : ChatHistoryRepository {
   private val json =
     Json {
@@ -34,9 +35,10 @@ class JsonChatHistoryRepository(
     }.getOrDefault(emptyList())
 
   override fun saveMessages(messages: List<ChatMessage>) {
+    val trimmed = if (messages.size > maxMessages) messages.takeLast(maxMessages) else messages
     val parent = file.parentFile
     parent?.mkdirs()
-    val snapshot = ChatHistorySnapshot(messages = messages)
+    val snapshot = ChatHistorySnapshot(messages = trimmed)
     val tempFile =
       if (parent == null) {
         File("${file.path}.tmp")
@@ -50,6 +52,8 @@ class JsonChatHistoryRepository(
     }
   }
 }
+
+private const val DEFAULT_MAX_MESSAGES = 500
 
 @Serializable
 private data class ChatHistorySnapshot(

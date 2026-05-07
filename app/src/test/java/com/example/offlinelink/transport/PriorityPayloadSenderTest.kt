@@ -155,9 +155,14 @@ class PriorityPayloadSenderTest {
 
     override val events: Flow<TransportEvent> = emptyFlow()
 
-    override fun startAdvertising(displayName: String) = Unit
+    override fun startAdvertising(
+      displayName: String,
+      deviceId: String,
+    ) = Unit
 
     override fun startDiscovery() = Unit
+
+    override fun stopDiscovery() = Unit
 
     override fun requestConnection(endpoint: NearbyEndpoint, displayName: String) = Unit
 

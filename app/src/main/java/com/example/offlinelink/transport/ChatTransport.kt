@@ -7,9 +7,14 @@ import kotlinx.coroutines.flow.Flow
 interface ChatTransport {
   val events: Flow<TransportEvent>
 
-  fun startAdvertising(displayName: String)
+  fun startAdvertising(
+    displayName: String,
+    deviceId: String,
+  )
 
   fun startDiscovery()
+
+  fun stopDiscovery()
 
   fun requestConnection(endpoint: NearbyEndpoint, displayName: String)
 
@@ -37,4 +42,3 @@ sealed interface TransportEvent {
 
   data class OperationFailed(val message: String, val throwable: Throwable? = null) : TransportEvent
 }
-
