@@ -17,6 +17,8 @@ import com.example.offlinelink.transport.TransportEvent
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.toList
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.resetMain
@@ -988,6 +990,41 @@ class MainScreenViewModelTest {
   }
 
   @Test
+  fun sendStreamingCallAudioFrameShowsLiveVoiceActivity() = runTest {
+    val transport = FakeChatTransport()
+    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage("", "image/jpeg", 1, 1)) }, localDeviceId = "local")
+
+    advanceUntilIdle()
+    transport.emit(TransportEvent.Connected(NearbyEndpoint("endpoint-b", "Phone B")))
+    transport.emit(TransportEvent.Connected(NearbyEndpoint("endpoint-c", "Phone C")))
+    advanceUntilIdle()
+    transport.emit(
+      TransportEvent.BytesReceived(
+        endpointId = "endpoint-b",
+        bytes = ChatProtocol.encodeCallRequest(callId = "call-1", senderId = "device-b", createdAt = 1000L),
+      ),
+    )
+    advanceUntilIdle()
+    viewModel.acceptCall()
+    transport.clearSentPayloads()
+
+    viewModel.sendCallVoiceMessage(
+      audioBytes = byteArrayOf(1, 2, 3, 4),
+      durationMs = 40L,
+      mimeType = "audio/pcm;rate=8000;encoding=pcm16",
+    )
+
+    assertEquals(emptyList<com.example.offlinelink.model.ChatMessage>(), viewModel.uiState.value.messages)
+    assertEquals("Live voice", viewModel.uiState.value.callState.activityLabel)
+    assertEquals(listOf("endpoint-b"), transport.sentPayloads.map { it.endpointId })
+    val callVoice = ChatProtocol.decode(transport.sentPayloads.single().bytes) as DecodedWireMessage.CallVoice
+    assertEquals("call-1", callVoice.callId)
+    assertEquals("audio/pcm;rate=8000;encoding=pcm16", callVoice.mimeType)
+    assertEquals(40L, callVoice.durationMs)
+    assertEquals("AQIDBA==", callVoice.audioBase64)
+  }
+
+  @Test
   fun incomingCallVoiceMessageCreatesPlaybackEventWithoutAppendingChatMessage() = runTest {
     val transport = FakeChatTransport()
     val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage("", "image/jpeg", 1, 1)) }, localDeviceId = "local")
@@ -1029,6 +1066,54 @@ class MainScreenViewModelTest {
     assertEquals("clip-1", playback!!.clipId)
     assertEquals("AQIDBA==", playback.audioBase64)
     assertEquals(2300L, playback.durationMs)
+  }
+
+  @Test
+  fun incomingStreamingCallAudioFrameShowsLiveVoicePlayback() = runTest {
+    val transport = FakeChatTransport()
+    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage("", "image/jpeg", 1, 1)) }, localDeviceId = "local")
+
+    advanceUntilIdle()
+    transport.emit(TransportEvent.Connected(NearbyEndpoint("endpoint-b", "Phone B")))
+    advanceUntilIdle()
+    transport.emit(
+      TransportEvent.BytesReceived(
+        endpointId = "endpoint-b",
+        bytes = ChatProtocol.encodeCallRequest(callId = "call-1", senderId = "device-b", createdAt = 1000L),
+      ),
+    )
+    advanceUntilIdle()
+    viewModel.acceptCall()
+    transport.clearSentPayloads()
+    val playbackFrames = mutableListOf<com.example.offlinelink.model.CallAudioPlaybackFrame>()
+    backgroundScope.launch { viewModel.callAudioFrames.toList(playbackFrames) }
+
+    transport.emit(
+      TransportEvent.BytesReceived(
+        endpointId = "endpoint-b",
+        bytes =
+          ChatProtocol.encodeCallVoice(
+            callId = "call-1",
+            clipId = "frame-1",
+            senderId = "device-b",
+            audioBase64 = "AQIDBA==",
+            durationMs = 40L,
+            mimeType = "audio/pcm;rate=8000;encoding=pcm16",
+            createdAt = 2000L,
+          ),
+      ),
+    )
+    advanceUntilIdle()
+
+    assertEquals(emptyList<com.example.offlinelink.model.ChatMessage>(), viewModel.uiState.value.messages)
+    assertEquals("Live voice from Phone B", viewModel.uiState.value.callState.activityLabel)
+    assertEquals(null, viewModel.uiState.value.callPlayback)
+    assertEquals(1, playbackFrames.size)
+    val playback = playbackFrames.single()
+    assertEquals("frame-1", playback.frameId)
+    assertEquals(listOf(1, 2, 3, 4), playback.audioBytes.map { it.toInt() })
+    assertEquals("audio/pcm;rate=8000;encoding=pcm16", playback.mimeType)
+    assertEquals(40L, playback.durationMs)
   }
 
   @Test

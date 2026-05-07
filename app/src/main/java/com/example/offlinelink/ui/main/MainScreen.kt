@@ -87,6 +87,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -112,12 +113,15 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation3.runtime.NavKey
+import com.example.offlinelink.audio.CallAudioFrame
+import com.example.offlinelink.audio.CallAudioStream
 import com.example.offlinelink.audio.RecordedVoiceClip
 import com.example.offlinelink.audio.VoicePlayer
 import com.example.offlinelink.audio.VoiceRecorder
 import com.example.offlinelink.data.JsonChatHistoryRepository
 import com.example.offlinelink.image.ImageCompressor
 import com.example.offlinelink.location.LocationHelper
+import com.example.offlinelink.model.CallAudioPlaybackFrame
 import com.example.offlinelink.model.CallState
 import com.example.offlinelink.model.CallStatus
 import com.example.offlinelink.model.ChatMessage
@@ -135,7 +139,12 @@ import com.example.offlinelink.transport.NearbyChatTransport
 import java.io.File
 import kotlin.io.encoding.Base64
 import kotlin.io.encoding.ExperimentalEncodingApi
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.emptyFlow
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 @Composable
 fun MainScreen(
@@ -172,6 +181,7 @@ fun MainScreen(
     }
   val voiceRecorder = remember(context) { VoiceRecorder(context.applicationContext) }
   val voicePlayer = remember(context) { VoicePlayer(context.applicationContext) }
+  val callAudioStream = remember(context) { CallAudioStream(context.applicationContext) }
   val state by viewModel.uiState.collectAsStateWithLifecycle()
   val requiredPermissions = remember { requiredNearbyRuntimePermissions() }
   var hasPermissions by remember {
@@ -185,15 +195,17 @@ fun MainScreen(
     rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
       if (uri != null) viewModel.sendImage(uri) { }
     }
-  DisposableEffect(voiceRecorder, voicePlayer) {
+  DisposableEffect(voiceRecorder, voicePlayer, callAudioStream) {
     onDispose {
       voiceRecorder.cancel()
       voicePlayer.stop()
+      callAudioStream.stop()
     }
   }
 
   OfflineChatContent(
     state = state,
+    callAudioFrames = viewModel.callAudioFrames,
     hasPermissions = hasPermissions,
     onRequestPermissions = { permissionLauncher.launch(requiredPermissions) },
     onDisplayNameChange = { displayName ->
@@ -214,6 +226,9 @@ fun MainScreen(
     onSendMessage = viewModel::sendMessage,
     onSendVoiceMessage = viewModel::sendVoiceMessage,
     onSendCallVoiceMessage = viewModel::sendCallVoiceMessage,
+    onStartCallAudio = callAudioStream::start,
+    onStopCallAudio = callAudioStream::stop,
+    onPlayCallAudio = callAudioStream::play,
     onSendLocation = viewModel::sendLocation,
     onStartVoiceRecording = voiceRecorder::start,
     onStopVoiceRecording = voiceRecorder::stop,
@@ -236,6 +251,7 @@ fun MainScreen(
 @Composable
 private fun OfflineChatContent(
   state: ChatUiState,
+  callAudioFrames: Flow<CallAudioPlaybackFrame>,
   hasPermissions: Boolean,
   onRequestPermissions: () -> Unit,
   onDisplayNameChange: (String) -> Unit,
@@ -250,6 +266,9 @@ private fun OfflineChatContent(
   onSendMessage: (String) -> Unit,
   onSendVoiceMessage: (ByteArray, Long, String) -> Unit,
   onSendCallVoiceMessage: (ByteArray, Long, String) -> Unit,
+  onStartCallAudio: ((CallAudioFrame) -> Unit) -> Result<Unit>,
+  onStopCallAudio: () -> Unit,
+  onPlayCallAudio: (CallAudioFrame) -> Result<Unit>,
   onSendLocation: ((Result<Unit>) -> Unit) -> Unit,
   onStartVoiceRecording: () -> Result<Unit>,
   onStopVoiceRecording: () -> Result<RecordedVoiceClip>,
@@ -269,7 +288,7 @@ private fun OfflineChatContent(
 ) {
   var draft by remember { mutableStateOf("") }
   var isRecordingVoice by remember { mutableStateOf(false) }
-  var isRecordingCallVoice by remember { mutableStateOf(false) }
+  var isCallAudioLive by remember { mutableStateOf(false) }
   var isSendingLocation by remember { mutableStateOf(false) }
   var voiceError by remember { mutableStateOf<String?>(null) }
   var isSetupExpanded by rememberSaveable { mutableStateOf(defaultSetupExpanded(state.messages.size)) }
@@ -278,6 +297,7 @@ private fun OfflineChatContent(
   val listState = rememberLazyListState()
   val keyboardController = LocalSoftwareKeyboardController.current
   val ctx = LocalContext.current
+  val coroutineScope = rememberCoroutineScope()
 
   LaunchedEffect(state.messageRevision) {
     if (state.messages.isNotEmpty()) {
@@ -288,6 +308,46 @@ private fun OfflineChatContent(
   LaunchedEffect(state.pendingConnection?.endpointId, state.callState.status) {
     if (state.pendingConnection != null || state.callState.status != CallStatus.Idle) {
       isSetupExpanded = true
+    }
+  }
+
+  LaunchedEffect(state.callState.status, state.callState.callId) {
+    if (state.callState.status == CallStatus.Active) {
+      onStartCallAudio { frame ->
+        coroutineScope.launch {
+          onSendCallVoiceMessage(frame.bytes, frame.durationMs, frame.mimeType)
+        }
+      }
+        .onSuccess {
+          isCallAudioLive = true
+          voiceError = null
+          keyboardController?.hide()
+        }
+        .onFailure { e ->
+          isCallAudioLive = false
+          voiceError = e.message ?: "Could not start call audio"
+        }
+    } else {
+      onStopCallAudio()
+      isCallAudioLive = false
+    }
+  }
+
+  DisposableEffect(Unit) {
+    onDispose {
+      onStopCallAudio()
+    }
+  }
+
+  LaunchedEffect(callAudioFrames) {
+    callAudioFrames.collect { frame ->
+      val result =
+        withContext(Dispatchers.IO) {
+          onPlayCallAudio(CallAudioFrame(frame.audioBytes, frame.durationMs, frame.mimeType))
+        }
+      result.onFailure {
+        voiceError = "Could not play call voice"
+      }
     }
   }
 
@@ -337,40 +397,13 @@ private fun OfflineChatContent(
         if (state.callState.status != CallStatus.Idle) {
           CallPanel(
             callState = state.callState,
-            isRecordingCallVoice = isRecordingCallVoice,
-            recordingEnabled = !isRecordingVoice,
+            isCallAudioLive = isCallAudioLive,
             onAcceptCall = onAcceptCall,
             onRejectCall = onRejectCall,
             onEndCall = {
-              if (isRecordingCallVoice) {
-                onStopVoiceRecording()
-                isRecordingCallVoice = false
-              }
+              onStopCallAudio()
+              isCallAudioLive = false
               onEndCall()
-            },
-            onToggleTalk = {
-              if (isRecordingCallVoice) {
-                val result = onStopVoiceRecording()
-                isRecordingCallVoice = false
-                result
-                  .onSuccess { clip ->
-                    voiceError = null
-                    onSendCallVoiceMessage(clip.bytes, clip.durationMs, clip.mimeType)
-                  }
-                  .onFailure {
-                    voiceError = "Could not save call voice"
-                  }
-              } else if (!isRecordingVoice) {
-                onStartVoiceRecording()
-                  .onSuccess {
-                    isRecordingCallVoice = true
-                    voiceError = null
-                    keyboardController?.hide()
-                  }
-                  .onFailure {
-                    voiceError = "Could not start voice recording"
-                  }
-              }
             },
           )
         }
@@ -401,7 +434,7 @@ private fun OfflineChatContent(
         )
         MessageComposer(
           draft = draft,
-          enabled = state.status == ConnectionStatus.Connected && !isRecordingCallVoice,
+          enabled = state.status == ConnectionStatus.Connected && !isCallAudioLive,
           isRecordingVoice = isRecordingVoice,
           isSendingLocation = isSendingLocation,
           voiceError = voiceError,
@@ -977,12 +1010,10 @@ private fun RecoveryPanel(
 @Composable
 private fun CallPanel(
   callState: CallState,
-  isRecordingCallVoice: Boolean,
-  recordingEnabled: Boolean,
+  isCallAudioLive: Boolean,
   onAcceptCall: () -> Unit,
   onRejectCall: () -> Unit,
   onEndCall: () -> Unit,
-  onToggleTalk: () -> Unit,
 ) {
   val peerName = callState.peerName ?: "Nearby device"
   val title =
@@ -994,9 +1025,9 @@ private fun CallPanel(
     }
   val subtitle =
     when {
-      isRecordingCallVoice -> "Recording..."
+      isCallAudioLive -> "Live voice on"
       callState.activityLabel != null -> callState.activityLabel
-      callState.status == CallStatus.Active -> peerName
+      callState.status == CallStatus.Active -> "Connecting voice..."
       callState.status == CallStatus.Outgoing -> peerName
       callState.status == CallStatus.Incoming -> peerName
       else -> ""
@@ -1070,14 +1101,16 @@ private fun CallPanel(
           }
         }
         CallStatus.Active -> {
-          ComposerActionButton(
-            icon = if (isRecordingCallVoice) Icons.Rounded.Stop else Icons.Rounded.Mic,
-            contentDescription = if (isRecordingCallVoice) "Stop call voice" else "Record call voice",
-            enabled = recordingEnabled || isRecordingCallVoice,
-            selected = isRecordingCallVoice,
-            primary = !isRecordingCallVoice,
-            onClick = onToggleTalk,
-          )
+          Surface(color = MaterialTheme.colorScheme.secondaryContainer, contentColor = MaterialTheme.colorScheme.onSecondaryContainer, shape = CircleShape) {
+            Row(
+              modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+              horizontalArrangement = Arrangement.spacedBy(5.dp),
+              verticalAlignment = Alignment.CenterVertically,
+            ) {
+              Icon(Icons.Rounded.Mic, contentDescription = null, modifier = Modifier.size(17.dp))
+              Text(if (isCallAudioLive) "Live" else "Starting", style = MaterialTheme.typography.labelMedium, maxLines = 1)
+            }
+          }
           OutlinedButton(
             onClick = onEndCall,
             shape = RoundedCornerShape(8.dp),
@@ -1942,6 +1975,7 @@ private fun OfflineChatContentPreview() {
               ChatMessage("2", "one-to-one", "remote", "Hi from nearby", 2L, MessageStatus.Received, false),
             ),
         ),
+      callAudioFrames = emptyFlow(),
       hasPermissions = true,
       onRequestPermissions = {},
       onDisplayNameChange = {},
@@ -1956,6 +1990,9 @@ private fun OfflineChatContentPreview() {
       onSendMessage = {},
       onSendVoiceMessage = { _, _, _ -> },
       onSendCallVoiceMessage = { _, _, _ -> },
+      onStartCallAudio = { Result.success(Unit) },
+      onStopCallAudio = {},
+      onPlayCallAudio = { Result.success(Unit) },
       onSendLocation = { it(Result.success(Unit)) },
       onStartVoiceRecording = { Result.success(Unit) },
       onStopVoiceRecording = { Result.success(RecordedVoiceClip(byteArrayOf(1, 2, 3), 1000L)) },

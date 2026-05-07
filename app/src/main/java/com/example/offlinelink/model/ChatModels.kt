@@ -115,6 +115,16 @@ data class CallVoicePlayback(
   val createdAt: Long,
 )
 
+data class CallAudioPlaybackFrame(
+  val callId: String,
+  val frameId: String,
+  val senderId: String,
+  val audioBytes: ByteArray,
+  val durationMs: Long,
+  val mimeType: String,
+  val createdAt: Long,
+)
+
 data class ChatUiState(
   val localDeviceId: String,
   val displayName: String = "OfflineLink",

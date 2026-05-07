@@ -2,12 +2,14 @@ package com.example.offlinelink.ui.main
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.offlinelink.audio.isStreamingCallAudioMimeType
 import com.example.offlinelink.chat.ChatSessionStore
 import com.example.offlinelink.data.ChatHistoryRepository
 import com.example.offlinelink.data.NoOpChatHistoryRepository
 import com.example.offlinelink.image.ImageCompressor
 import android.net.Uri
 import com.example.offlinelink.location.DeviceLocation
+import com.example.offlinelink.model.CallAudioPlaybackFrame
 import com.example.offlinelink.model.CallStatus
 import com.example.offlinelink.model.CallVoicePlayback
 import com.example.offlinelink.model.ChatMessage
@@ -25,7 +27,11 @@ import com.example.offlinelink.transport.TransportEvent
 import java.util.UUID
 import kotlin.io.encoding.Base64
 import kotlin.io.encoding.ExperimentalEncodingApi
+import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
@@ -46,8 +52,14 @@ class MainScreenViewModel(
   private val recoveryConnectionAttempts = mutableSetOf<String>()
   private val handledCallVoiceClipIds = mutableSetOf<String>()
   private val retriedMessageEndpointIds = mutableMapOf<String, MutableSet<String>>()
+  private val mutableCallAudioFrames =
+    MutableSharedFlow<CallAudioPlaybackFrame>(
+      extraBufferCapacity = 64,
+      onBufferOverflow = BufferOverflow.DROP_OLDEST,
+    )
 
   val uiState: StateFlow<com.example.offlinelink.model.ChatUiState> = store.state
+  val callAudioFrames: SharedFlow<CallAudioPlaybackFrame> = mutableCallAudioFrames.asSharedFlow()
 
   init {
     store.setDisplayName(defaultDisplayName)
@@ -207,7 +219,7 @@ class MainScreenViewModel(
       )
     transport.send(endpoint.id, bytes) { result ->
       if (result.isSuccess) {
-        store.setCallActivity("Voice sent")
+        store.setCallActivity(if (isStreamingCallAudioMimeType(mimeType)) "Live voice" else "Voice sent")
       } else {
         store.setStatus(ConnectionStatus.Error, "Call voice failed", result.exceptionOrNull()?.message)
       }
@@ -747,9 +759,27 @@ class MainScreenViewModel(
     if (callState.status != CallStatus.Active) return
     if (callState.callId != voice.callId) return
     if (callState.peerEndpointId != endpointId) return
-    if (!handledCallVoiceClipIds.add(voice.clipId)) return
+    val isStreamingFrame = isStreamingCallAudioMimeType(voice.mimeType)
+    if (!isStreamingFrame && !handledCallVoiceClipIds.add(voice.clipId)) return
 
     val peerName = callState.peerName ?: uiState.value.connectedEndpoints.firstOrNull { it.id == endpointId }?.name ?: "Nearby device"
+    if (isStreamingFrame) {
+      val audioBytes = runCatching { Base64.Default.decode(voice.audioBase64) }.getOrNull() ?: return
+      mutableCallAudioFrames.tryEmit(
+        CallAudioPlaybackFrame(
+          callId = voice.callId,
+          frameId = voice.clipId,
+          senderId = voice.senderId,
+          audioBytes = audioBytes,
+          durationMs = voice.durationMs,
+          mimeType = voice.mimeType,
+          createdAt = voice.createdAt,
+        ),
+      )
+      store.setCallActivity("Live voice from $peerName")
+      return
+    }
+
     store.showCallPlayback(
       playback =
         CallVoicePlayback(
