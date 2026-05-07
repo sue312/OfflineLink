@@ -823,6 +823,61 @@ class MainScreenViewModelTest {
   }
 
   @Test
+  fun requestConnectionFailureWhileConnectedKeepsExistingChatUsable() = runTest {
+    val transport = FakeChatTransport()
+    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) }, payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads")), localDeviceId = "local")
+
+    advanceUntilIdle()
+    transport.emit(TransportEvent.Connected(NearbyEndpoint("endpoint-b", "Phone B")))
+    advanceUntilIdle()
+    viewModel.connectTo(NearbyEndpoint("endpoint-c", "Phone C"))
+    transport.emit(TransportEvent.OperationFailed("Could not request connection", IllegalStateException("8012: STATUS_ENDPOINT_IO_ERROR")))
+    advanceUntilIdle()
+
+    assertEquals(ConnectionStatus.Connected, viewModel.uiState.value.status)
+    assertEquals("Connected to Phone B", viewModel.uiState.value.statusMessage)
+    assertEquals("8012: STATUS_ENDPOINT_IO_ERROR", viewModel.uiState.value.lastError)
+
+    transport.clearSentPayloads()
+    viewModel.sendMessage("still connected")
+
+    assertEquals("endpoint-b", transport.sentPayloads.last().endpointId)
+    assertEquals(MessageStatus.Sent, viewModel.uiState.value.messages.last().status)
+  }
+
+  @Test
+  fun incomingPayloadFromUntrackedEndpointMarksEndpointConnected() = runTest {
+    val transport = FakeChatTransport()
+    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) }, payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads")), localDeviceId = "local")
+
+    viewModel.startDiscovery()
+    advanceUntilIdle()
+    transport.emit(
+      TransportEvent.BytesReceived(
+        endpointId = "endpoint-b",
+        bytes =
+          ChatProtocol.encodeMessage(
+            messageId = "remote-1",
+            conversationId = "one-to-one",
+            senderId = "device-b",
+            text = "hello",
+            createdAt = 1000L,
+          ),
+      ),
+    )
+    advanceUntilIdle()
+
+    assertEquals(ConnectionStatus.Connected, viewModel.uiState.value.status)
+    assertEquals(listOf(NearbyEndpoint("endpoint-b", "Nearby device")), viewModel.uiState.value.connectedEndpoints)
+
+    transport.clearSentPayloads()
+    viewModel.sendMessage("reply")
+
+    assertEquals("endpoint-b", transport.sentPayloads.last().endpointId)
+    assertEquals(MessageStatus.Sent, viewModel.uiState.value.messages.last().status)
+  }
+
+  @Test
   fun sendMessagePersistsUpdatedMessageStatus() = runTest {
     val transport = FakeChatTransport()
     val historyRepository = FakeChatHistoryRepository()

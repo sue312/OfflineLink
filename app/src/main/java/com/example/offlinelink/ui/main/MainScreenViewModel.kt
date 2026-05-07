@@ -694,6 +694,10 @@ class MainScreenViewModel(
       is TransportEvent.BytesReceived -> handleIncomingBytes(event.endpointId, event.bytes)
       is TransportEvent.OperationFailed -> {
         if (event.isAlreadyRunningNearbyOperation()) return
+        if (uiState.value.connectedEndpoints.isNotEmpty()) {
+          store.restoreConnectedStatus(event.throwable?.message ?: event.message)
+          return
+        }
         store.setStatus(
           ConnectionStatus.Error,
           event.message,
@@ -706,6 +710,7 @@ class MainScreenViewModel(
   private fun handleIncomingBytes(endpointId: String, bytes: ByteArray) {
     when (val decoded = ChatProtocol.decode(bytes)) {
       is DecodedWireMessage.Hello -> {
+        ensureEndpointConnected(endpointId, decoded.displayName)
         val rosterChanged = mergeIncomingRoster(endpointId, decoded)
         store.renameConnectedEndpoint(endpointId, decoded.displayName)
         val localGroupName = uiState.value.groupName
@@ -722,6 +727,7 @@ class MainScreenViewModel(
         }
       }
       is DecodedWireMessage.Message -> {
+        ensureEndpointConnected(endpointId)
         val wasNewMessage =
           store.receiveRemoteMessage(
             messageId = decoded.messageId,
@@ -736,6 +742,7 @@ class MainScreenViewModel(
         sendPayload(endpointId, ChatProtocol.encodeAck(decoded.messageId), PayloadPriority.Control) { }
       }
       is DecodedWireMessage.VoiceMessage -> {
+        ensureEndpointConnected(endpointId)
         val payloadKey = payloadCache.put(Base64.Default.decode(decoded.audioBase64))
         val wasNewMessage =
           store.receiveRemoteVoiceMessage(
@@ -752,9 +759,13 @@ class MainScreenViewModel(
         }
         sendPayload(endpointId, ChatProtocol.encodeAck(decoded.messageId), PayloadPriority.Control) { }
       }
-      is DecodedWireMessage.Ack -> store.acknowledge(decoded.messageId)
+      is DecodedWireMessage.Ack -> {
+        ensureEndpointConnected(endpointId)
+        store.acknowledge(decoded.messageId)
+      }
       is DecodedWireMessage.Disconnect -> handleEndpointDisconnected(endpointId, shouldReconnect = false)
       is DecodedWireMessage.ImageMessage -> {
+        ensureEndpointConnected(endpointId)
         val payloadKey = payloadCache.put(Base64.Default.decode(decoded.imageBase64))
         val wasNewMessage =
           store.receiveRemoteImageMessage(
@@ -773,6 +784,7 @@ class MainScreenViewModel(
         sendPayload(endpointId, ChatProtocol.encodeAck(decoded.messageId), PayloadPriority.Control) { }
       }
       is DecodedWireMessage.LocationMessage -> {
+        ensureEndpointConnected(endpointId)
         val wasNewMessage =
           store.receiveRemoteLocationMessage(
             messageId = decoded.messageId,
@@ -788,26 +800,47 @@ class MainScreenViewModel(
         }
         sendPayload(endpointId, ChatProtocol.encodeAck(decoded.messageId), PayloadPriority.Control) { }
       }
-      is DecodedWireMessage.CallRequest -> handleIncomingCallRequest(endpointId, decoded)
+      is DecodedWireMessage.CallRequest -> {
+        ensureEndpointConnected(endpointId)
+        handleIncomingCallRequest(endpointId, decoded)
+      }
       is DecodedWireMessage.CallAccept -> {
+        ensureEndpointConnected(endpointId)
         if (!forwardCallAcceptIfNeeded(endpointId, decoded)) {
           store.acceptCall(decoded.callId)
         }
       }
       is DecodedWireMessage.CallReject -> {
+        ensureEndpointConnected(endpointId)
         if (!forwardCallRejectIfNeeded(endpointId, decoded)) {
           store.rejectCall(decoded.callId)
           handledCallVoiceClipIds.clear()
         }
       }
       is DecodedWireMessage.CallEnd -> {
+        ensureEndpointConnected(endpointId)
         if (!forwardCallEndIfNeeded(endpointId, decoded)) {
           store.endCall(decoded.callId)
           handledCallVoiceClipIds.clear()
         }
       }
-      is DecodedWireMessage.CallVoice -> handleIncomingCallVoice(endpointId, decoded)
+      is DecodedWireMessage.CallVoice -> {
+        ensureEndpointConnected(endpointId)
+        handleIncomingCallVoice(endpointId, decoded)
+      }
     }
+  }
+
+  private fun ensureEndpointConnected(
+    endpointId: String,
+    displayName: String = "Nearby device",
+  ) {
+    if (uiState.value.connectedEndpoints.any { it.id == endpointId }) return
+    recoveryMode = false
+    recoveryConnectionAttempts.remove(endpointId)
+    transport.stopDiscovery()
+    store.addConnectedEndpoint(NearbyEndpoint(endpointId, displayName.ifBlank { "Nearby device" }))
+    retryUndeliveredMessages()
   }
 
   private fun handleIncomingCallRequest(

@@ -49,6 +49,17 @@ class ChatSessionStore(
     mutableState.value = mutableState.value.copy(status = status, statusMessage = message, lastError = error)
   }
 
+  fun restoreConnectedStatus(error: String? = null) {
+    val current = mutableState.value
+    if (current.connectedEndpoints.isEmpty()) return
+    mutableState.value =
+      current.copy(
+        status = ConnectionStatus.Connected,
+        statusMessage = connectedStatusMessage(current.connectedEndpoints),
+        lastError = error,
+      )
+  }
+
   fun setDiscoveredEndpoints(endpoints: List<NearbyEndpoint>) {
     mutableState.value = mutableState.value.copy(discoveredEndpoints = endpoints.distinctBy { it.id })
   }
