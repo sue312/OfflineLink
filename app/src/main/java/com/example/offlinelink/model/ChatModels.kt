@@ -99,6 +99,7 @@ data class CallState(
   val status: CallStatus = CallStatus.Idle,
   val callId: String? = null,
   val peerEndpointId: String? = null,
+  val peerMemberId: String? = null,
   val peerName: String? = null,
   val isInitiator: Boolean = false,
   val startedAt: Long? = null,

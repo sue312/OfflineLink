@@ -64,6 +64,7 @@ sealed interface DecodedWireMessage {
   data class CallRequest(
     val callId: String,
     val senderId: String,
+    val targetId: String?,
     val createdAt: Long,
     override val sentAt: Long,
   ) : DecodedWireMessage
@@ -71,6 +72,7 @@ sealed interface DecodedWireMessage {
   data class CallAccept(
     val callId: String,
     val senderId: String,
+    val targetId: String?,
     val createdAt: Long,
     override val sentAt: Long,
   ) : DecodedWireMessage
@@ -78,6 +80,7 @@ sealed interface DecodedWireMessage {
   data class CallReject(
     val callId: String,
     val senderId: String,
+    val targetId: String?,
     val reason: String,
     val createdAt: Long,
     override val sentAt: Long,
@@ -86,6 +89,7 @@ sealed interface DecodedWireMessage {
   data class CallEnd(
     val callId: String,
     val senderId: String,
+    val targetId: String?,
     val createdAt: Long,
     override val sentAt: Long,
   ) : DecodedWireMessage
@@ -94,6 +98,7 @@ sealed interface DecodedWireMessage {
     val callId: String,
     val clipId: String,
     val senderId: String,
+    val targetId: String?,
     val audioBase64: String,
     val durationMs: Long,
     val mimeType: String,
@@ -192,47 +197,56 @@ object ChatProtocol {
   fun encodeCallRequest(
     callId: String,
     senderId: String,
+    targetId: String? = null,
     createdAt: Long,
     sentAt: Long = System.currentTimeMillis(),
   ): ByteArray =
-    encodeEnvelope(TYPE_CALL_REQUEST, CallPayload(callId, senderId, createdAt), sentAt)
+    encodeEnvelope(TYPE_CALL_REQUEST, CallPayload(callId = callId, senderId = senderId, createdAt = createdAt, targetId = targetId), sentAt)
 
   fun encodeCallAccept(
     callId: String,
     senderId: String,
+    targetId: String? = null,
     createdAt: Long,
     sentAt: Long = System.currentTimeMillis(),
   ): ByteArray =
-    encodeEnvelope(TYPE_CALL_ACCEPT, CallPayload(callId, senderId, createdAt), sentAt)
+    encodeEnvelope(TYPE_CALL_ACCEPT, CallPayload(callId = callId, senderId = senderId, createdAt = createdAt, targetId = targetId), sentAt)
 
   fun encodeCallReject(
     callId: String,
     senderId: String,
+    targetId: String? = null,
     reason: String,
     createdAt: Long,
     sentAt: Long = System.currentTimeMillis(),
   ): ByteArray =
-    encodeEnvelope(TYPE_CALL_REJECT, CallRejectPayload(callId, senderId, reason, createdAt), sentAt)
+    encodeEnvelope(TYPE_CALL_REJECT, CallRejectPayload(callId = callId, senderId = senderId, targetId = targetId, reason = reason, createdAt = createdAt), sentAt)
 
   fun encodeCallEnd(
     callId: String,
     senderId: String,
+    targetId: String? = null,
     createdAt: Long,
     sentAt: Long = System.currentTimeMillis(),
   ): ByteArray =
-    encodeEnvelope(TYPE_CALL_END, CallPayload(callId, senderId, createdAt), sentAt)
+    encodeEnvelope(TYPE_CALL_END, CallPayload(callId = callId, senderId = senderId, createdAt = createdAt, targetId = targetId), sentAt)
 
   fun encodeCallVoice(
     callId: String,
     clipId: String,
     senderId: String,
+    targetId: String? = null,
     audioBase64: String,
     durationMs: Long,
     mimeType: String,
     createdAt: Long,
     sentAt: Long = System.currentTimeMillis(),
   ): ByteArray =
-    encodeEnvelope(TYPE_CALL_VOICE, CallVoicePayload(callId, clipId, senderId, audioBase64, durationMs, mimeType, createdAt), sentAt)
+    encodeEnvelope(
+      TYPE_CALL_VOICE,
+      CallVoicePayload(callId = callId, clipId = clipId, senderId = senderId, targetId = targetId, audioBase64 = audioBase64, durationMs = durationMs, mimeType = mimeType, createdAt = createdAt),
+      sentAt,
+    )
 
   fun decode(bytes: ByteArray): DecodedWireMessage {
     val envelope = json.decodeFromString(WireEnvelope.serializer(), bytes.decodeToString())
@@ -314,6 +328,7 @@ object ChatProtocol {
         DecodedWireMessage.CallRequest(
           callId = payload.callId,
           senderId = payload.senderId,
+          targetId = payload.targetId,
           createdAt = payload.createdAt,
           sentAt = envelope.sentAt,
         )
@@ -323,6 +338,7 @@ object ChatProtocol {
         DecodedWireMessage.CallAccept(
           callId = payload.callId,
           senderId = payload.senderId,
+          targetId = payload.targetId,
           createdAt = payload.createdAt,
           sentAt = envelope.sentAt,
         )
@@ -332,6 +348,7 @@ object ChatProtocol {
         DecodedWireMessage.CallReject(
           callId = payload.callId,
           senderId = payload.senderId,
+          targetId = payload.targetId,
           reason = payload.reason,
           createdAt = payload.createdAt,
           sentAt = envelope.sentAt,
@@ -342,6 +359,7 @@ object ChatProtocol {
         DecodedWireMessage.CallEnd(
           callId = payload.callId,
           senderId = payload.senderId,
+          targetId = payload.targetId,
           createdAt = payload.createdAt,
           sentAt = envelope.sentAt,
         )
@@ -352,6 +370,7 @@ object ChatProtocol {
           callId = payload.callId,
           clipId = payload.clipId,
           senderId = payload.senderId,
+          targetId = payload.targetId,
           audioBase64 = payload.audioBase64,
           durationMs = payload.durationMs,
           mimeType = payload.mimeType,
@@ -451,12 +470,14 @@ private data class CallPayload(
   val callId: String,
   val senderId: String,
   val createdAt: Long,
+  val targetId: String? = null,
 )
 
 @Serializable
 private data class CallRejectPayload(
   val callId: String,
   val senderId: String,
+  val targetId: String? = null,
   val reason: String,
   val createdAt: Long,
 )
@@ -466,6 +487,7 @@ private data class CallVoicePayload(
   val callId: String,
   val clipId: String,
   val senderId: String,
+  val targetId: String? = null,
   val audioBase64: String,
   val durationMs: Long,
   val mimeType: String,

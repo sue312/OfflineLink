@@ -47,6 +47,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.Send
+import androidx.compose.material.icons.automirrored.rounded.VolumeUp
 import androidx.compose.material.icons.rounded.Call
 import androidx.compose.material.icons.rounded.CallEnd
 import androidx.compose.material.icons.rounded.Check
@@ -60,6 +61,7 @@ import androidx.compose.material.icons.rounded.Groups
 import androidx.compose.material.icons.rounded.Image
 import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.Mic
+import androidx.compose.material.icons.rounded.MicOff
 import androidx.compose.material.icons.rounded.Person
 import androidx.compose.material.icons.rounded.Place
 import androidx.compose.material.icons.rounded.PlayArrow
@@ -229,6 +231,8 @@ fun MainScreen(
     onStartCallAudio = callAudioStream::start,
     onStopCallAudio = callAudioStream::stop,
     onPlayCallAudio = callAudioStream::play,
+    onSetCallMuted = callAudioStream::setMuted,
+    onSetSpeakerEnabled = callAudioStream::setSpeakerEnabled,
     onSendLocation = viewModel::sendLocation,
     onStartVoiceRecording = voiceRecorder::start,
     onStopVoiceRecording = voiceRecorder::stop,
@@ -269,12 +273,14 @@ private fun OfflineChatContent(
   onStartCallAudio: ((CallAudioFrame) -> Unit) -> Result<Unit>,
   onStopCallAudio: () -> Unit,
   onPlayCallAudio: (CallAudioFrame) -> Result<Unit>,
+  onSetCallMuted: (Boolean) -> Unit,
+  onSetSpeakerEnabled: (Boolean) -> Unit,
   onSendLocation: ((Result<Unit>) -> Unit) -> Unit,
   onStartVoiceRecording: () -> Result<Unit>,
   onStopVoiceRecording: () -> Result<RecordedVoiceClip>,
   onPlayVoice: (VoiceAttachment) -> Result<Unit>,
   onDisconnect: () -> Unit,
-  onStartCall: () -> Unit,
+  onStartCall: (String?) -> Unit,
   onAcceptCall: () -> Unit,
   onRejectCall: () -> Unit,
   onEndCall: () -> Unit,
@@ -289,6 +295,8 @@ private fun OfflineChatContent(
   var draft by remember { mutableStateOf("") }
   var isRecordingVoice by remember { mutableStateOf(false) }
   var isCallAudioLive by remember { mutableStateOf(false) }
+  var isCallMuted by rememberSaveable { mutableStateOf(false) }
+  var isSpeakerOn by rememberSaveable { mutableStateOf(true) }
   var isSendingLocation by remember { mutableStateOf(false) }
   var voiceError by remember { mutableStateOf<String?>(null) }
   var isSetupExpanded by rememberSaveable { mutableStateOf(defaultSetupExpanded(state.messages.size)) }
@@ -330,7 +338,16 @@ private fun OfflineChatContent(
     } else {
       onStopCallAudio()
       isCallAudioLive = false
+      isCallMuted = false
     }
+  }
+
+  LaunchedEffect(isCallMuted) {
+    onSetCallMuted(isCallMuted)
+  }
+
+  LaunchedEffect(isSpeakerOn) {
+    onSetSpeakerEnabled(isSpeakerOn)
   }
 
   DisposableEffect(Unit) {
@@ -398,6 +415,10 @@ private fun OfflineChatContent(
           CallPanel(
             callState = state.callState,
             isCallAudioLive = isCallAudioLive,
+            isCallMuted = isCallMuted,
+            isSpeakerOn = isSpeakerOn,
+            onToggleMute = { isCallMuted = !isCallMuted },
+            onToggleSpeaker = { isSpeakerOn = !isSpeakerOn },
             onAcceptCall = onAcceptCall,
             onRejectCall = onRejectCall,
             onEndCall = {
@@ -727,7 +748,7 @@ private fun SetupDisclosure(
   onDiscover: () -> Unit,
   onRecoverGroup: () -> Unit,
   onDisconnect: () -> Unit,
-  onStartCall: () -> Unit,
+  onStartCall: (String?) -> Unit,
   onConnect: (NearbyEndpoint) -> Unit,
   onAccept: () -> Unit,
   onReject: () -> Unit,
@@ -933,8 +954,11 @@ private fun ConnectionActionButton(
 private fun ConnectedSummary(
   state: ChatUiState,
   onDisconnect: () -> Unit,
-  onStartCall: () -> Unit,
+  onStartCall: (String?) -> Unit,
 ) {
+  var callMenuExpanded by remember { mutableStateOf(false) }
+  val callTargets = callTargetOptions(state)
+  val canStartCall = state.callState.status == CallStatus.Idle && state.connectedEndpoints.isNotEmpty() && callTargets.isNotEmpty()
   Surface(
     color = MaterialTheme.colorScheme.surface,
     shape = RoundedCornerShape(8.dp),
@@ -953,13 +977,40 @@ private fun ConnectedSummary(
         Text(state.statusMessage, style = MaterialTheme.typography.titleMedium)
         Text("Group: ${state.groupName}", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
       }
-      ComposerActionButton(
-        icon = Icons.Rounded.Call,
-        contentDescription = "Start call",
-        enabled = state.callState.status == CallStatus.Idle,
-        primary = state.callState.status == CallStatus.Idle,
-        onClick = onStartCall,
-      )
+      Box {
+        ComposerActionButton(
+          icon = Icons.Rounded.Call,
+          contentDescription = "Start call",
+          enabled = canStartCall,
+          primary = canStartCall,
+          onClick = {
+            if (callTargets.size <= 1) {
+              onStartCall(callTargets.firstOrNull()?.id)
+            } else {
+              callMenuExpanded = true
+            }
+          },
+        )
+        DropdownMenu(expanded = callMenuExpanded, onDismissRequest = { callMenuExpanded = false }) {
+          callTargets.forEach { target ->
+            DropdownMenuItem(
+              text = {
+                Column(verticalArrangement = Arrangement.spacedBy(1.dp)) {
+                  Text("Call ${target.name}")
+                  if (!target.isDirect) {
+                    Text("via group", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                  }
+                }
+              },
+              leadingIcon = { Icon(Icons.Rounded.Call, contentDescription = null, modifier = Modifier.size(18.dp)) },
+              onClick = {
+                callMenuExpanded = false
+                onStartCall(target.id)
+              },
+            )
+          }
+        }
+      }
       OutlinedButton(
         onClick = onDisconnect,
         shape = RoundedCornerShape(8.dp),
@@ -1011,11 +1062,27 @@ private fun RecoveryPanel(
 private fun CallPanel(
   callState: CallState,
   isCallAudioLive: Boolean,
+  isCallMuted: Boolean,
+  isSpeakerOn: Boolean,
+  onToggleMute: () -> Unit,
+  onToggleSpeaker: () -> Unit,
   onAcceptCall: () -> Unit,
   onRejectCall: () -> Unit,
   onEndCall: () -> Unit,
 ) {
   val peerName = callState.peerName ?: "Nearby device"
+  var now by remember { mutableStateOf(System.currentTimeMillis()) }
+  LaunchedEffect(callState.status, callState.startedAt) {
+    while (callState.status == CallStatus.Active && callState.startedAt != null) {
+      now = System.currentTimeMillis()
+      delay(1_000L)
+    }
+  }
+  val durationLabel =
+    callState.startedAt
+      ?.takeIf { callState.status == CallStatus.Active }
+      ?.let { formatCallDuration(now - it) }
+  val routeLabel = callOutputRouteLabel(isSpeakerOn)
   val title =
     when (callState.status) {
       CallStatus.Incoming -> "Incoming call"
@@ -1024,13 +1091,20 @@ private fun CallPanel(
       CallStatus.Idle -> "Call"
     }
   val subtitle =
-    when {
-      isCallAudioLive -> "Live voice on"
-      callState.activityLabel != null -> callState.activityLabel
-      callState.status == CallStatus.Active -> "Connecting voice..."
-      callState.status == CallStatus.Outgoing -> peerName
-      callState.status == CallStatus.Incoming -> peerName
-      else -> ""
+    when (callState.status) {
+      CallStatus.Active -> {
+        val voiceLabel =
+          when {
+            isCallMuted -> "Muted"
+            isCallAudioLive -> "Live voice"
+            callState.activityLabel != null -> callState.activityLabel
+            else -> "Connecting voice"
+          }
+        listOfNotNull(peerName, durationLabel, routeLabel, voiceLabel).joinToString(" - ")
+      }
+      CallStatus.Outgoing -> peerName
+      CallStatus.Incoming -> peerName
+      CallStatus.Idle -> ""
     }
   val container =
     when (callState.status) {
@@ -1101,16 +1175,22 @@ private fun CallPanel(
           }
         }
         CallStatus.Active -> {
-          Surface(color = MaterialTheme.colorScheme.secondaryContainer, contentColor = MaterialTheme.colorScheme.onSecondaryContainer, shape = CircleShape) {
-            Row(
-              modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
-              horizontalArrangement = Arrangement.spacedBy(5.dp),
-              verticalAlignment = Alignment.CenterVertically,
-            ) {
-              Icon(Icons.Rounded.Mic, contentDescription = null, modifier = Modifier.size(17.dp))
-              Text(if (isCallAudioLive) "Live" else "Starting", style = MaterialTheme.typography.labelMedium, maxLines = 1)
-            }
-          }
+          ConnectionActionButton(
+            icon = if (isCallMuted) Icons.Rounded.MicOff else Icons.Rounded.Mic,
+            label = if (isCallMuted) "Muted" else "Mic",
+            enabled = true,
+            selected = isCallMuted,
+            onClick = onToggleMute,
+            modifier = Modifier.widthIn(min = 52.dp),
+          )
+          ConnectionActionButton(
+            icon = if (isSpeakerOn) Icons.AutoMirrored.Rounded.VolumeUp else Icons.Rounded.Call,
+            label = routeLabel,
+            enabled = true,
+            selected = isSpeakerOn,
+            onClick = onToggleSpeaker,
+            modifier = Modifier.widthIn(min = 68.dp),
+          )
           OutlinedButton(
             onClick = onEndCall,
             shape = RoundedCornerShape(8.dp),
@@ -1941,6 +2021,50 @@ private fun formatDuration(durationMs: Long): String {
   }
 }
 
+internal fun formatCallDuration(durationMs: Long): String {
+  val totalSeconds = (durationMs / 1000L).coerceAtLeast(0L)
+  val minutes = totalSeconds / 60L
+  val seconds = totalSeconds % 60L
+  return "$minutes:${seconds.toString().padStart(2, '0')}"
+}
+
+internal fun callOutputRouteLabel(isSpeakerOn: Boolean): String =
+  if (isSpeakerOn) "Speaker" else "Earpiece"
+
+internal data class CallTargetOption(
+  val id: String,
+  val name: String,
+  val isDirect: Boolean,
+)
+
+internal fun callTargetOptions(state: ChatUiState): List<CallTargetOption> {
+  val directEndpoints = state.connectedEndpoints
+  val memberNames = mutableSetOf<String>()
+  val options = linkedMapOf<String, CallTargetOption>()
+
+  state.groupMembers
+    .filter { it.id.isNotBlank() && it.id != state.localDeviceId }
+    .forEach { member ->
+      val displayName = member.displayName.ifBlank { "Nearby device" }
+      val direct =
+        directEndpoints.any { endpoint ->
+          endpoint.id == member.id || endpoint.name.equals(displayName, ignoreCase = true)
+        }
+      options.putIfAbsent(member.id, CallTargetOption(id = member.id, name = displayName, isDirect = direct))
+      memberNames += displayName.trim().lowercase()
+    }
+
+  directEndpoints.forEach { endpoint ->
+    val endpointName = endpoint.name.ifBlank { "Nearby device" }
+    val representedByMemberName = endpointName.trim().lowercase() in memberNames
+    if (endpoint.id.isNotBlank() && endpoint.id != state.localDeviceId && !representedByMemberName) {
+      options.putIfAbsent(endpoint.id, CallTargetOption(id = endpoint.id, name = endpointName, isDirect = true))
+    }
+  }
+
+  return options.values.toList()
+}
+
 @OptIn(ExperimentalEncodingApi::class)
 private fun decodeImageBitmap(imageBase64: String): androidx.compose.ui.graphics.ImageBitmap {
   val bytes = Base64.Default.decode(imageBase64)
@@ -1993,12 +2117,14 @@ private fun OfflineChatContentPreview() {
       onStartCallAudio = { Result.success(Unit) },
       onStopCallAudio = {},
       onPlayCallAudio = { Result.success(Unit) },
+      onSetCallMuted = {},
+      onSetSpeakerEnabled = {},
       onSendLocation = { it(Result.success(Unit)) },
       onStartVoiceRecording = { Result.success(Unit) },
       onStopVoiceRecording = { Result.success(RecordedVoiceClip(byteArrayOf(1, 2, 3), 1000L)) },
       onPlayVoice = { Result.success(Unit) },
       onDisconnect = {},
-      onStartCall = {},
+      onStartCall = { _ -> },
       onAcceptCall = {},
       onRejectCall = {},
       onEndCall = {},

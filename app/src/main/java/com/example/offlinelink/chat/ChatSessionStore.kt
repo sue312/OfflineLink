@@ -213,7 +213,12 @@ class ChatSessionStore(
       message.isLocal && message.status != MessageStatus.Received
     }
 
-  fun startOutgoingCall(endpoint: NearbyEndpoint, callId: String) {
+  fun startOutgoingCall(
+    endpoint: NearbyEndpoint,
+    callId: String,
+    peerMemberId: String? = null,
+    peerName: String = endpoint.name,
+  ) {
     mutableState.value =
       mutableState.value.copy(
         callState =
@@ -221,13 +226,19 @@ class ChatSessionStore(
             status = CallStatus.Outgoing,
             callId = callId,
             peerEndpointId = endpoint.id,
-            peerName = endpoint.name,
+            peerMemberId = peerMemberId,
+            peerName = peerName,
             isInitiator = true,
           ),
       )
   }
 
-  fun receiveIncomingCall(endpoint: NearbyEndpoint, callId: String) {
+  fun receiveIncomingCall(
+    endpoint: NearbyEndpoint,
+    callId: String,
+    peerMemberId: String? = null,
+    peerName: String = endpoint.name,
+  ) {
     mutableState.value =
       mutableState.value.copy(
         callState =
@@ -235,7 +246,8 @@ class ChatSessionStore(
             status = CallStatus.Incoming,
             callId = callId,
             peerEndpointId = endpoint.id,
-            peerName = endpoint.name,
+            peerMemberId = peerMemberId,
+            peerName = peerName,
             isInitiator = false,
           ),
       )

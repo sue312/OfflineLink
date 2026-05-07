@@ -3,6 +3,8 @@ package com.example.offlinelink.ui.main
 import com.example.offlinelink.model.ConnectionStatus
 import com.example.offlinelink.model.CallStatus
 import com.example.offlinelink.model.ChatMessage
+import com.example.offlinelink.model.ChatUiState
+import com.example.offlinelink.model.GroupMember
 import com.example.offlinelink.model.GroupMemberStatus
 import com.example.offlinelink.model.MessageKind
 import com.example.offlinelink.model.MessageStatus
@@ -861,6 +863,39 @@ class MainScreenViewModelTest {
   }
 
   @Test
+  fun formatCallDurationUsesMinuteSecondClock() {
+    assertEquals("0:00", formatCallDuration(0L))
+    assertEquals("0:09", formatCallDuration(9_400L))
+    assertEquals("1:05", formatCallDuration(65_000L))
+    assertEquals("10:00", formatCallDuration(600_000L))
+  }
+
+  @Test
+  fun callOutputRouteLabelShowsCurrentRoute() {
+    assertEquals("Speaker", callOutputRouteLabel(true))
+    assertEquals("Earpiece", callOutputRouteLabel(false))
+  }
+
+  @Test
+  fun callTargetOptionsUseKnownGroupMembersWhenOnlyOneEndpointIsDirect() {
+    val options =
+      callTargetOptions(
+        ChatUiState(
+          localDeviceId = "device-a",
+          connectedEndpoints = listOf(NearbyEndpoint("endpoint-b", "Phone B")),
+          groupMembers =
+            listOf(
+              GroupMember("device-b", "Phone B"),
+              GroupMember("device-c", "Phone C"),
+            ),
+        ),
+      )
+
+    assertEquals(listOf("device-b", "device-c"), options.map { it.id })
+    assertEquals(listOf("Phone B", "Phone C"), options.map { it.name })
+  }
+
+  @Test
   fun startCallSendsCallRequestToConnectedEndpoint() = runTest {
     val transport = FakeChatTransport()
     val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage("", "image/jpeg", 1, 1)) }, localDeviceId = "local")
@@ -878,6 +913,117 @@ class MainScreenViewModelTest {
     val request = ChatProtocol.decode(transport.sentPayloads.single().bytes) as DecodedWireMessage.CallRequest
     assertEquals("local", request.senderId)
     assertEquals(viewModel.uiState.value.callState.callId, request.callId)
+  }
+
+  @Test
+  fun startCallCanTargetSelectedConnectedEndpoint() = runTest {
+    val transport = FakeChatTransport()
+    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage("", "image/jpeg", 1, 1)) }, localDeviceId = "local")
+
+    advanceUntilIdle()
+    transport.emit(TransportEvent.Connected(NearbyEndpoint("endpoint-b", "Phone B")))
+    transport.emit(TransportEvent.Connected(NearbyEndpoint("endpoint-c", "Phone C")))
+    advanceUntilIdle()
+    transport.clearSentPayloads()
+
+    viewModel.startCall("endpoint-c")
+
+    assertEquals(CallStatus.Outgoing, viewModel.uiState.value.callState.status)
+    assertEquals("endpoint-c", viewModel.uiState.value.callState.peerEndpointId)
+    assertEquals("Phone C", viewModel.uiState.value.callState.peerName)
+    assertEquals(listOf("endpoint-c"), transport.sentPayloads.map { it.endpointId })
+  }
+
+  @Test
+  fun startCallCanTargetKnownGroupMemberThroughRelayEndpoint() = runTest {
+    val transport = FakeChatTransport()
+    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage("", "image/jpeg", 1, 1)) }, localDeviceId = "device-a")
+
+    advanceUntilIdle()
+    transport.emit(TransportEvent.Connected(NearbyEndpoint("endpoint-b", "Phone B")))
+    advanceUntilIdle()
+    transport.emit(
+      TransportEvent.BytesReceived(
+        endpointId = "endpoint-b",
+        bytes =
+          ChatProtocol.encodeHello(
+            senderId = "device-b",
+            displayName = "Phone B",
+            members =
+              listOf(
+                WireMember("device-a", "Phone A"),
+                WireMember("device-b", "Phone B"),
+                WireMember("device-c", "Phone C"),
+              ),
+          ),
+      ),
+    )
+    advanceUntilIdle()
+    transport.clearSentPayloads()
+
+    viewModel.startCall("device-c")
+
+    assertEquals(CallStatus.Outgoing, viewModel.uiState.value.callState.status)
+    assertEquals("endpoint-b", viewModel.uiState.value.callState.peerEndpointId)
+    assertEquals("device-c", viewModel.uiState.value.callState.peerMemberId)
+    assertEquals("Phone C", viewModel.uiState.value.callState.peerName)
+    assertEquals(listOf("endpoint-b"), transport.sentPayloads.map { it.endpointId })
+    val request = ChatProtocol.decode(transport.sentPayloads.single().bytes) as DecodedWireMessage.CallRequest
+    assertEquals("device-c", request.targetId)
+  }
+
+  @Test
+  fun startCallWithMissingTargetDoesNotSendCallRequest() = runTest {
+    val transport = FakeChatTransport()
+    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage("", "image/jpeg", 1, 1)) }, localDeviceId = "local")
+
+    advanceUntilIdle()
+    transport.emit(TransportEvent.Connected(NearbyEndpoint("endpoint-b", "Phone B")))
+    advanceUntilIdle()
+    transport.clearSentPayloads()
+
+    viewModel.startCall("endpoint-c")
+
+    assertEquals(CallStatus.Idle, viewModel.uiState.value.callState.status)
+    assertEquals(ConnectionStatus.Error, viewModel.uiState.value.status)
+    assertEquals("Call target unavailable", viewModel.uiState.value.statusMessage)
+    assertEquals(emptyList<SentPayload>(), transport.sentPayloads)
+  }
+
+  @Test
+  fun incomingCallRequestForAnotherMemberIsForwardedToTargetEndpoint() = runTest {
+    val transport = FakeChatTransport()
+    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage("", "image/jpeg", 1, 1)) }, localDeviceId = "device-b")
+
+    advanceUntilIdle()
+    transport.emit(TransportEvent.Connected(NearbyEndpoint("endpoint-a", "Phone A")))
+    transport.emit(TransportEvent.Connected(NearbyEndpoint("endpoint-c", "Phone C")))
+    advanceUntilIdle()
+    transport.emit(TransportEvent.BytesReceived("endpoint-a", ChatProtocol.encodeHello(senderId = "device-a", displayName = "Phone A")))
+    transport.emit(TransportEvent.BytesReceived("endpoint-c", ChatProtocol.encodeHello(senderId = "device-c", displayName = "Phone C")))
+    advanceUntilIdle()
+    transport.clearSentPayloads()
+
+    transport.emit(
+      TransportEvent.BytesReceived(
+        endpointId = "endpoint-a",
+        bytes =
+          ChatProtocol.encodeCallRequest(
+            callId = "call-1",
+            senderId = "device-a",
+            targetId = "device-c",
+            createdAt = 1000L,
+          ),
+      ),
+    )
+    advanceUntilIdle()
+
+    assertEquals(CallStatus.Idle, viewModel.uiState.value.callState.status)
+    assertEquals(listOf("endpoint-c"), transport.sentPayloads.map { it.endpointId })
+    val request = ChatProtocol.decode(transport.sentPayloads.single().bytes) as DecodedWireMessage.CallRequest
+    assertEquals("call-1", request.callId)
+    assertEquals("device-a", request.senderId)
+    assertEquals("device-c", request.targetId)
   }
 
   @Test

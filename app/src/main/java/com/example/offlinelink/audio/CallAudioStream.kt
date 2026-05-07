@@ -5,6 +5,7 @@ import android.annotation.SuppressLint
 import android.content.Context
 import android.content.pm.PackageManager
 import android.media.AudioAttributes
+import android.media.AudioDeviceInfo
 import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioRecord
@@ -14,6 +15,7 @@ import android.media.audiofx.AcousticEchoCanceler
 import android.media.audiofx.AudioEffect
 import android.media.audiofx.AutomaticGainControl
 import android.media.audiofx.NoiseSuppressor
+import android.os.Build
 import androidx.core.content.ContextCompat
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -33,6 +35,11 @@ class CallAudioStream(context: Context) {
   private var audioEffects: List<AudioEffect> = emptyList()
   private var captureThread: Thread? = null
   private var previousAudioMode: Int? = null
+  private var previousSpeakerphoneOn: Boolean? = null
+  private var previousCommunicationDevice: AudioDeviceInfo? = null
+  private var previousCommunicationDeviceCaptured = false
+  @Volatile private var muted = false
+  @Volatile private var speakerEnabled = true
 
   @SuppressLint("MissingPermission")
   fun start(onFrame: (CallAudioFrame) -> Unit): Result<Unit> {
@@ -99,7 +106,12 @@ class CallAudioStream(context: Context) {
     runCatching {
       if (frame.bytes.isEmpty()) return@runCatching
       synchronized(lock) {
-        val track = audioTrack ?: createPlayer().also { audioTrack = it }
+        val track =
+          audioTrack
+            ?: createPlayer().also {
+              audioTrack = it
+              configureAudioMode()
+            }
         if (track.playState != AudioTrack.PLAYSTATE_PLAYING) {
           track.play()
         }
@@ -107,6 +119,19 @@ class CallAudioStream(context: Context) {
         check(written >= 0) { "Call audio playback failed: $written" }
       }
     }
+
+  fun setMuted(isMuted: Boolean) {
+    muted = isMuted
+  }
+
+  fun setSpeakerEnabled(enabled: Boolean) {
+    speakerEnabled = enabled
+    synchronized(lock) {
+      if (previousAudioMode != null || audioTrack != null) {
+        applySpeakerRoute()
+      }
+    }
+  }
 
   fun stop() {
     val record: AudioRecord?
@@ -144,7 +169,9 @@ class CallAudioStream(context: Context) {
       val read = record.read(buffer, 0, buffer.size, AudioRecord.READ_BLOCKING)
       if (read > 0) {
         runCatching {
-          onFrame(CallAudioFrame(bytes = buffer.copyOf(read)))
+          if (!muted) {
+            onFrame(CallAudioFrame(bytes = buffer.copyOf(read)))
+          }
         }
       }
     }
@@ -196,6 +223,7 @@ class CallAudioStream(context: Context) {
         .setTransferMode(AudioTrack.MODE_STREAM)
         .build()
     check(track.state == AudioTrack.STATE_INITIALIZED) { "Could not initialize call speaker stream" }
+    applyPreferredOutput(track)
     return track
   }
 
@@ -205,17 +233,78 @@ class CallAudioStream(context: Context) {
       if (previousAudioMode == null) {
         previousAudioMode = manager.mode
       }
+      if (previousSpeakerphoneOn == null) {
+        @Suppress("DEPRECATION")
+        previousSpeakerphoneOn = manager.isSpeakerphoneOn
+      }
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && !previousCommunicationDeviceCaptured) {
+        previousCommunicationDevice = manager.communicationDevice
+        previousCommunicationDeviceCaptured = true
+      }
       manager.mode = AudioManager.MODE_IN_COMMUNICATION
+      applySpeakerRoute()
     }
   }
 
   private fun restoreAudioMode() {
     val manager = audioManager ?: return
     val mode = previousAudioMode ?: return
+    val speakerphoneOn = previousSpeakerphoneOn
+    val communicationDevice = previousCommunicationDevice
+    val communicationDeviceCaptured = previousCommunicationDeviceCaptured
     previousAudioMode = null
+    previousSpeakerphoneOn = null
+    previousCommunicationDevice = null
+    previousCommunicationDeviceCaptured = false
     runCatching {
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && communicationDeviceCaptured) {
+        if (communicationDevice != null) {
+          manager.setCommunicationDevice(communicationDevice)
+        } else {
+          manager.clearCommunicationDevice()
+        }
+      }
       manager.mode = mode
+      if (speakerphoneOn != null) {
+        @Suppress("DEPRECATION")
+        manager.isSpeakerphoneOn = speakerphoneOn
+      }
     }
+  }
+
+  private fun applySpeakerRoute() {
+    val manager = audioManager ?: return
+    val outputDevice = preferredOutputDevice()
+    runCatching {
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+        if (outputDevice != null) {
+          manager.setCommunicationDevice(outputDevice)
+        } else {
+          manager.clearCommunicationDevice()
+        }
+      }
+      @Suppress("DEPRECATION")
+      manager.isSpeakerphoneOn = speakerEnabled
+      audioTrack?.let(::applyPreferredOutput)
+    }
+  }
+
+  private fun applyPreferredOutput(track: AudioTrack) {
+    runCatching {
+      track.preferredDevice = preferredOutputDevice()
+    }
+  }
+
+  private fun preferredOutputDevice(): AudioDeviceInfo? {
+    val targetType =
+      if (speakerEnabled) {
+        AudioDeviceInfo.TYPE_BUILTIN_SPEAKER
+      } else {
+        AudioDeviceInfo.TYPE_BUILTIN_EARPIECE
+      }
+    return audioManager
+      ?.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
+      ?.firstOrNull { it.type == targetType }
   }
 
   private fun createVoiceEffects(record: AudioRecord): List<AudioEffect> =

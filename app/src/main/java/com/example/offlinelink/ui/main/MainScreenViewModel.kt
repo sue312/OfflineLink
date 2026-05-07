@@ -212,6 +212,7 @@ class MainScreenViewModel(
         callId = callId,
         clipId = clipId,
         senderId = uiState.value.localDeviceId,
+        targetId = callState.peerMemberId,
         audioBase64 = Base64.Default.encode(audioBytes),
         durationMs = durationMs,
         mimeType = mimeType,
@@ -332,21 +333,32 @@ class MainScreenViewModel(
       }
   }
 
-  fun startCall() {
-    val endpoint = uiState.value.connectedEndpoints.firstOrNull()
+  fun startCall(peerEndpointId: String? = null) {
+    val endpoint = routeEndpointForCallTarget(peerEndpointId)
     if (endpoint == null) {
-      store.setStatus(ConnectionStatus.Error, "No connected device", "Connect to a nearby device first")
+      if (peerEndpointId == null) {
+        store.setStatus(ConnectionStatus.Error, "No connected device", "Connect to a nearby device first")
+      } else {
+        store.setStatus(ConnectionStatus.Error, "Call target unavailable", "Choose a connected device")
+      }
       return
     }
     if (uiState.value.callState.status != CallStatus.Idle) return
 
     val callId = UUID.randomUUID().toString()
-    store.startOutgoingCall(endpoint, callId)
+    val targetMemberId = peerEndpointId?.takeIf { isKnownGroupMember(it) } ?: endpointMemberIds[endpoint.id]
+    store.startOutgoingCall(
+      endpoint = endpoint,
+      callId = callId,
+      peerMemberId = targetMemberId,
+      peerName = callTargetName(peerEndpointId, endpoint),
+    )
     transport.send(
       endpoint.id,
       ChatProtocol.encodeCallRequest(
         callId = callId,
         senderId = uiState.value.localDeviceId,
+        targetId = targetMemberId,
         createdAt = System.currentTimeMillis(),
       ),
     ) { result ->
@@ -368,6 +380,7 @@ class MainScreenViewModel(
       ChatProtocol.encodeCallAccept(
         callId = callId,
         senderId = uiState.value.localDeviceId,
+        targetId = callState.peerMemberId,
         createdAt = System.currentTimeMillis(),
       ),
     ) { result ->
@@ -389,6 +402,7 @@ class MainScreenViewModel(
       ChatProtocol.encodeCallReject(
         callId = callId,
         senderId = uiState.value.localDeviceId,
+        targetId = callState.peerMemberId,
         reason = "rejected",
         createdAt = System.currentTimeMillis(),
       ),
@@ -407,6 +421,7 @@ class MainScreenViewModel(
       ChatProtocol.encodeCallEnd(
         callId = callId,
         senderId = uiState.value.localDeviceId,
+        targetId = callState.peerMemberId,
         createdAt = System.currentTimeMillis(),
       ),
     ) { }
@@ -716,14 +731,22 @@ class MainScreenViewModel(
         transport.send(endpointId, ChatProtocol.encodeAck(decoded.messageId)) { }
       }
       is DecodedWireMessage.CallRequest -> handleIncomingCallRequest(endpointId, decoded)
-      is DecodedWireMessage.CallAccept -> store.acceptCall(decoded.callId)
+      is DecodedWireMessage.CallAccept -> {
+        if (!forwardCallAcceptIfNeeded(endpointId, decoded)) {
+          store.acceptCall(decoded.callId)
+        }
+      }
       is DecodedWireMessage.CallReject -> {
-        store.rejectCall(decoded.callId)
-        handledCallVoiceClipIds.clear()
+        if (!forwardCallRejectIfNeeded(endpointId, decoded)) {
+          store.rejectCall(decoded.callId)
+          handledCallVoiceClipIds.clear()
+        }
       }
       is DecodedWireMessage.CallEnd -> {
-        store.endCall(decoded.callId)
-        handledCallVoiceClipIds.clear()
+        if (!forwardCallEndIfNeeded(endpointId, decoded)) {
+          store.endCall(decoded.callId)
+          handledCallVoiceClipIds.clear()
+        }
       }
       is DecodedWireMessage.CallVoice -> handleIncomingCallVoice(endpointId, decoded)
     }
@@ -733,6 +756,7 @@ class MainScreenViewModel(
     endpointId: String,
     request: DecodedWireMessage.CallRequest,
   ) {
+    if (forwardCallRequestIfNeeded(endpointId, request)) return
     val existingCall = uiState.value.callState
     if (existingCall.callId == request.callId) return
     if (existingCall.status != CallStatus.Idle) {
@@ -741,6 +765,7 @@ class MainScreenViewModel(
         ChatProtocol.encodeCallReject(
           callId = request.callId,
           senderId = uiState.value.localDeviceId,
+          targetId = request.senderId,
           reason = "busy",
           createdAt = System.currentTimeMillis(),
         ),
@@ -748,13 +773,159 @@ class MainScreenViewModel(
       return
     }
     val endpoint = uiState.value.connectedEndpoints.firstOrNull { it.id == endpointId } ?: NearbyEndpoint(endpointId, "Nearby device")
-    store.receiveIncomingCall(endpoint, request.callId)
+    store.receiveIncomingCall(
+      endpoint = endpoint,
+      callId = request.callId,
+      peerMemberId = request.senderId,
+      peerName = memberName(request.senderId) ?: endpoint.name,
+    )
   }
+
+  private fun routeEndpointForCallTarget(targetId: String?): NearbyEndpoint? {
+    val endpoints = uiState.value.connectedEndpoints
+    if (targetId == null) return endpoints.firstOrNull()
+    return endpoints.firstOrNull { endpoint -> endpoint.id == targetId || endpointMemberIds[endpoint.id] == targetId }
+      ?: endpoints.firstOrNull().takeIf { isKnownGroupMember(targetId) }
+  }
+
+  private fun callTargetName(
+    targetId: String?,
+    routeEndpoint: NearbyEndpoint,
+  ): String =
+    targetId
+      ?.let(::memberName)
+      ?: uiState.value.connectedEndpoints.firstOrNull { it.id == targetId }?.name
+      ?: routeEndpoint.name
+
+  private fun memberName(memberId: String): String? =
+    uiState.value.groupMembers.firstOrNull { it.id == memberId }?.displayName
+      ?: uiState.value.connectedEndpoints.firstOrNull { endpointMemberIds[it.id] == memberId }?.name
+
+  private fun isKnownGroupMember(memberId: String): Boolean =
+    uiState.value.groupMembers.any { it.id == memberId } || endpointMemberIds.any { it.value == memberId }
+
+  private fun shouldRelayToTarget(targetId: String?): Boolean =
+    targetId != null && targetId != uiState.value.localDeviceId
+
+  private fun relayEndpointsForTarget(
+    sourceEndpointId: String,
+    targetId: String,
+  ): List<NearbyEndpoint> {
+    val directTarget =
+      uiState.value.connectedEndpoints.firstOrNull { endpoint ->
+        endpoint.id != sourceEndpointId && (endpoint.id == targetId || endpointMemberIds[endpoint.id] == targetId)
+      }
+    if (directTarget != null) return listOf(directTarget)
+    return uiState.value.connectedEndpoints.filterNot { it.id == sourceEndpointId }
+  }
+
+  private fun forwardCallBytesIfNeeded(
+    sourceEndpointId: String,
+    targetId: String?,
+    bytes: ByteArray,
+  ): Boolean {
+    if (!shouldRelayToTarget(targetId)) return false
+    relayEndpointsForTarget(sourceEndpointId, targetId!!).forEach { endpoint ->
+      transport.send(endpoint.id, bytes) { }
+    }
+    return true
+  }
+
+  private fun forwardCallRequestIfNeeded(
+    sourceEndpointId: String,
+    request: DecodedWireMessage.CallRequest,
+  ): Boolean =
+    forwardCallBytesIfNeeded(
+      sourceEndpointId = sourceEndpointId,
+      targetId = request.targetId,
+      bytes =
+        ChatProtocol.encodeCallRequest(
+          callId = request.callId,
+          senderId = request.senderId,
+          targetId = request.targetId,
+          createdAt = request.createdAt,
+          sentAt = request.sentAt,
+        ),
+    )
+
+  private fun forwardCallAcceptIfNeeded(
+    sourceEndpointId: String,
+    accept: DecodedWireMessage.CallAccept,
+  ): Boolean =
+    forwardCallBytesIfNeeded(
+      sourceEndpointId = sourceEndpointId,
+      targetId = accept.targetId,
+      bytes =
+        ChatProtocol.encodeCallAccept(
+          callId = accept.callId,
+          senderId = accept.senderId,
+          targetId = accept.targetId,
+          createdAt = accept.createdAt,
+          sentAt = accept.sentAt,
+        ),
+    )
+
+  private fun forwardCallRejectIfNeeded(
+    sourceEndpointId: String,
+    reject: DecodedWireMessage.CallReject,
+  ): Boolean =
+    forwardCallBytesIfNeeded(
+      sourceEndpointId = sourceEndpointId,
+      targetId = reject.targetId,
+      bytes =
+        ChatProtocol.encodeCallReject(
+          callId = reject.callId,
+          senderId = reject.senderId,
+          targetId = reject.targetId,
+          reason = reject.reason,
+          createdAt = reject.createdAt,
+          sentAt = reject.sentAt,
+        ),
+    )
+
+  private fun forwardCallEndIfNeeded(
+    sourceEndpointId: String,
+    end: DecodedWireMessage.CallEnd,
+  ): Boolean =
+    forwardCallBytesIfNeeded(
+      sourceEndpointId = sourceEndpointId,
+      targetId = end.targetId,
+      bytes =
+        ChatProtocol.encodeCallEnd(
+          callId = end.callId,
+          senderId = end.senderId,
+          targetId = end.targetId,
+          createdAt = end.createdAt,
+          sentAt = end.sentAt,
+        ),
+    )
+
+  private fun forwardCallVoiceIfNeeded(
+    sourceEndpointId: String,
+    voice: DecodedWireMessage.CallVoice,
+  ): Boolean =
+    forwardCallBytesIfNeeded(
+      sourceEndpointId = sourceEndpointId,
+      targetId = voice.targetId,
+      bytes =
+        ChatProtocol.encodeCallVoice(
+          callId = voice.callId,
+          clipId = voice.clipId,
+          senderId = voice.senderId,
+          targetId = voice.targetId,
+          audioBase64 = voice.audioBase64,
+          durationMs = voice.durationMs,
+          mimeType = voice.mimeType,
+          createdAt = voice.createdAt,
+          sentAt = voice.sentAt,
+        ),
+    )
 
   private fun handleIncomingCallVoice(
     endpointId: String,
     voice: DecodedWireMessage.CallVoice,
   ) {
+    if (forwardCallVoiceIfNeeded(endpointId, voice)) return
     val callState = uiState.value.callState
     if (callState.status != CallStatus.Active) return
     if (callState.callId != voice.callId) return
