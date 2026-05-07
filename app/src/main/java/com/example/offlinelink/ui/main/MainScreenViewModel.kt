@@ -101,17 +101,21 @@ class MainScreenViewModel(
     recoveryMode = false
     recoveryConnectionAttempts.clear()
     store.setStatus(ConnectionStatus.Advertising, "Visible and searching as ${uiState.value.displayName}")
-    transport.startAdvertising(uiState.value.displayName, uiState.value.localDeviceId)
-    transport.startDiscovery()
+    startAdvertisingAndDiscovery()
   }
 
   fun startDiscovery() {
     recoveryMode = false
     recoveryConnectionAttempts.clear()
-    store.setStatus(ConnectionStatus.Discovering, "Visible and searching nearby devices")
-    store.setDiscoveredEndpoints(emptyList())
-    transport.startAdvertising(uiState.value.displayName, uiState.value.localDeviceId)
-    transport.startDiscovery()
+    if (uiState.value.connectedEndpoints.isEmpty()) {
+      endpointMemberIds.clear()
+      store.clearConnectedEndpoints()
+      store.setDiscoveredEndpoints(emptyList())
+      store.setStatus(ConnectionStatus.Discovering, "Visible and searching nearby devices")
+    } else {
+      store.restoreConnectedStatus()
+    }
+    startAdvertisingAndDiscovery()
   }
 
   fun recoverGroup() {
@@ -669,7 +673,7 @@ class MainScreenViewModel(
           return
         }
         if (recoveryMode) {
-          if (!isExpectedRecoveryEndpoint(event.pendingConnection.endpointName)) {
+          if (!isExpectedRecoveryEndpoint(event.pendingConnection.endpointName, event.pendingConnection.deviceId)) {
             transport.rejectConnection(event.pendingConnection.endpointId)
             store.setPendingConnection(null)
             return
@@ -700,6 +704,11 @@ class MainScreenViewModel(
         if (event.isAlreadyRunningNearbyOperation()) return
         if (uiState.value.connectedEndpoints.isNotEmpty()) {
           store.restoreConnectedStatus()
+          return
+        }
+        if (recoveryMode && event.isConnectionAttemptFailure()) {
+          recoveryConnectionAttempts.clear()
+          store.setStatus(ConnectionStatus.Discovering, "Reforming group: searching nearby members")
           return
         }
         store.setStatus(
@@ -1224,54 +1233,41 @@ class MainScreenViewModel(
     recoveryConnectionAttempts.clear()
     store.setStatus(ConnectionStatus.Connected, "Reconnecting $memberName")
     store.setDiscoveredEndpoints(emptyList())
-    transport.startDiscovery()
+    startAdvertisingAndDiscovery()
   }
 
   private fun startGroupRecovery() {
     recoveryMode = true
     recoveryConnectionAttempts.clear()
     store.markGroupMembersReconnecting()
-    if (shouldAdvertiseDuringRecovery()) {
-      store.setStatus(ConnectionStatus.Advertising, "Reforming group: visible as ${uiState.value.displayName}")
-      transport.startAdvertising(uiState.value.displayName, uiState.value.localDeviceId)
-    } else {
-      store.setStatus(ConnectionStatus.Discovering, "Reforming group: searching nearby members")
-      store.setDiscoveredEndpoints(emptyList())
-      transport.startDiscovery()
-    }
-  }
-
-  private fun shouldAdvertiseDuringRecovery(): Boolean {
-    val state = uiState.value
-    val memberIds = (state.groupMembers.map { it.id } + state.localDeviceId).filter { it.isNotBlank() }
-    return state.localDeviceId == memberIds.minOrNull()
+    store.setStatus(ConnectionStatus.Discovering, "Reforming group: searching nearby members")
+    store.setDiscoveredEndpoints(emptyList())
+    startAdvertisingAndDiscovery()
   }
 
   private fun maybeConnectToRecoveryEndpoint(endpoint: NearbyEndpoint) {
     if (!recoveryMode) return
     if (uiState.value.connectedEndpoints.any { it.id == endpoint.id }) return
-    if (!isExpectedRecoveryEndpoint(endpoint.name)) return
+    if (!isExpectedRecoveryEndpoint(endpoint.name, endpoint.deviceId)) return
     if (!recoveryConnectionAttempts.add(endpoint.id)) return
     connectTo(endpoint)
   }
 
-  private fun isExpectedRecoveryEndpoint(endpointName: String): Boolean {
+  private fun isExpectedRecoveryEndpoint(
+    endpointName: String,
+    deviceId: String? = null,
+  ): Boolean {
     if (!recoveryMode) return true
     val members = uiState.value.groupMembers
-    val reconnectingNames =
-      members
-        .filter { it.status == GroupMemberStatus.Reconnecting }
+    val expectedMembers = members.filter { it.status == GroupMemberStatus.Reconnecting }.ifEmpty { members }
+    val expectedDeviceIds = expectedMembers.map { it.id.trim() }.filter { it.isNotEmpty() }.toSet()
+    if (!deviceId.isNullOrBlank() && deviceId in expectedDeviceIds) return true
+    val expectedNames =
+      expectedMembers
         .map { it.displayName.trim() }
         .filter { it.isNotEmpty() }
         .toSet()
-    val expectedNames =
-      reconnectingNames.ifEmpty {
-        members
-          .map { it.displayName.trim() }
-          .filter { it.isNotEmpty() }
-          .toSet()
-      }
-    return expectedNames.isEmpty() || endpointName.trim() in expectedNames
+    return (expectedDeviceIds.isEmpty() && expectedNames.isEmpty()) || endpointName.trim() in expectedNames
   }
 
   private fun isGroupMismatch(localGroupName: String, remoteGroupName: String): Boolean =
@@ -1282,6 +1278,14 @@ class MainScreenViewModel(
   private fun TransportEvent.OperationFailed.isAlreadyRunningNearbyOperation(): Boolean {
     val details = "${message} ${throwable?.message.orEmpty()}"
     return "STATUS_ALREADY_ADVERTISING" in details || "STATUS_ALREADY_DISCOVERING" in details
+  }
+
+  private fun TransportEvent.OperationFailed.isConnectionAttemptFailure(): Boolean =
+    message.startsWith("Could not request connection") || message.startsWith("Connection failed")
+
+  private fun startAdvertisingAndDiscovery() {
+    transport.startAdvertising(uiState.value.displayName, uiState.value.localDeviceId)
+    transport.startDiscovery()
   }
 
   private fun NearbyEndpoint.isLocalDevice(): Boolean = deviceId == uiState.value.localDeviceId

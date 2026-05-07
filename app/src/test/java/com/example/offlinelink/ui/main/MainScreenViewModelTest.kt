@@ -70,6 +70,31 @@ class MainScreenViewModelTest {
   }
 
   @Test
+  fun startDiscoveryWhileConnectedKeepsExistingChatUsable() = runTest {
+    val transport = FakeChatTransport()
+    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) }, payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads")), localDeviceId = "local")
+
+    advanceUntilIdle()
+    transport.emit(TransportEvent.Connected(NearbyEndpoint("endpoint-b", "Phone B")))
+    advanceUntilIdle()
+    transport.clearDiscoveryState()
+
+    viewModel.startDiscovery()
+    advanceUntilIdle()
+
+    assertEquals(ConnectionStatus.Connected, viewModel.uiState.value.status)
+    assertEquals("Connected to Phone B", viewModel.uiState.value.statusMessage)
+    assertTrue(transport.advertisingStarted)
+    assertTrue(transport.discoveryStarted)
+
+    transport.clearSentPayloads()
+    viewModel.sendMessage("still connected")
+
+    assertEquals("endpoint-b", transport.sentPayloads.last().endpointId)
+    assertEquals(MessageStatus.Sent, viewModel.uiState.value.messages.last().status)
+  }
+
+  @Test
   fun connectedEventStopsDiscoveryToProtectEstablishedLink() = runTest {
     val transport = FakeChatTransport()
     val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) }, payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads")), localDeviceId = "local")
@@ -274,7 +299,7 @@ class MainScreenViewModelTest {
   }
 
   @Test
-  fun disconnectedRelayStartsAdvertisingWhenLocalDeviceIsLowestRemainingMember() = runTest {
+  fun disconnectedRelayStartsAdvertisingAndDiscoveryWhenLocalDeviceIsLowestRemainingMember() = runTest {
     val transport = FakeChatTransport()
     val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) }, payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads")), localDeviceId = "device-b")
 
@@ -303,12 +328,13 @@ class MainScreenViewModelTest {
     advanceUntilIdle()
 
     assertTrue(transport.advertisingStarted)
-    assertEquals(ConnectionStatus.Advertising, viewModel.uiState.value.status)
+    assertTrue(transport.discoveryStarted)
+    assertEquals(ConnectionStatus.Discovering, viewModel.uiState.value.status)
     assertEquals(listOf("Phone C"), viewModel.uiState.value.groupMembers.map { it.displayName })
   }
 
   @Test
-  fun disconnectedRelayStartsDiscoveryAndAutoConnectsWhenLocalDeviceIsNotLowestRemainingMember() = runTest {
+  fun disconnectedRelayStartsAdvertisingDiscoveryAndAutoConnectsWhenLocalDeviceIsNotLowestRemainingMember() = runTest {
     val transport = FakeChatTransport()
     val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) }, payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads")), localDeviceId = "device-c")
 
@@ -338,6 +364,7 @@ class MainScreenViewModelTest {
     transport.emit(TransportEvent.EndpointFound(NearbyEndpoint("endpoint-b", "Phone B")))
     advanceUntilIdle()
 
+    assertTrue(transport.advertisingStarted)
     assertTrue(transport.discoveryStarted)
     assertEquals(ConnectionStatus.Connecting, viewModel.uiState.value.status)
     assertEquals(listOf(NearbyEndpoint("endpoint-b", "Phone B")), transport.requestedConnections)
@@ -394,8 +421,47 @@ class MainScreenViewModelTest {
 
     assertEquals(listOf("Phone B", "Phone C"), viewModel.uiState.value.groupMembers.map { it.displayName })
     assertEquals(listOf(GroupMemberStatus.Reconnecting, GroupMemberStatus.Online), viewModel.uiState.value.groupMembers.map { it.status })
+    assertTrue(transport.advertisingStarted)
     assertTrue(transport.discoveryStarted)
     assertEquals(ConnectionStatus.Connected, viewModel.uiState.value.status)
+  }
+
+  @Test
+  fun manualSearchAfterStaleRecoveryClearsRosterAndStartsFreshPairing() = runTest {
+    val transport = FakeChatTransport()
+    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) }, payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads")), localDeviceId = "device-c")
+
+    advanceUntilIdle()
+    transport.emit(TransportEvent.Connected(NearbyEndpoint("endpoint-a", "Phone A")))
+    advanceUntilIdle()
+    transport.emit(
+      TransportEvent.BytesReceived(
+        endpointId = "endpoint-a",
+        bytes =
+          ChatProtocol.encodeHello(
+            senderId = "device-a",
+            displayName = "Phone A",
+            members =
+              listOf(
+                WireMember("device-a", "Phone A"),
+                WireMember("device-b", "Phone B"),
+                WireMember("device-c", "Phone C"),
+              ),
+          ),
+      ),
+    )
+    advanceUntilIdle()
+    transport.emit(TransportEvent.Disconnected("endpoint-a"))
+    advanceUntilIdle()
+    transport.clearDiscoveryState()
+
+    viewModel.startDiscovery()
+    advanceUntilIdle()
+
+    assertEquals(ConnectionStatus.Discovering, viewModel.uiState.value.status)
+    assertEquals(emptyList<GroupMember>(), viewModel.uiState.value.groupMembers)
+    assertTrue(transport.advertisingStarted)
+    assertTrue(transport.discoveryStarted)
   }
 
   @Test
@@ -467,6 +533,90 @@ class MainScreenViewModelTest {
     advanceUntilIdle()
 
     assertEquals(listOf(NearbyEndpoint("endpoint-b", "Phone B")), transport.requestedConnections)
+  }
+
+  @Test
+  fun recoveryDiscoveryMatchesExpectedStableDeviceIdWhenDisplayNameChanged() = runTest {
+    val transport = FakeChatTransport()
+    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) }, payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads")), localDeviceId = "device-c")
+
+    advanceUntilIdle()
+    transport.emit(TransportEvent.Connected(NearbyEndpoint("endpoint-a", "Phone A", deviceId = "device-a")))
+    advanceUntilIdle()
+    transport.emit(
+      TransportEvent.BytesReceived(
+        endpointId = "endpoint-a",
+        bytes =
+          ChatProtocol.encodeHello(
+            senderId = "device-a",
+            displayName = "Phone A",
+            members =
+              listOf(
+                WireMember("device-a", "Phone A"),
+                WireMember("device-b", "Old Phone B"),
+                WireMember("device-c", "Phone C"),
+              ),
+          ),
+      ),
+    )
+    advanceUntilIdle()
+
+    transport.emit(TransportEvent.Disconnected("endpoint-a"))
+    advanceUntilIdle()
+    transport.emit(TransportEvent.EndpointFound(NearbyEndpoint("endpoint-b", "Renamed Phone B", deviceId = "device-b")))
+    advanceUntilIdle()
+
+    assertEquals(listOf(NearbyEndpoint("endpoint-b", "Renamed Phone B", deviceId = "device-b")), transport.requestedConnections)
+  }
+
+  @Test
+  fun recoveryConnectionFailureKeepsSearchingAndAllowsRetry() = runTest {
+    val transport = FakeChatTransport()
+    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) }, payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads")), localDeviceId = "device-c")
+
+    advanceUntilIdle()
+    transport.emit(TransportEvent.Connected(NearbyEndpoint("endpoint-a", "Phone A")))
+    advanceUntilIdle()
+    transport.emit(
+      TransportEvent.BytesReceived(
+        endpointId = "endpoint-a",
+        bytes =
+          ChatProtocol.encodeHello(
+            senderId = "device-a",
+            displayName = "Phone A",
+            members =
+              listOf(
+                WireMember("device-a", "Phone A"),
+                WireMember("device-b", "Phone B"),
+                WireMember("device-c", "Phone C"),
+              ),
+          ),
+      ),
+    )
+    advanceUntilIdle()
+    transport.emit(TransportEvent.Disconnected("endpoint-a"))
+    advanceUntilIdle()
+    transport.emit(TransportEvent.EndpointFound(NearbyEndpoint("endpoint-b", "Phone B")))
+    advanceUntilIdle()
+
+    transport.emit(TransportEvent.OperationFailed("Could not request connection", IllegalStateException("8012: STATUS_ENDPOINT_IO_ERROR")))
+    advanceUntilIdle()
+
+    assertEquals(ConnectionStatus.Discovering, viewModel.uiState.value.status)
+    assertEquals(null, viewModel.uiState.value.lastError)
+
+    transport.emit(TransportEvent.EndpointFound(NearbyEndpoint("endpoint-b", "Phone B")))
+    advanceUntilIdle()
+
+    assertEquals(ConnectionStatus.Connecting, viewModel.uiState.value.status)
+    assertEquals(null, viewModel.uiState.value.lastError)
+    assertEquals(
+      listOf(
+        NearbyEndpoint("endpoint-b", "Phone B"),
+        NearbyEndpoint("endpoint-b", "Phone B"),
+      ),
+      transport.requestedConnections,
+    )
   }
 
   @Test
@@ -570,6 +720,106 @@ class MainScreenViewModelTest {
   }
 
   @Test
+  fun recoveryModeAcceptsExpectedStableDeviceIdWhenDisplayNameChanged() = runTest {
+    val transport = FakeChatTransport()
+    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) }, payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads")), localDeviceId = "device-b")
+
+    advanceUntilIdle()
+    transport.emit(TransportEvent.Connected(NearbyEndpoint("endpoint-a", "Phone A", deviceId = "device-a")))
+    advanceUntilIdle()
+    transport.emit(
+      TransportEvent.BytesReceived(
+        endpointId = "endpoint-a",
+        bytes =
+          ChatProtocol.encodeHello(
+            senderId = "device-a",
+            displayName = "Phone A",
+            members =
+              listOf(
+                WireMember("device-a", "Phone A"),
+                WireMember("device-b", "Phone B"),
+                WireMember("device-c", "Old Phone C"),
+              ),
+          ),
+      ),
+    )
+    advanceUntilIdle()
+
+    transport.emit(TransportEvent.Disconnected("endpoint-a"))
+    advanceUntilIdle()
+    transport.emit(
+      TransportEvent.ConnectionInitiated(
+        PendingConnection(
+          endpointId = "endpoint-c",
+          endpointName = "Renamed Phone C",
+          authenticationToken = "1234",
+          deviceId = "device-c",
+        ),
+      ),
+    )
+    advanceUntilIdle()
+
+    assertEquals(listOf("endpoint-c"), transport.acceptedConnections)
+    assertEquals(null, viewModel.uiState.value.pendingConnection)
+  }
+
+  @Test
+  fun remainingPeersAutoRequestEachOtherAfterRelayDisconnects() = runTest {
+    val transportA = FakeChatTransport()
+    val viewModelA = MainScreenViewModel(transportA, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) }, payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads-a")), localDeviceId = "device-a", defaultDisplayName = "Phone A")
+    val transportC = FakeChatTransport()
+    val viewModelC = MainScreenViewModel(transportC, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) }, payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads-c")), localDeviceId = "device-c", defaultDisplayName = "Phone C")
+
+    advanceUntilIdle()
+    transportA.emit(TransportEvent.Connected(NearbyEndpoint("endpoint-b-a", "Phone B", deviceId = "device-b")))
+    transportC.emit(TransportEvent.Connected(NearbyEndpoint("endpoint-b-c", "Phone B", deviceId = "device-b")))
+    advanceUntilIdle()
+    transportA.emit(
+      TransportEvent.BytesReceived(
+        endpointId = "endpoint-b-a",
+        bytes =
+          ChatProtocol.encodeHello(
+            senderId = "device-b",
+            displayName = "Phone B",
+            members =
+              listOf(
+                WireMember("device-a", "Phone A"),
+                WireMember("device-b", "Phone B"),
+                WireMember("device-c", "Phone C"),
+              ),
+          ),
+      ),
+    )
+    transportC.emit(
+      TransportEvent.BytesReceived(
+        endpointId = "endpoint-b-c",
+        bytes =
+          ChatProtocol.encodeHello(
+            senderId = "device-b",
+            displayName = "Phone B",
+            members =
+              listOf(
+                WireMember("device-a", "Phone A"),
+                WireMember("device-b", "Phone B"),
+                WireMember("device-c", "Phone C"),
+              ),
+          ),
+      ),
+    )
+    advanceUntilIdle()
+
+    transportA.emit(TransportEvent.Disconnected("endpoint-b-a"))
+    transportC.emit(TransportEvent.Disconnected("endpoint-b-c"))
+    advanceUntilIdle()
+    transportA.emit(TransportEvent.EndpointFound(NearbyEndpoint("endpoint-c", "Phone C", deviceId = "device-c")))
+    transportC.emit(TransportEvent.EndpointFound(NearbyEndpoint("endpoint-a", "Phone A", deviceId = "device-a")))
+    advanceUntilIdle()
+
+    assertEquals(listOf(NearbyEndpoint("endpoint-c", "Phone C", deviceId = "device-c")), transportA.requestedConnections)
+    assertEquals(listOf(NearbyEndpoint("endpoint-a", "Phone A", deviceId = "device-a")), transportC.requestedConnections)
+  }
+
+  @Test
   fun duplicateDisconnectEventDoesNotRestartGroupRecovery() = runTest {
     val transport = FakeChatTransport()
     val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) }, payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads")), localDeviceId = "device-b")
@@ -606,7 +856,8 @@ class MainScreenViewModelTest {
     advanceUntilIdle()
 
     assertEquals(1, transport.advertisingStartCount)
-    assertEquals(ConnectionStatus.Advertising, viewModel.uiState.value.status)
+    assertEquals(1, transport.discoveryStartCount)
+    assertEquals(ConnectionStatus.Discovering, viewModel.uiState.value.status)
   }
 
   @Test
@@ -640,7 +891,7 @@ class MainScreenViewModelTest {
     transport.emit(TransportEvent.OperationFailed("Could not start advertising", IllegalStateException("8001: STATUS_ALREADY_ADVERTISING")))
     advanceUntilIdle()
 
-    assertEquals(ConnectionStatus.Advertising, viewModel.uiState.value.status)
+    assertEquals(ConnectionStatus.Discovering, viewModel.uiState.value.status)
     assertEquals(null, viewModel.uiState.value.lastError)
   }
 
