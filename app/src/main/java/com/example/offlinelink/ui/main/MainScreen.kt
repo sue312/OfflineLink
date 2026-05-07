@@ -70,7 +70,6 @@ import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.Stop
-import androidx.compose.material.icons.rounded.Visibility
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonColors
 import androidx.compose.material3.ButtonDefaults
@@ -243,8 +242,6 @@ fun MainScreen(
       preferences.edit().putString(KEY_AVATAR_NAME, avatarName).apply()
       viewModel.setAvatarName(avatarName)
     },
-    onGroupNameChange = viewModel::setGroupName,
-    onAdvertise = viewModel::startAdvertising,
     onDiscover = viewModel::startDiscovery,
     onRecoverGroup = viewModel::recoverGroup,
     onConnect = viewModel::connectTo,
@@ -291,8 +288,6 @@ private fun OfflineChatContent(
   onRequestPermissions: () -> Unit,
   onDisplayNameChange: (String) -> Unit,
   onAvatarNameChange: (String) -> Unit,
-  onGroupNameChange: (String) -> Unit,
-  onAdvertise: () -> Unit,
   onDiscover: () -> Unit,
   onRecoverGroup: () -> Unit,
   onConnect: (NearbyEndpoint) -> Unit,
@@ -428,14 +423,11 @@ private fun OfflineChatContent(
       if (!hasPermissions) {
         PermissionPanel(onRequestPermissions, modifier = Modifier.fillMaxWidth())
       } else {
-        Alerts(groupWarning = state.groupWarning, lastError = state.lastError)
+        Alerts(lastError = state.lastError)
         SetupDisclosure(
           state = state,
           expanded = isSetupExpanded,
           onToggle = { isSetupExpanded = !isSetupExpanded },
-          onDisplayNameChange = onDisplayNameChange,
-          onGroupNameChange = onGroupNameChange,
-          onAdvertise = onAdvertise,
           onDiscover = onDiscover,
           onRecoverGroup = onRecoverGroup,
           onDisconnect = onDisconnect,
@@ -606,11 +598,7 @@ private fun StatusChip(status: ConnectionStatus) {
 }
 
 @Composable
-private fun Alerts(
-  groupWarning: String?,
-  lastError: String?,
-) {
-  groupWarning?.let { AlertBanner(text = it, isError = false) }
+private fun Alerts(lastError: String?) {
   lastError?.let { AlertBanner(text = it, isError = true) }
 }
 
@@ -782,9 +770,6 @@ private fun SetupDisclosure(
   state: ChatUiState,
   expanded: Boolean,
   onToggle: () -> Unit,
-  onDisplayNameChange: (String) -> Unit,
-  onGroupNameChange: (String) -> Unit,
-  onAdvertise: () -> Unit,
   onDiscover: () -> Unit,
   onRecoverGroup: () -> Unit,
   onDisconnect: () -> Unit,
@@ -805,11 +790,7 @@ private fun SetupDisclosure(
         } else {
           ConnectionConsole(
             state = state,
-            onDisplayNameChange = onDisplayNameChange,
-            onGroupNameChange = onGroupNameChange,
-            onAdvertise = onAdvertise,
             onDiscover = onDiscover,
-            onDisconnect = onDisconnect,
           )
         }
         if (state.connectedEndpoints.isNotEmpty() || state.groupMembers.isNotEmpty()) {
@@ -882,11 +863,7 @@ private fun SetupToggleHeader(
 @Composable
 private fun ConnectionConsole(
   state: ChatUiState,
-  onDisplayNameChange: (String) -> Unit,
-  onGroupNameChange: (String) -> Unit,
-  onAdvertise: () -> Unit,
   onDiscover: () -> Unit,
-  onDisconnect: () -> Unit,
 ) {
   Surface(
     color = MaterialTheme.colorScheme.surface,
@@ -906,53 +883,17 @@ private fun ConnectionConsole(
         }
       }
 
-      Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-        OutlinedTextField(
-          value = state.displayName,
-          onValueChange = onDisplayNameChange,
-          label = { Text("Name") },
-          leadingIcon = { Icon(Icons.Rounded.Person, contentDescription = null, modifier = Modifier.size(18.dp)) },
-          singleLine = true,
-          textStyle = MaterialTheme.typography.bodyMedium,
-          shape = RoundedCornerShape(8.dp),
-          modifier = Modifier.weight(1f),
-        )
-        OutlinedTextField(
-          value = state.groupName,
-          onValueChange = onGroupNameChange,
-          label = { Text("Group") },
-          leadingIcon = { Icon(Icons.Rounded.Groups, contentDescription = null, modifier = Modifier.size(18.dp)) },
-          singleLine = true,
-          textStyle = MaterialTheme.typography.bodyMedium,
-          shape = RoundedCornerShape(8.dp),
-          modifier = Modifier.weight(1f),
-        )
-      }
-      Row(horizontalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.fillMaxWidth()) {
-        ConnectionActionButton(
-          icon = Icons.Rounded.Visibility,
-          label = "Visible",
-          onClick = onAdvertise,
-          enabled = state.status != ConnectionStatus.Connected,
-          selected = state.status == ConnectionStatus.Advertising,
-          modifier = Modifier.weight(1f),
-        )
-        ConnectionActionButton(
-          icon = Icons.Rounded.Search,
-          label = "Search",
-          onClick = onDiscover,
-          enabled = state.status != ConnectionStatus.Connected,
-          selected = state.status == ConnectionStatus.Discovering,
-          modifier = Modifier.weight(1f),
-        )
-        ConnectionActionButton(
-          icon = Icons.Rounded.Close,
-          label = "Leave",
-          onClick = onDisconnect,
-          enabled = state.status == ConnectionStatus.Connected,
-          selected = false,
-          modifier = Modifier.weight(1f),
-        )
+      connectionSetupActionLabels(state.status).forEach { label ->
+        if (label == "Search") {
+          ConnectionActionButton(
+            icon = Icons.Rounded.Search,
+            label = label,
+            onClick = onDiscover,
+            enabled = state.status != ConnectionStatus.Connected,
+            selected = state.status == ConnectionStatus.Advertising || state.status == ConnectionStatus.Discovering,
+            modifier = Modifier.fillMaxWidth(),
+          )
+        }
       }
     }
   }
@@ -1024,7 +965,7 @@ private fun ConnectedSummary(
       }
       Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(1.dp)) {
         Text(state.statusMessage, style = MaterialTheme.typography.titleMedium)
-        Text("Group: ${state.groupName}", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(connectedSummarySubtitle(state), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
       }
       Box {
         ComposerActionButton(
@@ -1047,7 +988,7 @@ private fun ConnectedSummary(
                 Column(verticalArrangement = Arrangement.spacedBy(1.dp)) {
                   Text("Call ${target.name}")
                   if (!target.isDirect) {
-                    Text("via group", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("via relay", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                   }
                 }
               },
@@ -1091,7 +1032,7 @@ private fun RecoveryPanel(
     ) {
       Icon(Icons.Rounded.Refresh, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(20.dp))
       Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(1.dp)) {
-        Text("Group recovery", style = MaterialTheme.typography.titleMedium)
+        Text("Reconnect members", style = MaterialTheme.typography.titleMedium)
         Text(recoveryHint(state), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2)
       }
       OutlinedButton(
@@ -1400,7 +1341,7 @@ private fun EndpointList(
     Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
       Text("Nearby devices", style = MaterialTheme.typography.titleMedium)
       if (endpoints.isEmpty()) {
-        Text("No devices found yet. Keep this screen open while another phone taps Search or Visible.", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(nearbyEmptyStateText(), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
       } else {
         endpoints.forEach { endpoint ->
           Row(
@@ -2020,6 +1961,18 @@ internal fun defaultDeviceDisplayName(modelName: String): String =
 
 internal fun defaultSetupExpanded(messageCount: Int): Boolean = messageCount == 0
 
+internal fun connectionSetupActionLabels(status: ConnectionStatus): List<String> =
+  if (status == ConnectionStatus.Connected) emptyList() else listOf("Search")
+
+internal fun connectionSetupFieldLabels(status: ConnectionStatus): List<String> =
+  emptyList()
+
+internal fun nearbyEmptyStateText(): String =
+  "No devices found yet. Keep this screen open while another phone taps Search."
+
+internal fun connectedSummarySubtitle(state: ChatUiState): String =
+  countLabel(state.groupMembers.size + 1, "member")
+
 internal fun localMemberSubtitle(localDisplayName: String): String = "You: ${localDisplayName.ifBlank { "OfflineLink" }}"
 
 internal fun groupMemberStatusText(status: GroupMemberStatus): String? = null
@@ -2043,16 +1996,9 @@ private fun countLabel(
 private fun recoveryHint(state: ChatUiState): String =
   when {
     state.connectedEndpoints.isNotEmpty() -> "Refresh member status and retry pending messages."
-    state.groupMembers.any { it.status == GroupMemberStatus.Reconnecting } -> "Keep nearby phones open while the group reforms."
-    state.groupMembers.isNotEmpty() -> "Try to find the last known group members again."
+    state.groupMembers.any { it.status == GroupMemberStatus.Reconnecting } -> "Keep nearby phones open while members reconnect."
+    state.groupMembers.isNotEmpty() -> "Try to find the last known members again."
     else -> "Search nearby devices again."
-  }
-
-private fun GroupMemberStatus.label(): String =
-  when (this) {
-    GroupMemberStatus.Online -> "online"
-    GroupMemberStatus.Reconnecting -> "rejoin"
-    GroupMemberStatus.Offline -> "offline"
   }
 
 private fun ChatMessage.copyText(): String =
@@ -2077,7 +2023,7 @@ private fun diagnosticsFor(
     DiagnosticItem("Permissions", if (hasPermissions) "Granted" else "Missing"),
     DiagnosticItem("Bluetooth", bluetoothStatusLabel(context)),
     DiagnosticItem("Connection", state.status.label()),
-    DiagnosticItem("Group members", (state.groupMembers.size + 1).toString()),
+    DiagnosticItem("Members", (state.groupMembers.size + 1).toString()),
     DiagnosticItem("Messages", state.messages.size.toString()),
   )
 
@@ -2090,7 +2036,7 @@ private fun bluetoothStatusLabel(context: Context): String =
 private fun ConnectionStatus.label(): String =
   when (this) {
     ConnectionStatus.Idle -> "Ready"
-    ConnectionStatus.Advertising -> "Visible"
+    ConnectionStatus.Advertising -> "Searching"
     ConnectionStatus.Discovering -> "Searching"
     ConnectionStatus.Connecting -> "Pairing"
     ConnectionStatus.Connected -> "Online"
@@ -2213,7 +2159,6 @@ private fun OfflineChatContentPreview() {
           groupName = "Field Team",
           status = ConnectionStatus.Connected,
           statusMessage = "Connected to Phone B",
-          groupWarning = "Group mismatch: Phone B uses Rescue Team",
           connectedEndpoints = listOf(NearbyEndpoint("b", "Phone B")),
           groupMembers = listOf(GroupMember("device-b", "Phone B"), GroupMember("device-c", "Phone C")),
           messages =
@@ -2227,8 +2172,6 @@ private fun OfflineChatContentPreview() {
       onRequestPermissions = {},
       onDisplayNameChange = {},
       onAvatarNameChange = {},
-      onGroupNameChange = {},
-      onAdvertise = {},
       onDiscover = {},
       onRecoverGroup = {},
       onConnect = {},

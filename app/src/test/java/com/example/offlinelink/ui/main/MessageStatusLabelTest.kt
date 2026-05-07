@@ -2,6 +2,8 @@ package com.example.offlinelink.ui.main
 
 import com.example.offlinelink.model.GroupMember
 import com.example.offlinelink.model.GroupMemberStatus
+import com.example.offlinelink.model.ChatUiState
+import com.example.offlinelink.model.ConnectionStatus
 import com.example.offlinelink.model.MessageStatus
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -39,6 +41,43 @@ class MessageStatusLabelTest {
     assertNull(groupMemberStatusText(GroupMemberStatus.Online))
     assertNull(groupMemberStatusText(GroupMemberStatus.Reconnecting))
     assertNull(groupMemberStatusText(GroupMemberStatus.Offline))
+  }
+
+  @Test
+  fun disconnectedSetupOnlyShowsSearchAction() {
+    assertEquals(listOf("Search"), connectionSetupActionLabels(ConnectionStatus.Idle))
+    assertEquals(listOf("Search"), connectionSetupActionLabels(ConnectionStatus.Discovering))
+    assertEquals(emptyList<String>(), connectionSetupActionLabels(ConnectionStatus.Connected))
+  }
+
+  @Test
+  fun disconnectedSetupDoesNotExposeNameFields() {
+    assertEquals(emptyList<String>(), connectionSetupFieldLabels(ConnectionStatus.Idle))
+    assertEquals(emptyList<String>(), connectionSetupFieldLabels(ConnectionStatus.Discovering))
+    assertEquals(emptyList<String>(), connectionSetupFieldLabels(ConnectionStatus.Connected))
+  }
+
+  @Test
+  fun searchEmptyStateDoesNotMentionVisibleMode() {
+    assertEquals(
+      "No devices found yet. Keep this screen open while another phone taps Search.",
+      nearbyEmptyStateText(),
+    )
+  }
+
+  @Test
+  fun connectedSummaryDoesNotExposeGroupName() {
+    assertEquals(
+      "2 members",
+      connectedSummarySubtitle(
+        ChatUiState(
+          localDeviceId = "device-a",
+          groupName = "Field Team",
+          status = ConnectionStatus.Connected,
+          groupMembers = listOf(GroupMember("device-b", "Phone B")),
+        ),
+      ),
+    )
   }
 
   @Test
