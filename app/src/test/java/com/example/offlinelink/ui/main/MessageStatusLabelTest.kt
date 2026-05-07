@@ -2,6 +2,7 @@ package com.example.offlinelink.ui.main
 
 import com.example.offlinelink.model.GroupMember
 import com.example.offlinelink.model.GroupMemberStatus
+import com.example.offlinelink.model.CallStatus
 import com.example.offlinelink.model.ChatUiState
 import com.example.offlinelink.model.ConnectionStatus
 import com.example.offlinelink.model.MessageStatus
@@ -120,6 +121,27 @@ class MessageStatusLabelTest {
     )
     assertEquals("Connection", setupHeaderTitle(state))
     assertEquals("2 members", setupSummaryText(state))
+  }
+
+  @Test
+  fun fullScreenCallUsesPhoneLikeStatusLabels() {
+    assertEquals("Calling", callScreenStatusLabel(CallStatus.Outgoing))
+    assertEquals("Offline call", callScreenStatusLabel(CallStatus.Active))
+    assertEquals("Incoming call", callScreenStatusLabel(CallStatus.Incoming))
+  }
+
+  @Test
+  fun fullScreenCallShowsNetworkQualityCopy() {
+    assertEquals("OfflineLink / Strong signal", callNetworkQualityLabel())
+    assertEquals("0:03", formatCallDuration(3_000L))
+  }
+
+  @Test
+  fun fullScreenCallModeOnlyRunsDuringCalls() {
+    assertEquals(true, shouldUseFullScreenCallUi(CallStatus.Outgoing))
+    assertEquals(true, shouldUseFullScreenCallUi(CallStatus.Active))
+    assertEquals(true, shouldUseFullScreenCallUi(CallStatus.Incoming))
+    assertEquals(false, shouldUseFullScreenCallUi(CallStatus.Idle))
   }
 
   @Test

@@ -1,12 +1,17 @@
 package com.example.offlinelink.ui.main
 
 import android.bluetooth.BluetoothManager
+import android.app.Activity
 import android.content.Context
+import android.content.ContextWrapper
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.BitmapFactory
+import android.graphics.Color as AndroidColor
 import android.net.Uri
 import android.os.Build
+import android.view.View
+import android.view.WindowManager
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateContentSize
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -30,8 +35,11 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
@@ -96,6 +104,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.SolidColor
@@ -105,14 +114,21 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.ContextCompat
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation3.runtime.NavKey
@@ -411,9 +427,15 @@ private fun OfflineChatContent(
       modifier
     }
 
+  CallFullScreenEffect(enabled = shouldUseFullScreenCallUi(state.callState.status))
+
   Surface(modifier = rootModifier, color = MaterialTheme.colorScheme.background) {
     Column(
-      modifier = Modifier.fillMaxSize().padding(start = 12.dp, top = 10.dp, end = 12.dp, bottom = 8.dp),
+      modifier =
+        Modifier
+          .fillMaxSize()
+          .safeDrawingPadding()
+          .padding(start = 12.dp, top = 10.dp, end = 12.dp, bottom = 8.dp),
       verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
       Header(state = state, onOpenSettings = { showSettings = true })
@@ -433,23 +455,6 @@ private fun OfflineChatContent(
           onAccept = onAccept,
           onReject = onReject,
         )
-        if (state.callState.status != CallStatus.Idle) {
-          CallPanel(
-            callState = state.callState,
-            isCallAudioLive = isCallAudioLive,
-            isCallMuted = isCallMuted,
-            isSpeakerOn = isSpeakerOn,
-            onToggleMute = { isCallMuted = !isCallMuted },
-            onToggleSpeaker = { isSpeakerOn = !isSpeakerOn },
-            onAcceptCall = onAcceptCall,
-            onRejectCall = onRejectCall,
-            onEndCall = {
-              onStopCallAudio()
-              isCallAudioLive = false
-              onEndCall()
-            },
-          )
-        }
         MessageList(
           messages = state.messages,
           localDeviceId = state.localDeviceId,
@@ -526,6 +531,24 @@ private fun OfflineChatContent(
           onPickImage = onPickImage,
         )
       }
+    }
+    if (state.callState.status != CallStatus.Idle) {
+      CallPanel(
+        callState = state.callState,
+        isCallAudioLive = isCallAudioLive,
+        isCallMuted = isCallMuted,
+        isSpeakerOn = isSpeakerOn,
+        onToggleMute = { isCallMuted = !isCallMuted },
+        onToggleSpeaker = { isSpeakerOn = !isSpeakerOn },
+        onAcceptCall = onAcceptCall,
+        onRejectCall = onRejectCall,
+        onEndCall = {
+          onStopCallAudio()
+          isCallAudioLive = false
+          onEndCall()
+        },
+        modifier = Modifier.fillMaxSize(),
+      )
     }
     if (showSettings) {
       SettingsDialog(
@@ -714,6 +737,74 @@ private fun SettingsDialog(
       }
     }
   }
+}
+
+@Composable
+private fun CallFullScreenEffect(enabled: Boolean) {
+  val view = LocalView.current
+  DisposableEffect(enabled, view) {
+    val window = view.context.findActivity()?.window
+    if (window == null) {
+      onDispose {}
+    } else {
+      val controller = WindowCompat.getInsetsController(window, view)
+      val previousFlags = window.attributes.flags
+      val previousCutoutMode = window.attributes.layoutInDisplayCutoutMode
+      val previousStatusBarColor = window.statusBarColor
+      val previousNavigationBarColor = window.navigationBarColor
+      val previousSystemUiVisibility = window.decorView.systemUiVisibility
+      val previousLightStatusBars = controller.isAppearanceLightStatusBars
+      val previousLightNavigationBars = controller.isAppearanceLightNavigationBars
+      if (enabled) {
+        val attrs = window.attributes
+        attrs.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+        window.attributes = attrs
+        window.addFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN)
+        window.statusBarColor = AndroidColor.TRANSPARENT
+        window.navigationBarColor = AndroidColor.TRANSPARENT
+        window.decorView.systemUiVisibility =
+          previousSystemUiVisibility or
+            View.SYSTEM_UI_FLAG_FULLSCREEN or
+            View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or
+            View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY or
+            View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or
+            View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION or
+            View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+        controller.isAppearanceLightStatusBars = false
+        controller.isAppearanceLightNavigationBars = false
+        controller.hide(WindowInsetsCompat.Type.systemBars())
+        controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+      }
+      onDispose {
+        if (enabled) {
+          controller.show(WindowInsetsCompat.Type.systemBars())
+          controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_DEFAULT
+          controller.isAppearanceLightStatusBars = previousLightStatusBars
+          controller.isAppearanceLightNavigationBars = previousLightNavigationBars
+          window.statusBarColor = previousStatusBarColor
+          window.navigationBarColor = previousNavigationBarColor
+          window.decorView.systemUiVisibility = previousSystemUiVisibility
+          if (previousFlags and WindowManager.LayoutParams.FLAG_FULLSCREEN == 0) {
+            window.clearFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN)
+          } else {
+            window.addFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN)
+          }
+          val attrs = window.attributes
+          attrs.layoutInDisplayCutoutMode = previousCutoutMode
+          window.attributes = attrs
+        }
+      }
+    }
+  }
+}
+
+private fun Context.findActivity(): Activity? {
+  var current = this
+  while (current is ContextWrapper) {
+    if (current is Activity) return current
+    current = current.baseContext
+  }
+  return current as? Activity
 }
 
 @Composable
@@ -948,6 +1039,7 @@ private fun CallPanel(
   onAcceptCall: () -> Unit,
   onRejectCall: () -> Unit,
   onEndCall: () -> Unit,
+  modifier: Modifier = Modifier,
 ) {
   val peerName = callState.peerName ?: "Nearby device"
   var now by remember { mutableStateOf(System.currentTimeMillis()) }
@@ -961,162 +1053,158 @@ private fun CallPanel(
     callState.startedAt
       ?.takeIf { callState.status == CallStatus.Active }
       ?.let { formatCallDuration(now - it) }
-  val routeLabel = callOutputRouteLabel(isSpeakerOn)
-  val title =
-    when (callState.status) {
-      CallStatus.Incoming -> "Incoming call"
-      CallStatus.Outgoing -> "Calling"
-      CallStatus.Active -> "In call"
-      CallStatus.Idle -> "Call"
-    }
-  val subtitle =
-    when (callState.status) {
-      CallStatus.Active -> peerName
-      CallStatus.Outgoing -> peerName
-      CallStatus.Incoming -> peerName
-      CallStatus.Idle -> ""
-    }
-  val container =
-    when (callState.status) {
-      CallStatus.Incoming -> MaterialTheme.colorScheme.tertiaryContainer
-      else -> MaterialTheme.colorScheme.surface
-    }
-  val accent =
-    when (callState.status) {
-      CallStatus.Incoming -> MaterialTheme.colorScheme.tertiary
-      else -> MaterialTheme.colorScheme.secondary
-    }
-  val accentContent =
-    when (callState.status) {
-      CallStatus.Incoming -> MaterialTheme.colorScheme.onTertiary
-      else -> MaterialTheme.colorScheme.onSecondary
-    }
+  val primaryText = Color(0xFFF4F1EA)
+  val secondaryText = Color(0xB8F4F1EA)
+  val quietText = Color(0x99F4F1EA)
+  val sideButtonColor = Color(0x29F4F1EA)
+  val activeSideButtonColor = Color(0x3DF4F1EA)
 
-  Surface(
-    color = container,
-    contentColor = MaterialTheme.colorScheme.onSurface,
-    shape = RoundedCornerShape(8.dp),
-    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-    modifier = Modifier.fillMaxWidth(),
+  Box(
+    modifier =
+      modifier
+        .background(callScreenBackground())
+        .statusBarsPadding()
+        .navigationBarsPadding()
+        .padding(horizontal = 34.dp),
   ) {
-    if (callState.status == CallStatus.Active) {
-      Column(
-        modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
-        verticalArrangement = Arrangement.spacedBy(10.dp),
-      ) {
+    Column(
+      modifier = Modifier.fillMaxSize().padding(top = 112.dp, bottom = 42.dp),
+      horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+      Text(
+        text = peerName,
+        style = MaterialTheme.typography.displaySmall,
+        color = primaryText,
+        fontWeight = FontWeight.SemiBold,
+        textAlign = TextAlign.Center,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+      )
+      Spacer(Modifier.height(10.dp))
+      Text(
+        text = callScreenStatusLabel(callState.status),
+        style = MaterialTheme.typography.titleMedium,
+        color = secondaryText,
+        textAlign = TextAlign.Center,
+      )
+      if (callState.status == CallStatus.Active) {
+        Spacer(Modifier.height(10.dp))
+        Text(
+          text = durationLabel ?: "0:00",
+          style = MaterialTheme.typography.titleLarge,
+          color = primaryText,
+          textAlign = TextAlign.Center,
+        )
+        Spacer(Modifier.height(72.dp))
         Row(
           horizontalArrangement = Arrangement.spacedBy(10.dp),
           verticalAlignment = Alignment.CenterVertically,
         ) {
-          Surface(color = accent, contentColor = accentContent, shape = CircleShape) {
-            Icon(Icons.Rounded.Call, contentDescription = null, modifier = Modifier.padding(8.dp).size(18.dp))
-          }
-          Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(1.dp)) {
-            Text(title, style = MaterialTheme.typography.titleMedium, maxLines = 1)
-            Text(subtitle, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
-          }
-          Surface(
-            color = MaterialTheme.colorScheme.secondaryContainer,
-            contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
-            shape = RoundedCornerShape(8.dp),
-          ) {
-            Text(
-              text = durationLabel ?: "0:00",
-              modifier = Modifier.widthIn(min = 58.dp).padding(horizontal = 10.dp, vertical = 6.dp),
-              style = MaterialTheme.typography.titleSmall,
-              fontWeight = FontWeight.SemiBold,
-              maxLines = 1,
-              softWrap = false,
-            )
-          }
-        }
-        Row(
-          modifier = Modifier.fillMaxWidth(),
-          horizontalArrangement = Arrangement.spacedBy(8.dp),
-          verticalAlignment = Alignment.CenterVertically,
-        ) {
-          ConnectionActionButton(
-            icon = if (isCallMuted) Icons.Rounded.MicOff else Icons.Rounded.Mic,
-            label = "",
-            enabled = true,
-            selected = isCallMuted,
-            onClick = onToggleMute,
-            modifier = Modifier.weight(1f),
-            contentDescription = if (isCallMuted) "Muted" else "Mic",
-          )
-          ConnectionActionButton(
-            icon = if (isSpeakerOn) Icons.AutoMirrored.Rounded.VolumeUp else Icons.Rounded.Hearing,
-            label = "",
-            enabled = true,
-            selected = isSpeakerOn,
-            onClick = onToggleSpeaker,
-            modifier = Modifier.weight(1f),
-            contentDescription = routeLabel,
-          )
-          ConnectionActionButton(
-            icon = Icons.Rounded.CallEnd,
-            label = "",
-            enabled = true,
-            selected = false,
-            onClick = onEndCall,
-            modifier = Modifier.weight(1f),
-            contentDescription = "End",
+          Icon(Icons.Rounded.Lock, contentDescription = null, tint = quietText, modifier = Modifier.size(22.dp))
+          Text(
+            text = if (isCallAudioLive) callNetworkQualityLabel() else "OfflineLink / Connecting audio",
+            style = MaterialTheme.typography.titleMedium,
+            color = quietText,
+            textAlign = TextAlign.Center,
           )
         }
       }
-    } else {
-      Row(
-        modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
-        verticalAlignment = Alignment.CenterVertically,
-      ) {
-        Surface(color = accent, contentColor = accentContent, shape = CircleShape) {
-          Icon(Icons.Rounded.Call, contentDescription = null, modifier = Modifier.padding(8.dp).size(18.dp))
+
+      Spacer(Modifier.weight(1f))
+
+      if (callState.status == CallStatus.Incoming) {
+        Row(
+          modifier = Modifier.fillMaxWidth(),
+          horizontalArrangement = Arrangement.SpaceEvenly,
+          verticalAlignment = Alignment.CenterVertically,
+        ) {
+          CallControlButton(
+            icon = Icons.Rounded.CallEnd,
+            contentDescription = "Reject call",
+            containerColor = Color(0xFFE94B4E),
+            contentColor = primaryText,
+            size = 72.dp,
+            iconSize = 30.dp,
+            onClick = onRejectCall,
+          )
+          CallControlButton(
+            icon = Icons.Rounded.Call,
+            contentDescription = "Accept call",
+            containerColor = Color(0xFF25C064),
+            contentColor = primaryText,
+            size = 72.dp,
+            iconSize = 30.dp,
+            onClick = onAcceptCall,
+          )
         }
-        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(1.dp)) {
-          Text(title, style = MaterialTheme.typography.titleMedium)
-          Text(subtitle, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
-        }
-        when (callState.status) {
-          CallStatus.Incoming -> {
-            Button(
-              onClick = onAcceptCall,
-              shape = RoundedCornerShape(8.dp),
-              colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary, contentColor = MaterialTheme.colorScheme.onSecondary),
-              contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
-            ) {
-              Icon(Icons.Rounded.Check, contentDescription = null, modifier = Modifier.size(17.dp))
-              Spacer(Modifier.width(5.dp))
-              Text("Accept")
-            }
-            OutlinedButton(
-              onClick = onRejectCall,
-              shape = RoundedCornerShape(8.dp),
-              contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
-            ) {
-              Icon(Icons.Rounded.Close, contentDescription = null, modifier = Modifier.size(17.dp))
-              Spacer(Modifier.width(5.dp))
-              Text("Reject")
-            }
-          }
-          CallStatus.Outgoing -> {
-            OutlinedButton(
-              onClick = onEndCall,
-              shape = RoundedCornerShape(8.dp),
-              contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
-            ) {
-              Icon(Icons.Rounded.CallEnd, contentDescription = null, modifier = Modifier.size(17.dp))
-              Spacer(Modifier.width(5.dp))
-              Text("Cancel")
-            }
-          }
-          CallStatus.Active -> Unit
-          CallStatus.Idle -> Unit
+      } else {
+        Row(
+          modifier = Modifier.fillMaxWidth(),
+          horizontalArrangement = Arrangement.SpaceBetween,
+          verticalAlignment = Alignment.CenterVertically,
+        ) {
+          CallControlButton(
+            icon = if (isSpeakerOn) Icons.AutoMirrored.Rounded.VolumeUp else Icons.Rounded.Hearing,
+            contentDescription = callOutputRouteLabel(isSpeakerOn),
+            containerColor = if (isSpeakerOn) activeSideButtonColor else sideButtonColor,
+            contentColor = primaryText,
+            onClick = onToggleSpeaker,
+          )
+          CallControlButton(
+            icon = Icons.Rounded.CallEnd,
+            contentDescription = "End call",
+            containerColor = Color(0xFFE94B4E),
+            contentColor = primaryText,
+            size = 80.dp,
+            iconSize = 34.dp,
+            onClick = onEndCall,
+          )
+          CallControlButton(
+            icon = if (isCallMuted) Icons.Rounded.MicOff else Icons.Rounded.Mic,
+            contentDescription = if (isCallMuted) "Muted" else "Mic",
+            containerColor = if (isCallMuted) activeSideButtonColor else sideButtonColor,
+            contentColor = primaryText,
+            onClick = onToggleMute,
+          )
         }
       }
     }
   }
 }
+
+@Composable
+private fun CallControlButton(
+  icon: ImageVector,
+  contentDescription: String,
+  containerColor: Color,
+  contentColor: Color,
+  onClick: () -> Unit,
+  size: Dp = 58.dp,
+  iconSize: Dp = 27.dp,
+) {
+  Surface(
+    color = containerColor,
+    contentColor = contentColor,
+    shape = CircleShape,
+    modifier = Modifier.size(size),
+  ) {
+    IconButton(onClick = onClick, modifier = Modifier.fillMaxSize()) {
+      Icon(icon, contentDescription = contentDescription, modifier = Modifier.size(iconSize))
+    }
+  }
+}
+
+private fun callScreenBackground(): Brush =
+  Brush.linearGradient(
+    colors =
+      listOf(
+        Color(0xFF7B766A),
+        Color(0xFF626259),
+        Color(0xFF444A43),
+      ),
+    start = Offset(0f, 0f),
+    end = Offset(900f, 1600f),
+  )
 
 @Composable
 private fun MembersPanel(
@@ -2009,6 +2097,18 @@ internal fun formatCallDuration(durationMs: Long): String {
 
 internal fun callOutputRouteLabel(isSpeakerOn: Boolean): String =
   if (isSpeakerOn) "Speaker" else "Earpiece"
+
+internal fun callScreenStatusLabel(status: CallStatus): String =
+  when (status) {
+    CallStatus.Incoming -> "Incoming call"
+    CallStatus.Outgoing -> "Calling"
+    CallStatus.Active -> "Offline call"
+    CallStatus.Idle -> "Call"
+  }
+
+internal fun callNetworkQualityLabel(): String = "OfflineLink / Strong signal"
+
+internal fun shouldUseFullScreenCallUi(status: CallStatus): Boolean = status != CallStatus.Idle
 
 internal data class CallTargetOption(
   val id: String,
