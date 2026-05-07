@@ -130,7 +130,11 @@ class MainScreenViewModel(
 
   fun connectTo(endpoint: NearbyEndpoint) {
     recoveryConnectionAttempts.add(endpoint.id)
-    store.setStatus(ConnectionStatus.Connecting, "Connecting to ${endpoint.name}")
+    if (uiState.value.connectedEndpoints.isEmpty()) {
+      store.setStatus(ConnectionStatus.Connecting, "Connecting to ${endpoint.name}")
+    } else {
+      store.restoreConnectedStatus()
+    }
     transport.requestConnection(endpoint, uiState.value.displayName)
   }
 
@@ -695,7 +699,7 @@ class MainScreenViewModel(
       is TransportEvent.OperationFailed -> {
         if (event.isAlreadyRunningNearbyOperation()) return
         if (uiState.value.connectedEndpoints.isNotEmpty()) {
-          store.restoreConnectedStatus(event.throwable?.message ?: event.message)
+          store.restoreConnectedStatus()
           return
         }
         store.setStatus(
