@@ -29,6 +29,7 @@ class CallAudioStream(context: Context) {
   private val running = AtomicBoolean(false)
   private val noiseGate = CallAudioNoiseGate()
   private val playbackBuffer = CallAudioJitterBuffer()
+  private val linkMonitor = CallAudioLinkMonitor()
   private var audioEncoder: CallAudioEncoder? = null
   private var audioDecoder: CallAudioDecoder = CallAudioCodecFactory.createDecoder()
   private var audioRecord: AudioRecord? = null
@@ -56,6 +57,8 @@ class CallAudioStream(context: Context) {
   }
 
   fun diagnosticsDirectoryPath(): String = diagnosticsDirectory().absolutePath
+
+  fun linkStats(): CallAudioLinkStats = linkMonitor.snapshot()
 
   @SuppressLint("MissingPermission")
   fun start(onFrame: (CallAudioFrame) -> Unit): Result<Unit> {
@@ -98,6 +101,7 @@ class CallAudioStream(context: Context) {
           audioEffects = if (mode.useSystemEffects) createVoiceEffects(record) else emptyList()
           diagnosticRecorder = diagnostics
           noiseGate.reset()
+          linkMonitor.reset()
           resetPlaybackBufferLocked()
           running.set(true)
           started = true
@@ -147,8 +151,11 @@ class CallAudioStream(context: Context) {
       if (frame.bytes.isEmpty()) return@runCatching
       val pcmFrame = audioDecoder.decode(frame).getOrThrow() ?: return@runCatching
       diagnosticRecorder?.writeReceivedDecoded(pcmFrame.bytes, pcmFrame.bytes.size, pcmFrame.sampleRateHz)
+      val playbackFrames = linkMonitor.process(pcmFrame, frame.sequenceNumber)
+      if (playbackFrames.isEmpty()) return@runCatching
       synchronized(playbackLock) {
-        playbackBuffer.enqueue(pcmFrame)
+        playbackFrames.forEach { playbackBuffer.enqueue(it) }
+        linkMonitor.recordBufferedDuration(playbackBuffer.bufferedDurationMs)
         playbackLock.notifyAll()
       }
     }
@@ -197,6 +204,7 @@ class CallAudioStream(context: Context) {
     }
     synchronized(playbackLock) {
       playbackBuffer.reset()
+      linkMonitor.recordBufferedDuration(0L)
       playbackLock.notifyAll()
     }
 
@@ -270,9 +278,11 @@ class CallAudioStream(context: Context) {
       val frame =
         synchronized(playbackLock) {
           var readyFrame = playbackBuffer.pollReady()
+          linkMonitor.recordBufferedDuration(playbackBuffer.bufferedDurationMs)
           while (readyFrame == null && running.get()) {
             playbackLock.wait(PLAYBACK_WAIT_TIMEOUT_MS)
             readyFrame = playbackBuffer.pollReady()
+            linkMonitor.recordBufferedDuration(playbackBuffer.bufferedDurationMs)
           }
           readyFrame
         } ?: continue
@@ -503,6 +513,7 @@ class CallAudioStream(context: Context) {
   private fun resetPlaybackBufferLocked() {
     synchronized(playbackLock) {
       playbackBuffer.reset()
+      linkMonitor.recordBufferedDuration(0L)
       playbackLock.notifyAll()
     }
   }

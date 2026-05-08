@@ -133,6 +133,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation3.runtime.NavKey
 import com.example.offlinelink.audio.CallAudioFrame
+import com.example.offlinelink.audio.CallAudioLinkStats
 import com.example.offlinelink.audio.CallAudioProcessingMode
 import com.example.offlinelink.audio.CallAudioStream
 import com.example.offlinelink.audio.CallTonePlayer
@@ -221,6 +222,7 @@ fun MainScreen(
     mutableStateOf(preferences.getBoolean(KEY_CALL_AUDIO_DIAGNOSTICS_ENABLED, false))
   }
   val callAudioDiagnosticsPath = remember(callAudioStream) { callAudioStream.diagnosticsDirectoryPath() }
+  val callAudioLinkStats = callAudioStream.linkStats()
   val state by viewModel.uiState.collectAsStateWithLifecycle()
   val requiredPermissions = remember { requiredNearbyRuntimePermissions() }
   var hasPermissions by remember {
@@ -317,6 +319,7 @@ fun MainScreen(
         callAudioProcessingMode = callAudioProcessingMode,
         callAudioDiagnosticsEnabled = callAudioDiagnosticsEnabled,
         callAudioDiagnosticsPath = callAudioDiagnosticsPath,
+        callAudioLinkStats = callAudioLinkStats,
       ),
     callAudioProcessingMode = callAudioProcessingMode,
     onCallAudioProcessingModeChange = { mode ->
@@ -449,7 +452,7 @@ private fun OfflineChatContent(
     callAudioFrames.collect { frame ->
       val result =
         withContext(Dispatchers.IO) {
-          onPlayCallAudio(CallAudioFrame(frame.audioBytes, frame.durationMs, frame.mimeType))
+          onPlayCallAudio(CallAudioFrame(frame.audioBytes, frame.durationMs, frame.mimeType, frame.sequenceNumber))
         }
       result.onFailure {
         voiceError = "Could not play call voice"
@@ -2180,6 +2183,7 @@ private fun diagnosticsFor(
   callAudioProcessingMode: CallAudioProcessingMode,
   callAudioDiagnosticsEnabled: Boolean,
   callAudioDiagnosticsPath: String,
+  callAudioLinkStats: CallAudioLinkStats,
 ): List<DiagnosticItem> =
   listOf(
     DiagnosticItem("Permissions", if (hasPermissions) "Granted" else "Missing"),
@@ -2188,6 +2192,9 @@ private fun diagnosticsFor(
     DiagnosticItem("Members", (state.groupMembers.size + 1).toString()),
     DiagnosticItem("Messages", state.messages.size.toString()),
     DiagnosticItem("Call audio", callAudioProcessingMode.displayName),
+    DiagnosticItem("Call RX", "${callAudioLinkStats.receivedFrames} rx / ${callAudioLinkStats.lostFrames} lost / ${callAudioLinkStats.lateFrames} late"),
+    DiagnosticItem("Call buffer", "${callAudioLinkStats.bufferedDurationMs} ms / ${callAudioLinkStats.concealedFrames} concealed"),
+    DiagnosticItem("Call jitter", "${callAudioLinkStats.averageInterArrivalMs} avg / ${callAudioLinkStats.maxInterArrivalMs} max ms"),
     DiagnosticItem("Audio WAV", if (callAudioDiagnosticsEnabled) "On" else "Off"),
     DiagnosticItem("WAV folder", callAudioDiagnosticsPath),
   )

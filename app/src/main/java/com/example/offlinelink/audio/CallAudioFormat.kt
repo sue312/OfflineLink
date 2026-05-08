@@ -14,6 +14,7 @@ data class CallAudioFrame(
   val bytes: ByteArray,
   val durationMs: Long = CALL_AUDIO_FRAME_DURATION_MS.toLong(),
   val mimeType: String = CALL_AUDIO_MIME_TYPE,
+  val sequenceNumber: Int? = null,
 )
 
 fun isStreamingCallAudioMimeType(mimeType: String): Boolean =

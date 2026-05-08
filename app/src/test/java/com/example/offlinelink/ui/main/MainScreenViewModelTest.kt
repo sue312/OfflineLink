@@ -1797,6 +1797,7 @@ class MainScreenViewModelTest {
     assertEquals(listOf(1, 2, 3, 4), playback.audioBytes.map { it.toInt() })
     assertEquals("audio/amr-wb;rate=16000", playback.mimeType)
     assertEquals(20L, playback.durationMs)
+    assertEquals(7, playback.sequenceNumber)
   }
 
   @Test

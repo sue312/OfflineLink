@@ -125,6 +125,7 @@ data class CallAudioPlaybackFrame(
   val audioBytes: ByteArray,
   val durationMs: Long,
   val mimeType: String,
+  val sequenceNumber: Int?,
   val createdAt: Long,
 )
 

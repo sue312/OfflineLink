@@ -1106,6 +1106,7 @@ class MainScreenViewModel(
           audioBytes = audioBytes,
           durationMs = voice.durationMs,
           mimeType = voice.mimeType,
+          sequenceNumber = null,
           createdAt = voice.createdAt,
         ),
       )
@@ -1147,6 +1148,7 @@ class MainScreenViewModel(
         audioBytes = frame.audioBytes,
         durationMs = frame.durationMs,
         mimeType = frame.mimeType,
+        sequenceNumber = frame.sequenceNumber,
         createdAt = frame.createdAt,
       ),
     )
