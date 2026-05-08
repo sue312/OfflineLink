@@ -107,6 +107,19 @@ sealed interface DecodedWireMessage {
     val createdAt: Long,
     override val sentAt: Long,
   ) : DecodedWireMessage
+
+  data class CallAudioFrame(
+    val callId: String,
+    val frameId: String,
+    val senderId: String,
+    val targetId: String?,
+    val audioBytes: ByteArray,
+    val durationMs: Long,
+    val mimeType: String,
+    val sequenceNumber: Int,
+    val createdAt: Long,
+    override val sentAt: Long,
+  ) : DecodedWireMessage
 }
 
 data class WireMember(
@@ -118,7 +131,8 @@ object ChatProtocol {
   const val CURRENT_PROTOCOL_VERSION = 1
   const val CAPABILITY_CALL_TARGETING = "call_targeting"
   const val CAPABILITY_PRIORITY_QUEUE = "priority_queue"
-  val DEFAULT_CAPABILITIES: Set<String> = setOf(CAPABILITY_CALL_TARGETING)
+  const val CAPABILITY_BINARY_CALL_AUDIO = "binary_call_audio"
+  val DEFAULT_CAPABILITIES: Set<String> = setOf(CAPABILITY_CALL_TARGETING, CAPABILITY_BINARY_CALL_AUDIO)
 
   private const val TYPE_HELLO = "hello"
   private const val TYPE_MESSAGE = "message"
@@ -143,6 +157,9 @@ object ChatProtocol {
 
   fun supportsPriorityQueue(capabilities: Collection<String>): Boolean =
     CAPABILITY_PRIORITY_QUEUE in capabilities
+
+  fun supportsBinaryCallAudio(capabilities: Collection<String>): Boolean =
+    CAPABILITY_BINARY_CALL_AUDIO in capabilities
 
   fun encodeHello(
     senderId: String,
@@ -260,7 +277,48 @@ object ChatProtocol {
       sentAt,
     )
 
+  fun encodeCallAudioFrame(
+    callId: String,
+    frameId: String,
+    senderId: String,
+    targetId: String? = null,
+    audioBytes: ByteArray,
+    durationMs: Long,
+    mimeType: String,
+    sequenceNumber: Int,
+    createdAt: Long,
+    sentAt: Long = System.currentTimeMillis(),
+  ): ByteArray =
+    CallAudioPacketCodec.encode(
+      CallAudioPacket(
+        callId = callId,
+        frameId = frameId,
+        senderId = senderId,
+        targetId = targetId,
+        audioBytes = audioBytes,
+        durationMs = durationMs,
+        mimeType = mimeType,
+        sequenceNumber = sequenceNumber,
+        createdAt = createdAt,
+        sentAt = sentAt,
+      ),
+    )
+
   fun decode(bytes: ByteArray): DecodedWireMessage {
+    CallAudioPacketCodec.decode(bytes)?.let { packet ->
+      return DecodedWireMessage.CallAudioFrame(
+        callId = packet.callId,
+        frameId = packet.frameId,
+        senderId = packet.senderId,
+        targetId = packet.targetId,
+        audioBytes = packet.audioBytes,
+        durationMs = packet.durationMs,
+        mimeType = packet.mimeType,
+        sequenceNumber = packet.sequenceNumber,
+        createdAt = packet.createdAt,
+        sentAt = packet.sentAt,
+      )
+    }
     val envelope = json.decodeFromString(WireEnvelope.serializer(), bytes.decodeToString())
     require(envelope.protocolVersion <= CURRENT_PROTOCOL_VERSION) {
       "Unsupported protocol version ${envelope.protocolVersion}"

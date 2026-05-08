@@ -59,6 +59,7 @@ class MainScreenViewModel(
   private val recoveryConnectionAttempts = mutableSetOf<String>()
   private val handledCallVoiceClipIds = mutableSetOf<String>()
   private val retriedMessageEndpointIds = mutableMapOf<String, MutableSet<String>>()
+  private var nextCallAudioSequenceNumber = 0
   private val mutableCallAudioFrames =
     MutableSharedFlow<CallAudioPlaybackFrame>(
       extraBufferCapacity = 64,
@@ -223,21 +224,37 @@ class MainScreenViewModel(
     val peerEndpointId = callState.peerEndpointId ?: return
     val endpoint = uiState.value.connectedEndpoints.firstOrNull { it.id == peerEndpointId } ?: return
 
-    val clipId = UUID.randomUUID().toString()
+    val frameId = UUID.randomUUID().toString()
+    val createdAt = System.currentTimeMillis()
+    val isStreamingFrame = isStreamingCallAudioMimeType(mimeType)
     val bytes =
-      ChatProtocol.encodeCallVoice(
-        callId = callId,
-        clipId = clipId,
-        senderId = uiState.value.localDeviceId,
-        targetId = callState.peerMemberId,
-        audioBase64 = Base64.Default.encode(audioBytes),
-        durationMs = durationMs,
-        mimeType = mimeType,
-        createdAt = System.currentTimeMillis(),
-      )
+      if (isStreamingFrame) {
+        ChatProtocol.encodeCallAudioFrame(
+          callId = callId,
+          frameId = frameId,
+          senderId = uiState.value.localDeviceId,
+          targetId = callState.peerMemberId,
+          audioBytes = audioBytes,
+          durationMs = durationMs,
+          mimeType = mimeType,
+          sequenceNumber = nextCallAudioSequenceNumber++,
+          createdAt = createdAt,
+        )
+      } else {
+        ChatProtocol.encodeCallVoice(
+          callId = callId,
+          clipId = frameId,
+          senderId = uiState.value.localDeviceId,
+          targetId = callState.peerMemberId,
+          audioBase64 = Base64.Default.encode(audioBytes),
+          durationMs = durationMs,
+          mimeType = mimeType,
+          createdAt = createdAt,
+        )
+      }
     sendPayload(endpoint.id, bytes, callVoicePriority(mimeType)) { result ->
       if (result.isSuccess) {
-        store.setCallActivity(if (isStreamingCallAudioMimeType(mimeType)) "Live voice" else "Voice sent")
+        store.setCallActivity(if (isStreamingFrame) "Live voice" else "Voice sent")
       } else if (!isExpectedLiveAudioDrop(result.exceptionOrNull())) {
         store.setStatus(ConnectionStatus.Error, "Call voice failed", result.exceptionOrNull()?.message)
       }
@@ -852,6 +869,10 @@ class MainScreenViewModel(
         ensureEndpointConnected(endpointId)
         handleIncomingCallVoice(endpointId, decoded)
       }
+      is DecodedWireMessage.CallAudioFrame -> {
+        ensureEndpointConnected(endpointId)
+        handleIncomingCallAudioFrame(endpointId, decoded)
+      }
     }
   }
 
@@ -1039,6 +1060,29 @@ class MainScreenViewModel(
         ),
     )
 
+  private fun forwardCallAudioFrameIfNeeded(
+    sourceEndpointId: String,
+    frame: DecodedWireMessage.CallAudioFrame,
+  ): Boolean =
+    forwardCallBytesIfNeeded(
+      sourceEndpointId = sourceEndpointId,
+      targetId = frame.targetId,
+      priority = PayloadPriority.CallAudio,
+      bytes =
+        ChatProtocol.encodeCallAudioFrame(
+          callId = frame.callId,
+          frameId = frame.frameId,
+          senderId = frame.senderId,
+          targetId = frame.targetId,
+          audioBytes = frame.audioBytes,
+          durationMs = frame.durationMs,
+          mimeType = frame.mimeType,
+          sequenceNumber = frame.sequenceNumber,
+          createdAt = frame.createdAt,
+          sentAt = frame.sentAt,
+        ),
+    )
+
   private fun handleIncomingCallVoice(
     endpointId: String,
     voice: DecodedWireMessage.CallVoice,
@@ -1082,6 +1126,31 @@ class MainScreenViewModel(
         ),
       activityLabel = "Playing $peerName",
     )
+  }
+
+  private fun handleIncomingCallAudioFrame(
+    endpointId: String,
+    frame: DecodedWireMessage.CallAudioFrame,
+  ) {
+    if (forwardCallAudioFrameIfNeeded(endpointId, frame)) return
+    val callState = uiState.value.callState
+    if (callState.status != CallStatus.Active) return
+    if (callState.callId != frame.callId) return
+    if (callState.peerEndpointId != endpointId) return
+
+    val peerName = callState.peerName ?: uiState.value.connectedEndpoints.firstOrNull { it.id == endpointId }?.name ?: "Nearby device"
+    mutableCallAudioFrames.tryEmit(
+      CallAudioPlaybackFrame(
+        callId = frame.callId,
+        frameId = frame.frameId,
+        senderId = frame.senderId,
+        audioBytes = frame.audioBytes,
+        durationMs = frame.durationMs,
+        mimeType = frame.mimeType,
+        createdAt = frame.createdAt,
+      ),
+    )
+    store.setCallActivity("Live voice from $peerName")
   }
 
   private fun mergeIncomingRoster(endpointId: String, hello: DecodedWireMessage.Hello): Boolean {

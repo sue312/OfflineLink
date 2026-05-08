@@ -258,4 +258,69 @@ class ChatProtocolTest {
     assertEquals(1234L, voice.createdAt)
     assertEquals(5678L, voice.sentAt)
   }
+
+  @Test
+  fun encodeAndDecodeBinaryCallAudioFramePreservesMetadata() {
+    val bytes =
+      ChatProtocol.encodeCallAudioFrame(
+        callId = "call-1",
+        frameId = "frame-7",
+        senderId = "device-a",
+        targetId = "device-b",
+        audioBytes = byteArrayOf(1, 2, 3, 4, 5),
+        durationMs = 20L,
+        mimeType = "audio/opus;rate=16000",
+        sequenceNumber = 42,
+        createdAt = 1234L,
+        sentAt = 5678L,
+      )
+
+    val decoded = ChatProtocol.decode(bytes)
+
+    assertTrue(decoded is DecodedWireMessage.CallAudioFrame)
+    val frame = decoded as DecodedWireMessage.CallAudioFrame
+    assertEquals("call-1", frame.callId)
+    assertEquals("frame-7", frame.frameId)
+    assertEquals("device-a", frame.senderId)
+    assertEquals("device-b", frame.targetId)
+    assertEquals(listOf(1, 2, 3, 4, 5), frame.audioBytes.map { it.toInt() })
+    assertEquals(20L, frame.durationMs)
+    assertEquals("audio/opus;rate=16000", frame.mimeType)
+    assertEquals(42, frame.sequenceNumber)
+    assertEquals(1234L, frame.createdAt)
+    assertEquals(5678L, frame.sentAt)
+  }
+
+  @Test
+  fun binaryCallAudioFrameAvoidsJsonAndBase64Overhead() {
+    val payload = ByteArray(80) { it.toByte() }
+    val binary =
+      ChatProtocol.encodeCallAudioFrame(
+        callId = "call-1",
+        frameId = "frame-1",
+        senderId = "device-a",
+        targetId = "device-b",
+        audioBytes = payload,
+        durationMs = 20L,
+        mimeType = "audio/opus;rate=16000",
+        sequenceNumber = 1,
+        createdAt = 1234L,
+        sentAt = 5678L,
+      )
+    val legacyJson =
+      ChatProtocol.encodeCallVoice(
+        callId = "call-1",
+        clipId = "frame-1",
+        senderId = "device-a",
+        targetId = "device-b",
+        audioBase64 = java.util.Base64.getEncoder().encodeToString(payload),
+        durationMs = 20L,
+        mimeType = "audio/opus;rate=16000",
+        createdAt = 1234L,
+        sentAt = 5678L,
+      )
+
+    assertTrue(binary.size < legacyJson.size)
+    assertTrue(!binary.decodeToString().contains("audioBase64"))
+  }
 }

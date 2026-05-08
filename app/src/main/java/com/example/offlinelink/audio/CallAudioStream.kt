@@ -13,7 +13,6 @@ import android.media.AudioTrack
 import android.media.MediaRecorder
 import android.media.audiofx.AcousticEchoCanceler
 import android.media.audiofx.AudioEffect
-import android.media.audiofx.AutomaticGainControl
 import android.media.audiofx.NoiseSuppressor
 import android.os.Build
 import android.os.Process
@@ -26,8 +25,11 @@ class CallAudioStream(context: Context) {
   private val lock = Any()
   private val running = AtomicBoolean(false)
   private val noiseGate = CallAudioNoiseGate()
+  private var audioEncoder: CallAudioEncoder? = null
+  private var audioDecoder: CallAudioDecoder = CallAudioCodecFactory.createDecoder()
   private var audioRecord: AudioRecord? = null
   private var audioTrack: AudioTrack? = null
+  private var audioTrackSampleRateHz: Int? = null
   private var audioEffects: List<AudioEffect> = emptyList()
   private var captureThread: Thread? = null
   private var previousAudioMode: Int? = null
@@ -45,6 +47,7 @@ class CallAudioStream(context: Context) {
 
     var newRecord: AudioRecord? = null
     var newTrack: AudioTrack? = null
+    var newEncoder: CallAudioEncoder? = null
     var started = false
     return runCatching {
       require(
@@ -53,8 +56,10 @@ class CallAudioStream(context: Context) {
         "Microphone permission is required"
       }
 
-      val record = createRecorder()
-      val track = createPlayer()
+      val encoder = CallAudioCodecFactory.createEncoder()
+      val record = createRecorder(encoder.inputSampleRateHz, encoder.inputFrameBytes)
+      val track = createPlayer(encoder.inputSampleRateHz)
+      newEncoder = encoder
       newRecord = record
       newTrack = track
 
@@ -65,6 +70,8 @@ class CallAudioStream(context: Context) {
         } else {
           audioRecord = record
           audioTrack = track
+          audioTrackSampleRateHz = encoder.inputSampleRateHz
+          audioEncoder = encoder
           configureAudioMode()
           audioEffects = createVoiceEffects(record)
           noiseGate.reset()
@@ -73,7 +80,7 @@ class CallAudioStream(context: Context) {
           track.play()
           record.startRecording()
           captureThread =
-            Thread({ captureLoop(record, onFrame) }, "OfflineLinkCallAudio").apply {
+            Thread({ captureLoop(record, encoder, onFrame) }, "OfflineLinkCallAudio").apply {
               isDaemon = true
               start()
             }
@@ -81,6 +88,7 @@ class CallAudioStream(context: Context) {
       }
 
       if (releaseNewStreams) {
+        encoder.close()
         record.release()
         track.release()
       }
@@ -88,11 +96,14 @@ class CallAudioStream(context: Context) {
       if (started) {
         stop()
       } else {
+        newEncoder?.close()
         releaseRecord(newRecord)
         releaseTrack(newTrack)
         synchronized(lock) {
           if (audioRecord === newRecord) audioRecord = null
           if (audioTrack === newTrack) audioTrack = null
+          if (audioEncoder === newEncoder) audioEncoder = null
+          if (audioTrack === newTrack) audioTrackSampleRateHz = null
           running.set(false)
         }
       }
@@ -102,17 +113,13 @@ class CallAudioStream(context: Context) {
   fun play(frame: CallAudioFrame): Result<Unit> =
     runCatching {
       if (frame.bytes.isEmpty()) return@runCatching
+      val pcmFrame = audioDecoder.decode(frame).getOrThrow() ?: return@runCatching
       synchronized(lock) {
-        val track =
-          audioTrack
-            ?: createPlayer().also {
-              audioTrack = it
-              configureAudioMode()
-            }
+        val track = ensurePlayerLocked(pcmFrame.sampleRateHz)
         if (track.playState != AudioTrack.PLAYSTATE_PLAYING) {
           track.play()
         }
-        val written = track.write(frame.bytes, 0, frame.bytes.size, AudioTrack.WRITE_NON_BLOCKING)
+        val written = track.write(pcmFrame.bytes, 0, pcmFrame.bytes.size, AudioTrack.WRITE_NON_BLOCKING)
         check(written >= 0) { "Call audio playback failed: $written" }
       }
     }
@@ -133,16 +140,23 @@ class CallAudioStream(context: Context) {
   fun stop() {
     val record: AudioRecord?
     val track: AudioTrack?
+    val encoder: CallAudioEncoder?
+    val decoder: CallAudioDecoder
     val effects: List<AudioEffect>
     val thread: Thread?
     synchronized(lock) {
       running.set(false)
       record = audioRecord
       track = audioTrack
+      encoder = audioEncoder
+      decoder = audioDecoder
       effects = audioEffects
       thread = captureThread
       audioRecord = null
       audioTrack = null
+      audioTrackSampleRateHz = null
+      audioEncoder = null
+      audioDecoder = CallAudioCodecFactory.createDecoder()
       audioEffects = emptyList()
       captureThread = null
     }
@@ -152,6 +166,8 @@ class CallAudioStream(context: Context) {
       runCatching { thread.join(STOP_JOIN_TIMEOUT_MS) }
     }
     releaseEffects(effects)
+    encoder?.close()
+    decoder.close()
     releaseRecord(record)
     releaseTrack(track)
     restoreAudioMode()
@@ -159,18 +175,42 @@ class CallAudioStream(context: Context) {
 
   private fun captureLoop(
     record: AudioRecord,
+    initialEncoder: CallAudioEncoder,
     onFrame: (CallAudioFrame) -> Unit,
   ) {
     runCatching { Process.setThreadPriority(Process.THREAD_PRIORITY_AUDIO) }
-    val buffer = ByteArray(CALL_AUDIO_FRAME_BYTES)
+    var encoder = initialEncoder
+    val inputProcessor = CallAudioInputProcessor(encoder.inputSampleRateHz)
+    val buffer = ByteArray(encoder.inputFrameBytes)
     while (running.get()) {
       val read = record.read(buffer, 0, buffer.size, AudioRecord.READ_BLOCKING)
       if (read > 0) {
         runCatching {
           if (muted) {
             noiseGate.reset()
-          } else if (noiseGate.shouldTransmit(buffer, read)) {
-            onFrame(CallAudioFrame(bytes = buffer.copyOf(read)))
+            inputProcessor.reset()
+          } else {
+            inputProcessor.process(buffer, read)
+            if (!noiseGate.shouldTransmit(buffer, read)) return@runCatching
+            val encodedFrame =
+              encoder.encode(buffer, read).getOrElse {
+                val fallback =
+                  PcmCallAudioEncoder(
+                    sampleRateHz = encoder.inputSampleRateHz,
+                    outputSampleRateHz = CALL_AUDIO_SAMPLE_RATE_HZ,
+                  )
+                encoder.close()
+                synchronized(lock) {
+                  if (audioEncoder === encoder) {
+                    audioEncoder = fallback
+                  }
+                }
+                encoder = fallback
+                encoder.encode(buffer, read).getOrNull()
+              }
+            if (encodedFrame != null) {
+              onFrame(encodedFrame)
+            }
           }
         }
       }
@@ -178,17 +218,17 @@ class CallAudioStream(context: Context) {
   }
 
   @SuppressLint("MissingPermission")
-  private fun createRecorder(): AudioRecord {
+  private fun createRecorder(sampleRateHz: Int, frameBytes: Int): AudioRecord {
     val minBuffer =
       AudioRecord.getMinBufferSize(
-        CALL_AUDIO_SAMPLE_RATE_HZ,
+        sampleRateHz,
         AudioFormat.CHANNEL_IN_MONO,
         AudioFormat.ENCODING_PCM_16BIT,
-      ).coerceAtLeast(CALL_AUDIO_FRAME_BYTES * 4)
+      ).coerceAtLeast(frameBytes * 4)
     val record =
       AudioRecord(
         MediaRecorder.AudioSource.VOICE_COMMUNICATION,
-        CALL_AUDIO_SAMPLE_RATE_HZ,
+        sampleRateHz,
         AudioFormat.CHANNEL_IN_MONO,
         AudioFormat.ENCODING_PCM_16BIT,
         minBuffer,
@@ -197,13 +237,14 @@ class CallAudioStream(context: Context) {
     return record
   }
 
-  private fun createPlayer(): AudioTrack {
+  private fun createPlayer(sampleRateHz: Int): AudioTrack {
+    val frameBytes = callAudioPcmFrameBytes(sampleRateHz)
     val minBuffer =
       AudioTrack.getMinBufferSize(
-        CALL_AUDIO_SAMPLE_RATE_HZ,
+        sampleRateHz,
         AudioFormat.CHANNEL_OUT_MONO,
         AudioFormat.ENCODING_PCM_16BIT,
-      ).coerceAtLeast(CALL_AUDIO_FRAME_BYTES * 4)
+      ).coerceAtLeast(frameBytes * 4)
     val track =
       AudioTrack.Builder()
         .setAudioAttributes(
@@ -215,7 +256,7 @@ class CallAudioStream(context: Context) {
         .setAudioFormat(
           AudioFormat.Builder()
             .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-            .setSampleRate(CALL_AUDIO_SAMPLE_RATE_HZ)
+            .setSampleRate(sampleRateHz)
             .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
             .build(),
         )
@@ -225,6 +266,19 @@ class CallAudioStream(context: Context) {
     check(track.state == AudioTrack.STATE_INITIALIZED) { "Could not initialize call speaker stream" }
     applyPreferredOutput(track)
     return track
+  }
+
+  private fun ensurePlayerLocked(sampleRateHz: Int): AudioTrack {
+    val existingTrack = audioTrack
+    if (existingTrack != null && audioTrackSampleRateHz == sampleRateHz) {
+      return existingTrack
+    }
+    releaseTrack(existingTrack)
+    return createPlayer(sampleRateHz).also {
+      audioTrack = it
+      audioTrackSampleRateHz = sampleRateHz
+      configureAudioMode()
+    }
   }
 
   private fun configureAudioMode() {
@@ -311,7 +365,6 @@ class CallAudioStream(context: Context) {
     listOfNotNull(
       createVoiceEffect(AcousticEchoCanceler.isAvailable()) { AcousticEchoCanceler.create(record.audioSessionId) },
       createVoiceEffect(NoiseSuppressor.isAvailable()) { NoiseSuppressor.create(record.audioSessionId) },
-      createVoiceEffect(AutomaticGainControl.isAvailable()) { AutomaticGainControl.create(record.audioSessionId) },
     )
 
   private fun <T : AudioEffect> createVoiceEffect(
