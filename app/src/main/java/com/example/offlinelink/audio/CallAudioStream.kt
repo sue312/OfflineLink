@@ -17,6 +17,7 @@ import android.media.audiofx.NoiseSuppressor
 import android.os.Build
 import android.os.Process
 import androidx.core.content.ContextCompat
+import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
 
 class CallAudioStream(context: Context) {
@@ -31,6 +32,7 @@ class CallAudioStream(context: Context) {
   private var audioTrack: AudioTrack? = null
   private var audioTrackSampleRateHz: Int? = null
   private var audioEffects: List<AudioEffect> = emptyList()
+  private var diagnosticRecorder: CallAudioDiagnosticRecorder? = null
   private var captureThread: Thread? = null
   private var previousAudioMode: Int? = null
   private var previousSpeakerphoneOn: Boolean? = null
@@ -38,6 +40,18 @@ class CallAudioStream(context: Context) {
   private var previousCommunicationDeviceCaptured = false
   @Volatile private var muted = false
   @Volatile private var speakerEnabled = true
+  @Volatile private var processingMode = CallAudioProcessingMode.Default
+  @Volatile private var diagnosticsEnabled = false
+
+  fun setProcessingMode(mode: CallAudioProcessingMode) {
+    processingMode = mode
+  }
+
+  fun setDiagnosticsEnabled(enabled: Boolean) {
+    diagnosticsEnabled = enabled
+  }
+
+  fun diagnosticsDirectoryPath(): String = diagnosticsDirectory().absolutePath
 
   @SuppressLint("MissingPermission")
   fun start(onFrame: (CallAudioFrame) -> Unit): Result<Unit> {
@@ -48,6 +62,7 @@ class CallAudioStream(context: Context) {
     var newRecord: AudioRecord? = null
     var newTrack: AudioTrack? = null
     var newEncoder: CallAudioEncoder? = null
+    var newDiagnostics: CallAudioDiagnosticRecorder? = null
     var started = false
     return runCatching {
       require(
@@ -57,11 +72,14 @@ class CallAudioStream(context: Context) {
       }
 
       val encoder = CallAudioCodecFactory.createEncoder()
+      val mode = processingMode
       val record = createRecorder(encoder.inputSampleRateHz, encoder.inputFrameBytes)
       val track = createPlayer(encoder.inputSampleRateHz)
+      val diagnostics = createDiagnosticRecorder(encoder.inputSampleRateHz, mode)
       newEncoder = encoder
       newRecord = record
       newTrack = track
+      newDiagnostics = diagnostics
 
       var releaseNewStreams = false
       synchronized(lock) {
@@ -73,14 +91,15 @@ class CallAudioStream(context: Context) {
           audioTrackSampleRateHz = encoder.inputSampleRateHz
           audioEncoder = encoder
           configureAudioMode()
-          audioEffects = createVoiceEffects(record)
+          audioEffects = if (mode.useSystemEffects) createVoiceEffects(record) else emptyList()
+          diagnosticRecorder = diagnostics
           noiseGate.reset()
           running.set(true)
           started = true
           track.play()
           record.startRecording()
           captureThread =
-            Thread({ captureLoop(record, encoder, onFrame) }, "OfflineLinkCallAudio").apply {
+            Thread({ captureLoop(record, encoder, mode, diagnostics, onFrame) }, "OfflineLinkCallAudio").apply {
               isDaemon = true
               start()
             }
@@ -88,6 +107,7 @@ class CallAudioStream(context: Context) {
       }
 
       if (releaseNewStreams) {
+        diagnostics?.close()
         encoder.close()
         record.release()
         track.release()
@@ -97,6 +117,7 @@ class CallAudioStream(context: Context) {
         stop()
       } else {
         newEncoder?.close()
+        newDiagnostics?.close()
         releaseRecord(newRecord)
         releaseTrack(newTrack)
         synchronized(lock) {
@@ -104,6 +125,7 @@ class CallAudioStream(context: Context) {
           if (audioTrack === newTrack) audioTrack = null
           if (audioEncoder === newEncoder) audioEncoder = null
           if (audioTrack === newTrack) audioTrackSampleRateHz = null
+          if (diagnosticRecorder === newDiagnostics) diagnosticRecorder = null
           running.set(false)
         }
       }
@@ -114,6 +136,7 @@ class CallAudioStream(context: Context) {
     runCatching {
       if (frame.bytes.isEmpty()) return@runCatching
       val pcmFrame = audioDecoder.decode(frame).getOrThrow() ?: return@runCatching
+      diagnosticRecorder?.writeReceivedDecoded(pcmFrame.bytes, pcmFrame.bytes.size, pcmFrame.sampleRateHz)
       synchronized(lock) {
         val track = ensurePlayerLocked(pcmFrame.sampleRateHz)
         if (track.playState != AudioTrack.PLAYSTATE_PLAYING) {
@@ -143,6 +166,7 @@ class CallAudioStream(context: Context) {
     val encoder: CallAudioEncoder?
     val decoder: CallAudioDecoder
     val effects: List<AudioEffect>
+    val diagnostics: CallAudioDiagnosticRecorder?
     val thread: Thread?
     synchronized(lock) {
       running.set(false)
@@ -151,6 +175,7 @@ class CallAudioStream(context: Context) {
       encoder = audioEncoder
       decoder = audioDecoder
       effects = audioEffects
+      diagnostics = diagnosticRecorder
       thread = captureThread
       audioRecord = null
       audioTrack = null
@@ -158,6 +183,7 @@ class CallAudioStream(context: Context) {
       audioEncoder = null
       audioDecoder = CallAudioCodecFactory.createDecoder()
       audioEffects = emptyList()
+      diagnosticRecorder = null
       captureThread = null
     }
 
@@ -166,6 +192,7 @@ class CallAudioStream(context: Context) {
       runCatching { thread.join(STOP_JOIN_TIMEOUT_MS) }
     }
     releaseEffects(effects)
+    diagnostics?.close()
     encoder?.close()
     decoder.close()
     releaseRecord(record)
@@ -176,21 +203,25 @@ class CallAudioStream(context: Context) {
   private fun captureLoop(
     record: AudioRecord,
     initialEncoder: CallAudioEncoder,
+    mode: CallAudioProcessingMode,
+    diagnostics: CallAudioDiagnosticRecorder?,
     onFrame: (CallAudioFrame) -> Unit,
   ) {
     runCatching { Process.setThreadPriority(Process.THREAD_PRIORITY_AUDIO) }
     var encoder = initialEncoder
-    val inputProcessor = CallAudioInputProcessor(encoder.inputSampleRateHz)
+    val inputProcessor = mode.inputProcessorProfile?.let { CallAudioInputProcessor(encoder.inputSampleRateHz, it) }
     val buffer = ByteArray(encoder.inputFrameBytes)
     while (running.get()) {
       val read = record.read(buffer, 0, buffer.size, AudioRecord.READ_BLOCKING)
       if (read > 0) {
         runCatching {
+          diagnostics?.writeCaptureRaw(buffer, read)
           if (muted) {
             noiseGate.reset()
-            inputProcessor.reset()
+            inputProcessor?.reset()
           } else {
-            inputProcessor.process(buffer, read)
+            inputProcessor?.process(buffer, read)
+            diagnostics?.writeCaptureProcessed(buffer, read)
             if (!noiseGate.shouldTransmit(buffer, read)) return@runCatching
             val encodedFrame =
               encoder.encode(buffer, read).getOrElse {
@@ -402,6 +433,19 @@ class CallAudioStream(context: Context) {
     runCatching { track.stop() }
     runCatching { track.release() }
   }
+
+  private fun createDiagnosticRecorder(
+    sampleRateHz: Int,
+    mode: CallAudioProcessingMode,
+  ): CallAudioDiagnosticRecorder? =
+    if (diagnosticsEnabled) {
+      runCatching { CallAudioDiagnosticRecorder.start(diagnosticsDirectory(), sampleRateHz, mode) }.getOrNull()
+    } else {
+      null
+    }
+
+  private fun diagnosticsDirectory(): File =
+    File(appContext.getExternalFilesDir(null) ?: appContext.filesDir, "call-audio-diagnostics")
 
   private companion object {
     private const val STOP_JOIN_TIMEOUT_MS = 250L

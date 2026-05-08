@@ -133,11 +133,13 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation3.runtime.NavKey
 import com.example.offlinelink.audio.CallAudioFrame
+import com.example.offlinelink.audio.CallAudioProcessingMode
 import com.example.offlinelink.audio.CallAudioStream
 import com.example.offlinelink.audio.CallTonePlayer
 import com.example.offlinelink.audio.RecordedVoiceClip
 import com.example.offlinelink.audio.VoicePlayer
 import com.example.offlinelink.audio.VoiceRecorder
+import com.example.offlinelink.audio.callAudioProcessingModeFromName
 import com.example.offlinelink.data.JsonChatHistoryRepository
 import com.example.offlinelink.data.PayloadCache
 import com.example.offlinelink.image.ImageCompressor
@@ -212,6 +214,13 @@ fun MainScreen(
   val voicePlayer = remember(context) { VoicePlayer(context.applicationContext) }
   val callAudioStream = remember(context) { CallAudioStream(context.applicationContext) }
   val callTonePlayer = remember(context) { CallTonePlayer(context.applicationContext) }
+  var callAudioProcessingMode by rememberSaveable {
+    mutableStateOf(callAudioProcessingModeFromName(preferences.getString(KEY_CALL_AUDIO_PROCESSING_MODE, null)))
+  }
+  var callAudioDiagnosticsEnabled by rememberSaveable {
+    mutableStateOf(preferences.getBoolean(KEY_CALL_AUDIO_DIAGNOSTICS_ENABLED, false))
+  }
+  val callAudioDiagnosticsPath = remember(callAudioStream) { callAudioStream.diagnosticsDirectoryPath() }
   val state by viewModel.uiState.collectAsStateWithLifecycle()
   val requiredPermissions = remember { requiredNearbyRuntimePermissions() }
   var hasPermissions by remember {
@@ -232,6 +241,12 @@ fun MainScreen(
       callAudioStream.stop()
       callTonePlayer.release()
     }
+  }
+  LaunchedEffect(callAudioProcessingMode, callAudioStream) {
+    callAudioStream.setProcessingMode(callAudioProcessingMode)
+  }
+  LaunchedEffect(callAudioDiagnosticsEnabled, callAudioStream) {
+    callAudioStream.setDiagnosticsEnabled(callAudioDiagnosticsEnabled)
   }
   LaunchedEffect(state.callState.status) {
     callTonePlayer.play(callToneModeFor(state.callState.status))
@@ -294,7 +309,28 @@ fun MainScreen(
     onRetryMessage = viewModel::retryMessage,
     onDeleteMessage = viewModel::deleteMessage,
     onClearMessages = viewModel::clearMessages,
-    diagnostics = diagnosticsFor(context, hasPermissions, state),
+    diagnostics =
+      diagnosticsFor(
+        context = context,
+        hasPermissions = hasPermissions,
+        state = state,
+        callAudioProcessingMode = callAudioProcessingMode,
+        callAudioDiagnosticsEnabled = callAudioDiagnosticsEnabled,
+        callAudioDiagnosticsPath = callAudioDiagnosticsPath,
+      ),
+    callAudioProcessingMode = callAudioProcessingMode,
+    onCallAudioProcessingModeChange = { mode ->
+      callAudioProcessingMode = mode
+      preferences.edit().putString(KEY_CALL_AUDIO_PROCESSING_MODE, mode.name).apply()
+      callAudioStream.setProcessingMode(mode)
+    },
+    callAudioDiagnosticsEnabled = callAudioDiagnosticsEnabled,
+    onCallAudioDiagnosticsEnabledChange = { enabled ->
+      callAudioDiagnosticsEnabled = enabled
+      preferences.edit().putBoolean(KEY_CALL_AUDIO_DIAGNOSTICS_ENABLED, enabled).apply()
+      callAudioStream.setDiagnosticsEnabled(enabled)
+    },
+    callAudioDiagnosticsPath = callAudioDiagnosticsPath,
     onPickImage = { imagePickerLauncher.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) },
     modifier = modifier.fillMaxSize(),
     )
@@ -336,6 +372,11 @@ private fun OfflineChatContent(
   onDeleteMessage: (String) -> Unit,
   onClearMessages: () -> Unit,
   diagnostics: List<DiagnosticItem>,
+  callAudioProcessingMode: CallAudioProcessingMode,
+  onCallAudioProcessingModeChange: (CallAudioProcessingMode) -> Unit,
+  callAudioDiagnosticsEnabled: Boolean,
+  onCallAudioDiagnosticsEnabledChange: (Boolean) -> Unit,
+  callAudioDiagnosticsPath: String,
   onPickImage: () -> Unit,
   modifier: Modifier = Modifier,
 ) {
@@ -561,6 +602,11 @@ private fun OfflineChatContent(
       SettingsDialog(
         state = state,
         diagnostics = diagnostics,
+        callAudioProcessingMode = callAudioProcessingMode,
+        onCallAudioProcessingModeChange = onCallAudioProcessingModeChange,
+        callAudioDiagnosticsEnabled = callAudioDiagnosticsEnabled,
+        onCallAudioDiagnosticsEnabledChange = onCallAudioDiagnosticsEnabledChange,
+        callAudioDiagnosticsPath = callAudioDiagnosticsPath,
         onDisplayNameChange = onDisplayNameChange,
         onAvatarNameChange = onAvatarNameChange,
         onClearMessages = onClearMessages,
@@ -679,6 +725,11 @@ private fun PermissionPanel(
 private fun SettingsDialog(
   state: ChatUiState,
   diagnostics: List<DiagnosticItem>,
+  callAudioProcessingMode: CallAudioProcessingMode,
+  onCallAudioProcessingModeChange: (CallAudioProcessingMode) -> Unit,
+  callAudioDiagnosticsEnabled: Boolean,
+  onCallAudioDiagnosticsEnabledChange: (Boolean) -> Unit,
+  callAudioDiagnosticsPath: String,
   onDisplayNameChange: (String) -> Unit,
   onAvatarNameChange: (String) -> Unit,
   onClearMessages: () -> Unit,
@@ -720,6 +771,33 @@ private fun SettingsDialog(
           shape = RoundedCornerShape(8.dp),
           modifier = Modifier.fillMaxWidth(),
         )
+        SettingsSection(title = "Call audio") {
+          CallAudioModePicker(
+            selectedMode = callAudioProcessingMode,
+            onModeSelected = onCallAudioProcessingModeChange,
+          )
+          Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+              Text("WAV diagnostics", style = MaterialTheme.typography.bodyMedium)
+              Text(
+                text = if (callAudioDiagnosticsEnabled) "Saving next calls to app files." else "Capture raw, processed, and received call audio.",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+              )
+            }
+            OutlinedButton(
+              onClick = { onCallAudioDiagnosticsEnabledChange(!callAudioDiagnosticsEnabled) },
+              shape = RoundedCornerShape(8.dp),
+            ) {
+              Text(if (callAudioDiagnosticsEnabled) "On" else "Off")
+            }
+          }
+          Text(
+            text = callAudioDiagnosticsPath,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+          )
+        }
         SettingsSection(title = "Diagnostics") {
           diagnostics.forEach { item ->
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
@@ -742,6 +820,55 @@ private fun SettingsDialog(
           }
         }
       }
+    }
+  }
+}
+
+@Composable
+private fun CallAudioModePicker(
+  selectedMode: CallAudioProcessingMode,
+  onModeSelected: (CallAudioProcessingMode) -> Unit,
+) {
+  Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+    CallAudioProcessingMode.entries.forEach { mode ->
+      val selected = mode == selectedMode
+      if (selected) {
+        Button(
+          onClick = { onModeSelected(mode) },
+          shape = RoundedCornerShape(8.dp),
+          modifier = Modifier.fillMaxWidth(),
+        ) {
+          CallAudioModeContent(mode = mode, selected = true)
+        }
+      } else {
+        OutlinedButton(
+          onClick = { onModeSelected(mode) },
+          shape = RoundedCornerShape(8.dp),
+          modifier = Modifier.fillMaxWidth(),
+        ) {
+          CallAudioModeContent(mode = mode, selected = false)
+        }
+      }
+    }
+  }
+}
+
+@Composable
+private fun CallAudioModeContent(
+  mode: CallAudioProcessingMode,
+  selected: Boolean,
+) {
+  Row(
+    modifier = Modifier.fillMaxWidth(),
+    verticalAlignment = Alignment.CenterVertically,
+    horizontalArrangement = Arrangement.spacedBy(8.dp),
+  ) {
+    Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+      Text(mode.displayName, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
+      Text(mode.description, style = MaterialTheme.typography.labelMedium)
+    }
+    if (selected) {
+      Icon(Icons.Rounded.Check, contentDescription = null, modifier = Modifier.size(18.dp))
     }
   }
 }
@@ -2050,6 +2177,9 @@ private fun diagnosticsFor(
   context: Context,
   hasPermissions: Boolean,
   state: ChatUiState,
+  callAudioProcessingMode: CallAudioProcessingMode,
+  callAudioDiagnosticsEnabled: Boolean,
+  callAudioDiagnosticsPath: String,
 ): List<DiagnosticItem> =
   listOf(
     DiagnosticItem("Permissions", if (hasPermissions) "Granted" else "Missing"),
@@ -2057,6 +2187,9 @@ private fun diagnosticsFor(
     DiagnosticItem("Connection", state.status.label()),
     DiagnosticItem("Members", (state.groupMembers.size + 1).toString()),
     DiagnosticItem("Messages", state.messages.size.toString()),
+    DiagnosticItem("Call audio", callAudioProcessingMode.displayName),
+    DiagnosticItem("Audio WAV", if (callAudioDiagnosticsEnabled) "On" else "Off"),
+    DiagnosticItem("WAV folder", callAudioDiagnosticsPath),
   )
 
 private fun bluetoothStatusLabel(context: Context): String =
@@ -2189,6 +2322,8 @@ private const val IMAGE_BITMAP_CACHE_SIZE = 24
 private const val SETTINGS_PREFS_NAME = "offline-link-settings"
 private const val KEY_DISPLAY_NAME = "display_name"
 private const val KEY_AVATAR_NAME = "avatar_name"
+private const val KEY_CALL_AUDIO_PROCESSING_MODE = "call_audio_processing_mode"
+private const val KEY_CALL_AUDIO_DIAGNOSTICS_ENABLED = "call_audio_diagnostics_enabled"
 
 @Preview(showBackground = true)
 @Composable
@@ -2242,6 +2377,11 @@ private fun OfflineChatContentPreview() {
       onDeleteMessage = {},
       onClearMessages = {},
       diagnostics = listOf(DiagnosticItem("Permissions", "Granted"), DiagnosticItem("Bluetooth", "On")),
+      callAudioProcessingMode = CallAudioProcessingMode.Default,
+      onCallAudioProcessingModeChange = {},
+      callAudioDiagnosticsEnabled = false,
+      onCallAudioDiagnosticsEnabledChange = {},
+      callAudioDiagnosticsPath = "/tmp/offline-link",
       onPickImage = {},
       modifier = Modifier.fillMaxSize(),
     )

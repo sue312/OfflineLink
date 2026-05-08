@@ -5,9 +5,81 @@ import kotlin.math.exp
 import kotlin.math.max
 import kotlin.math.PI
 
-class CallAudioInputProcessor(sampleRateHz: Int) {
+data class CallAudioInputProcessorProfile(
+  val lowPassCutoffHz: Double,
+  val fullVoiceAmplitude: Int,
+  val minNoiseGain: Double,
+  val backgroundMaxGain: Double,
+  val targetVoiceAmplitude: Double,
+  val maxAutomaticGain: Double,
+  val sampleMinGain: Double,
+  val deHissSmoothing: Double,
+  val speechLowBandGain: Double,
+  val speechHighBandGain: Double,
+  val backgroundHighBandGain: Double,
+  val compressorThreshold: Double,
+  val compressorRatio: Double,
+)
+
+object CallAudioInputProcessorProfiles {
+  val Natural =
+    CallAudioInputProcessorProfile(
+      lowPassCutoffHz = 2_600.0,
+      fullVoiceAmplitude = 500,
+      minNoiseGain = 0.28,
+      backgroundMaxGain = 0.68,
+      targetVoiceAmplitude = 760.0,
+      maxAutomaticGain = 2.6,
+      sampleMinGain = 0.2,
+      deHissSmoothing = 0.38,
+      speechLowBandGain = 1.05,
+      speechHighBandGain = 0.28,
+      backgroundHighBandGain = 0.18,
+      compressorThreshold = 6_400.0,
+      compressorRatio = 3.2,
+    )
+
+  val Balanced =
+    CallAudioInputProcessorProfile(
+      lowPassCutoffHz = 1_900.0,
+      fullVoiceAmplitude = 520,
+      minNoiseGain = 0.18,
+      backgroundMaxGain = 0.55,
+      targetVoiceAmplitude = 840.0,
+      maxAutomaticGain = 3.4,
+      sampleMinGain = 0.12,
+      deHissSmoothing = 0.28,
+      speechLowBandGain = 1.12,
+      speechHighBandGain = 0.06,
+      backgroundHighBandGain = 0.12,
+      compressorThreshold = 5_600.0,
+      compressorRatio = 4.0,
+    )
+
+  val Strong =
+    CallAudioInputProcessorProfile(
+      lowPassCutoffHz = 1_650.0,
+      fullVoiceAmplitude = 540,
+      minNoiseGain = 0.14,
+      backgroundMaxGain = 0.42,
+      targetVoiceAmplitude = 900.0,
+      maxAutomaticGain = 3.2,
+      sampleMinGain = 0.09,
+      deHissSmoothing = 0.24,
+      speechLowBandGain = 1.12,
+      speechHighBandGain = 0.04,
+      backgroundHighBandGain = 0.08,
+      compressorThreshold = 5_400.0,
+      compressorRatio = 4.5,
+    )
+}
+
+class CallAudioInputProcessor(
+  sampleRateHz: Int,
+  private val profile: CallAudioInputProcessorProfile = CallAudioInputProcessorProfiles.Balanced,
+) {
   private val highPassAlpha = exp(-2.0 * PI * HIGH_PASS_CUTOFF_HZ / sampleRateHz)
-  private val lowPassAlpha = 1.0 - exp(-2.0 * PI * LOW_PASS_CUTOFF_HZ / sampleRateHz)
+  private val lowPassAlpha = 1.0 - exp(-2.0 * PI * profile.lowPassCutoffHz / sampleRateHz)
   private var previousInput = 0.0
   private var previousHighPassOutput = 0.0
   private var previousLowPassOutput = 0.0
@@ -72,14 +144,14 @@ class CallAudioInputProcessor(sampleRateHz: Int) {
   ): Double {
     if (speech) return 1.0
     val quietAmplitude = max(QUIET_NOISE_AMPLITUDE.toDouble(), noiseFloorAmplitude * NOISE_SUPPRESSION_FLOOR_MULTIPLIER)
-    val voiceAmplitude = max(FULL_VOICE_AMPLITUDE.toDouble(), quietAmplitude + VOICE_RANGE_ABOVE_NOISE)
+    val voiceAmplitude = max(profile.fullVoiceAmplitude.toDouble(), quietAmplitude + VOICE_RANGE_ABOVE_NOISE)
     return when {
-      frameAmplitude <= quietAmplitude -> MIN_NOISE_GAIN
-      frameAmplitude >= voiceAmplitude -> if (speech) 1.0 else BACKGROUND_MAX_GAIN
+      frameAmplitude <= quietAmplitude -> profile.minNoiseGain
+      frameAmplitude >= voiceAmplitude -> if (speech) 1.0 else profile.backgroundMaxGain
       else -> {
         val progress = (frameAmplitude - quietAmplitude) / (voiceAmplitude - quietAmplitude)
-        val maxGain = if (speech) 1.0 else BACKGROUND_MAX_GAIN
-        MIN_NOISE_GAIN + progress * (maxGain - MIN_NOISE_GAIN)
+        val maxGain = if (speech) 1.0 else profile.backgroundMaxGain
+        profile.minNoiseGain + progress * (maxGain - profile.minNoiseGain)
       }
     }
   }
@@ -90,8 +162,8 @@ class CallAudioInputProcessor(sampleRateHz: Int) {
   ): Double {
     val targetGain =
       if (speech) {
-        (TARGET_VOICE_AMPLITUDE / metrics.averageAmplitude.coerceAtLeast(1).toDouble())
-          .coerceIn(1.0, MAX_AUTOMATIC_GAIN)
+        (profile.targetVoiceAmplitude / metrics.averageAmplitude.coerceAtLeast(1).toDouble())
+          .coerceIn(1.0, profile.maxAutomaticGain)
       } else {
         1.0
       }
@@ -129,11 +201,11 @@ class CallAudioInputProcessor(sampleRateHz: Int) {
     val adaptiveVoiceFloor = max(SAMPLE_VOICE_FLOOR, adaptiveNoiseFloor + SAMPLE_VOICE_RANGE_ABOVE_NOISE)
     val gain =
       when {
-        magnitude <= adaptiveNoiseFloor -> SAMPLE_MIN_GAIN
+        magnitude <= adaptiveNoiseFloor -> profile.sampleMinGain
         magnitude >= adaptiveVoiceFloor -> 1.0
         else -> {
           val progress = (magnitude - adaptiveNoiseFloor) / (adaptiveVoiceFloor - adaptiveNoiseFloor)
-          SAMPLE_MIN_GAIN + progress * progress * (1.0 - SAMPLE_MIN_GAIN)
+          profile.sampleMinGain + progress * progress * (1.0 - profile.sampleMinGain)
         }
       }
     return sample * gain
@@ -143,10 +215,10 @@ class CallAudioInputProcessor(sampleRateHz: Int) {
     sample: Double,
     speech: Boolean,
   ): Double {
-    val smoothed = previousDeHissOutput + DE_HISS_SMOOTHING * (sample - previousDeHissOutput)
+    val smoothed = previousDeHissOutput + profile.deHissSmoothing * (sample - previousDeHissOutput)
     val highBand = sample - smoothed
-    val highBandGain = if (speech) SPEECH_HIGH_BAND_GAIN else BACKGROUND_HIGH_BAND_GAIN
-    val lowBandGain = if (speech) SPEECH_LOW_BAND_GAIN else 1.0
+    val highBandGain = if (speech) profile.speechHighBandGain else profile.backgroundHighBandGain
+    val lowBandGain = if (speech) profile.speechLowBandGain else 1.0
     val output = smoothed * lowBandGain + highBand * highBandGain
     previousDeHissOutput = smoothed
     return output
@@ -154,8 +226,8 @@ class CallAudioInputProcessor(sampleRateHz: Int) {
 
   private fun applyCompressor(sample: Double): Double {
     val magnitude = abs(sample)
-    if (magnitude <= COMPRESSOR_THRESHOLD) return sample
-    val compressedMagnitude = COMPRESSOR_THRESHOLD + (magnitude - COMPRESSOR_THRESHOLD) / COMPRESSOR_RATIO
+    if (magnitude <= profile.compressorThreshold) return sample
+    val compressedMagnitude = profile.compressorThreshold + (magnitude - profile.compressorThreshold) / profile.compressorRatio
     return if (sample < 0) -compressedMagnitude else compressedMagnitude
   }
 
@@ -208,11 +280,7 @@ class CallAudioInputProcessor(sampleRateHz: Int) {
 
   private companion object {
     const val HIGH_PASS_CUTOFF_HZ = 150.0
-    const val LOW_PASS_CUTOFF_HZ = 1_900.0
     const val QUIET_NOISE_AMPLITUDE = 80
-    const val FULL_VOICE_AMPLITUDE = 520
-    const val MIN_NOISE_GAIN = 0.18
-    const val BACKGROUND_MAX_GAIN = 0.55
     const val NOISE_ATTACK = 0.75
     const val NOISE_RELEASE = 0.55
     const val INITIAL_NOISE_FLOOR_AMPLITUDE = 72.0
@@ -227,21 +295,12 @@ class CallAudioInputProcessor(sampleRateHz: Int) {
     const val VAD_PEAK_MULTIPLIER = 2
     const val VAD_MIN_ZERO_CROSSING_RATE = 0.015
     const val VAD_MAX_ZERO_CROSSING_RATE = 0.42
-    const val TARGET_VOICE_AMPLITUDE = 840.0
-    const val MAX_AUTOMATIC_GAIN = 3.4
     const val AGC_ATTACK = 0.45
     const val AGC_RELEASE = 0.35
     const val SAMPLE_NOISE_FLOOR = 140.0
     const val SAMPLE_VOICE_FLOOR = 760.0
     const val SAMPLE_NOISE_FLOOR_MULTIPLIER = 2.1
     const val SAMPLE_VOICE_RANGE_ABOVE_NOISE = 620.0
-    const val SAMPLE_MIN_GAIN = 0.12
-    const val DE_HISS_SMOOTHING = 0.28
-    const val SPEECH_LOW_BAND_GAIN = 1.12
-    const val SPEECH_HIGH_BAND_GAIN = 0.06
-    const val BACKGROUND_HIGH_BAND_GAIN = 0.12
-    const val COMPRESSOR_THRESHOLD = 5_600.0
-    const val COMPRESSOR_RATIO = 4.0
   }
 
   private data class FrameMetrics(

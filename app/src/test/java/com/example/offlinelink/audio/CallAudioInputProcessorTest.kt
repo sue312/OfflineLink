@@ -120,6 +120,14 @@ class CallAudioInputProcessorTest {
     assertTrue("noisySpeechAmplitude=$noisySpeechAmplitude", noisySpeechAmplitude > 500)
   }
 
+  @Test
+  fun strongProfileSuppressesMoreMixedHissThanNaturalProfile() {
+    val naturalResidual = mixedSpeechResidual(CallAudioInputProcessorProfiles.Natural)
+    val strongResidual = mixedSpeechResidual(CallAudioInputProcessorProfiles.Strong)
+
+    assertTrue("naturalResidual=$naturalResidual strongResidual=$strongResidual", strongResidual < naturalResidual)
+  }
+
   private fun repeatedPcmFrame(sample: Short, sampleCount: Int): ByteArray =
     pcmFrame(*ShortArray(sampleCount) { sample })
 
@@ -162,6 +170,35 @@ class CallAudioInputProcessorTest {
       processor.process(noise, noise.size)
     }
     return processor
+  }
+
+  private fun trainedNoiseProcessor(profile: CallAudioInputProcessorProfile): CallAudioInputProcessor {
+    val processor = CallAudioInputProcessor(sampleRateHz = 16_000, profile = profile)
+    repeat(8) {
+      val noise = tonePcmFrame(frequencyHz = 2_600, amplitude = 110, sampleRateHz = 16_000, sampleCount = 320)
+      processor.process(noise, noise.size)
+    }
+    return processor
+  }
+
+  private fun mixedSpeechResidual(profile: CallAudioInputProcessorProfile): Int {
+    val cleanProcessor = trainedNoiseProcessor(profile)
+    val noisyProcessor = trainedNoiseProcessor(profile)
+    val cleanSpeech = tonePcmFrame(frequencyHz = 700, amplitude = 900, sampleRateHz = 16_000, sampleCount = 320)
+    val noisySpeech =
+      mixedTonePcmFrame(
+        primaryFrequencyHz = 700,
+        primaryAmplitude = 900,
+        noiseFrequencyHz = 2_600,
+        noiseAmplitude = 220,
+        sampleRateHz = 16_000,
+        sampleCount = 320,
+      )
+
+    cleanProcessor.process(cleanSpeech, cleanSpeech.size)
+    noisyProcessor.process(noisySpeech, noisySpeech.size)
+
+    return residualAverageAmplitude(noisySpeech, cleanSpeech)
   }
 
   private fun pcmFrame(vararg samples: Short): ByteArray {
