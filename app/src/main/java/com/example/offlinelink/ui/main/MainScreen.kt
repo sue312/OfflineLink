@@ -420,6 +420,12 @@ private fun OfflineChatContent(
     }
   }
 
+  LaunchedEffect(state.status) {
+    if (state.status != ConnectionStatus.Connected) {
+      isSendingLocation = false
+    }
+  }
+
   LaunchedEffect(state.callState.status, state.callState.callId) {
     if (state.callState.status == CallStatus.Active) {
       onStartCallAudio { frame ->
@@ -585,9 +591,13 @@ private fun OfflineChatContent(
             isSendingLocation = true
             onSendLocation { result ->
               isSendingLocation = false
-              result.onFailure { e ->
-                voiceError = e.message ?: "Could not send location"
-              }
+              result
+                .onSuccess {
+                  voiceError = null
+                }
+                .onFailure { e ->
+                  voiceError = e.message ?: "Could not send location"
+                }
             }
           },
           onPickImage = onPickImage,

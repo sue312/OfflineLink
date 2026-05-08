@@ -31,6 +31,9 @@ import com.example.offlinelink.transport.TransportEvent
 import java.util.UUID
 import kotlin.io.encoding.Base64
 import kotlin.io.encoding.ExperimentalEncodingApi
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -39,6 +42,7 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeout
 
 @OptIn(ExperimentalEncodingApi::class)
 class MainScreenViewModel(
@@ -61,6 +65,8 @@ class MainScreenViewModel(
   private val handledCallVoiceClipIds = mutableSetOf<String>()
   private val retriedMessageEndpointIds = mutableMapOf<String, MutableSet<String>>()
   private var nextCallAudioSequenceNumber = 0
+  private var locationRequestJob: Job? = null
+  private var pendingLocationResult: ((Result<Unit>) -> Unit)? = null
   private val mutableCallAudioFrames =
     MutableSharedFlow<CallAudioPlaybackFrame>(
       extraBufferCapacity = 64,
@@ -298,15 +304,37 @@ class MainScreenViewModel(
   }
 
   fun sendLocation(onResult: (Result<Unit>) -> Unit) {
-    viewModelScope.launch {
-      requestLocation()
+    if (locationRequestJob?.isActive == true) {
+      onResult(Result.failure(IllegalStateException("Location request already in progress")))
+      return
+    }
+    if (uiState.value.connectedEndpoints.isEmpty()) {
+      store.setStatus(ConnectionStatus.Error, "No connected device", "Connect to a nearby device first")
+      onResult(Result.failure(IllegalStateException("Not connected")))
+      return
+    }
+
+    pendingLocationResult = onResult
+    locationRequestJob =
+      viewModelScope.launch {
+        try {
+          withTimeout(LOCATION_REQUEST_TIMEOUT_MS) {
+            requestLocation()
+          }
+        } catch (e: TimeoutCancellationException) {
+          Result.failure(IllegalStateException(LOCATION_TIMEOUT_MESSAGE, e))
+        } catch (e: CancellationException) {
+          completeLocationRequest(Result.failure(e))
+          throw e
+        }
         .onSuccess { loc ->
           val endpoints = uiState.value.connectedEndpoints
           if (endpoints.isEmpty()) {
             store.setStatus(ConnectionStatus.Error, "No connected device", "Connect to a nearby device first")
-            onResult(Result.failure(IllegalStateException("Not connected")))
+            completeLocationRequest(Result.failure(IllegalStateException("Not connected")))
             return@launch
           }
+          store.restoreConnectedStatus()
           val message =
             store.queueOutgoingLocationMessage(
               latitude = loc.latitude,
@@ -341,13 +369,25 @@ class MainScreenViewModel(
               }
             }
           }
-          onResult(Result.success(Unit))
+          completeLocationRequest(Result.success(Unit))
         }
         .onFailure { e ->
-          store.setStatus(ConnectionStatus.Error, "Could not get location", e.message)
-          onResult(Result.failure(e))
+          val message = e.message ?: "Could not get location"
+          if (uiState.value.connectedEndpoints.isEmpty()) {
+            store.setStatus(ConnectionStatus.Error, "Could not get location", message)
+          } else {
+            store.restoreConnectedStatus()
+          }
+          completeLocationRequest(Result.failure(e))
         }
-    }
+      }.also { job ->
+        job.invokeOnCompletion {
+          if (locationRequestJob == job) {
+            locationRequestJob = null
+            pendingLocationResult = null
+          }
+        }
+      }
   }
 
   fun sendImage(uri: Uri, onResult: (Result<Unit>) -> Unit) {
@@ -508,6 +548,7 @@ class MainScreenViewModel(
   }
 
   fun disconnect() {
+    cancelPendingLocationRequest()
     val endpoints = uiState.value.connectedEndpoints
     endpoints.forEach { endpoint ->
       sendPayload(endpoint.id, ChatProtocol.encodeDisconnect("User disconnected"), PayloadPriority.Control) { }
@@ -547,8 +588,24 @@ class MainScreenViewModel(
   }
 
   override fun onCleared() {
+    cancelPendingLocationRequest()
     transport.stopAll()
     super.onCleared()
+  }
+
+  private fun cancelPendingLocationRequest() {
+    val callback = pendingLocationResult
+    val job = locationRequestJob
+    pendingLocationResult = null
+    locationRequestJob = null
+    callback?.invoke(Result.failure(CancellationException("Location request cancelled")))
+    job?.cancel(CancellationException("Location request cancelled"))
+  }
+
+  private fun completeLocationRequest(result: Result<Unit>) {
+    val callback = pendingLocationResult ?: return
+    pendingLocationResult = null
+    callback(result)
   }
 
   private fun sendVoiceMessageTo(
@@ -1331,5 +1388,7 @@ class MainScreenViewModel(
   private companion object {
     const val DEFAULT_GROUP_NAME = "Offline group"
     const val VOICE_MIME_TYPE = "audio/3gpp"
+    const val LOCATION_REQUEST_TIMEOUT_MS = 15_000L
+    const val LOCATION_TIMEOUT_MESSAGE = "Location timed out. Check Location is enabled and try again."
   }
 }

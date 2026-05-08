@@ -22,9 +22,11 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.setMain
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -1103,6 +1105,115 @@ class MainScreenViewModelTest {
     assertEquals(MessageStatus.Sent, message.status)
     assertEquals("endpoint-b", transport.sentPayloads.last().endpointId)
     assertTrue(transport.sentPayloads.last().bytes.isNotEmpty())
+  }
+
+  @Test
+  fun sendLocationTimeoutUsesComposerErrorWithoutTopBanner() = runTest {
+    val transport = FakeChatTransport()
+    val viewModel =
+      MainScreenViewModel(
+        transport,
+        requestLocation = { kotlinx.coroutines.awaitCancellation() },
+        compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) },
+        payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads")),
+        localDeviceId = "local",
+      )
+
+    advanceUntilIdle()
+    transport.emit(TransportEvent.Connected(NearbyEndpoint("endpoint-b", "Phone B")))
+    advanceUntilIdle()
+    transport.clearSentPayloads()
+
+    var callbackResult: Result<Unit>? = null
+    viewModel.sendLocation { callbackResult = it }
+
+    advanceTimeBy(15_001L)
+    runCurrent()
+
+    assertNotNull(callbackResult)
+    val result = callbackResult ?: error("Expected location callback")
+    assertTrue(result.isFailure)
+    assertEquals("Location timed out. Check Location is enabled and try again.", result.exceptionOrNull()?.message)
+    assertEquals(ConnectionStatus.Connected, viewModel.uiState.value.status)
+    assertEquals("Connected to Phone B", viewModel.uiState.value.statusMessage)
+    assertEquals(null, viewModel.uiState.value.lastError)
+    assertEquals(emptyList<SentPayload>(), transport.sentPayloads)
+  }
+
+  @Test
+  fun successfulLocationSendKeepsTimeoutOffTopBanner() = runTest {
+    val transport = FakeChatTransport()
+    var shouldTimeout = true
+    val viewModel =
+      MainScreenViewModel(
+        transport,
+        requestLocation = {
+          if (shouldTimeout) {
+            kotlinx.coroutines.awaitCancellation()
+          } else {
+            Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null))
+          }
+        },
+        compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) },
+        payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads")),
+        localDeviceId = "local",
+      )
+
+    advanceUntilIdle()
+    transport.emit(TransportEvent.Connected(NearbyEndpoint("endpoint-b", "Phone B")))
+    advanceUntilIdle()
+
+    viewModel.sendLocation { }
+    advanceTimeBy(15_001L)
+    runCurrent()
+    assertEquals(null, viewModel.uiState.value.lastError)
+
+    shouldTimeout = false
+    var callbackResult: Result<Unit>? = null
+    viewModel.sendLocation { callbackResult = it }
+    advanceUntilIdle()
+
+    assertNotNull(callbackResult)
+    assertTrue(callbackResult!!.isSuccess)
+    assertEquals(null, viewModel.uiState.value.lastError)
+    assertEquals(ConnectionStatus.Connected, viewModel.uiState.value.status)
+    assertEquals(MessageKind.Location, viewModel.uiState.value.messages.single().kind)
+  }
+
+  @Test
+  fun disconnectCancelsPendingLocationRequest() = runTest {
+    val transport = FakeChatTransport()
+    var locationRequestCancelled = false
+    val viewModel =
+      MainScreenViewModel(
+        transport,
+        requestLocation = {
+          try {
+            kotlinx.coroutines.awaitCancellation()
+          } finally {
+            locationRequestCancelled = true
+          }
+        },
+        compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) },
+        payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads")),
+        localDeviceId = "local",
+      )
+
+    advanceUntilIdle()
+    transport.emit(TransportEvent.Connected(NearbyEndpoint("endpoint-b", "Phone B")))
+    advanceUntilIdle()
+
+    var callbackResult: Result<Unit>? = null
+    viewModel.sendLocation { callbackResult = it }
+    runCurrent()
+
+    viewModel.disconnect()
+    advanceUntilIdle()
+
+    assertEquals(true, locationRequestCancelled)
+    assertNotNull(callbackResult)
+    assertTrue(callbackResult!!.isFailure)
+    assertEquals(ConnectionStatus.Disconnected, viewModel.uiState.value.status)
   }
 
   @Test
