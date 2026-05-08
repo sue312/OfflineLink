@@ -53,6 +53,10 @@ class NearbyChatTransport(context: Context) : ChatTransport {
       .addOnFailureListener { emitFailure("Could not start discovery", it) }
   }
 
+  override fun stopAdvertising() {
+    client.stopAdvertising()
+  }
+
   override fun stopDiscovery() {
     client.stopDiscovery()
   }
@@ -77,6 +81,10 @@ class NearbyChatTransport(context: Context) : ChatTransport {
       .sendPayload(endpointId, Payload.fromBytes(bytes))
       .addOnSuccessListener { onResult(Result.success(Unit)) }
       .addOnFailureListener { onResult(Result.failure(it)) }
+  }
+
+  override fun disconnectEndpoint(endpointId: String) {
+    client.disconnectFromEndpoint(endpointId)
   }
 
   override fun stopAll() {

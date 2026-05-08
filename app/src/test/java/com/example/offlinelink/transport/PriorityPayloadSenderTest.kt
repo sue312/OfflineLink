@@ -162,6 +162,8 @@ class PriorityPayloadSenderTest {
 
     override fun startDiscovery() = Unit
 
+    override fun stopAdvertising() = Unit
+
     override fun stopDiscovery() = Unit
 
     override fun requestConnection(endpoint: NearbyEndpoint, displayName: String) = Unit
@@ -174,6 +176,8 @@ class PriorityPayloadSenderTest {
       sendCalls.add(SendCall(endpointId, bytes, onResult))
       pendingResults.addLast(onResult)
     }
+
+    override fun disconnectEndpoint(endpointId: String) = Unit
 
     override fun stopAll() = Unit
 

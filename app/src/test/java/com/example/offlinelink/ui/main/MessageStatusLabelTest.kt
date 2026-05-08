@@ -94,12 +94,13 @@ class MessageStatusLabelTest {
   @Test
   fun connectedSummaryDoesNotExposeGroupName() {
     assertEquals(
-      "2 members",
+      "Phone B",
       connectedSummarySubtitle(
         ChatUiState(
           localDeviceId = "device-a",
           groupName = "Field Team",
           status = ConnectionStatus.Connected,
+          connectedEndpoints = listOf(com.example.offlinelink.model.NearbyEndpoint("device-b", "Phone B")),
           groupMembers = listOf(GroupMember("device-b", "Phone B")),
         ),
       ),
@@ -118,11 +119,11 @@ class MessageStatusLabelTest {
       )
 
     assertEquals(
-      listOf("Members"),
+      listOf("Peer"),
       connectedSetupSectionLabels(state),
     )
     assertEquals("Connection", setupHeaderTitle(state))
-    assertEquals("2 members", setupSummaryText(state))
+    assertEquals("Phone B", setupSummaryText(state))
   }
 
   @Test

@@ -80,6 +80,7 @@ class LatestPayloadSenderTest {
 
     override fun startAdvertising(displayName: String, deviceId: String) = Unit
     override fun startDiscovery() = Unit
+    override fun stopAdvertising() = Unit
     override fun stopDiscovery() = Unit
     override fun requestConnection(endpoint: NearbyEndpoint, displayName: String) = Unit
     override fun acceptConnection(endpointId: String) = Unit
@@ -88,6 +89,8 @@ class LatestPayloadSenderTest {
     override fun send(endpointId: String, bytes: ByteArray, onResult: (Result<Unit>) -> Unit) {
       sentPayloads += SentPayload(endpointId, bytes, onResult)
     }
+
+    override fun disconnectEndpoint(endpointId: String) = Unit
 
     override fun stopAll() = Unit
 

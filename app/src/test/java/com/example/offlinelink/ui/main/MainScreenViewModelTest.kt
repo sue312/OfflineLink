@@ -70,7 +70,7 @@ class MainScreenViewModelTest {
   }
 
   @Test
-  fun startDiscoveryWhileConnectedKeepsExistingChatUsable() = runTest {
+  fun startDiscoveryWhileConnectedDoesNotSearchForAdditionalPeer() = runTest {
     val transport = FakeChatTransport()
     val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) }, payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads")), localDeviceId = "local")
 
@@ -84,8 +84,8 @@ class MainScreenViewModelTest {
 
     assertEquals(ConnectionStatus.Connected, viewModel.uiState.value.status)
     assertEquals("Connected to Phone B", viewModel.uiState.value.statusMessage)
-    assertTrue(transport.advertisingStarted)
-    assertTrue(transport.discoveryStarted)
+    assertEquals(false, transport.advertisingStarted)
+    assertEquals(false, transport.discoveryStarted)
 
     transport.clearSentPayloads()
     viewModel.sendMessage("still connected")
@@ -214,9 +214,9 @@ class MainScreenViewModelTest {
 
     viewModel.setGroupName("Field Team")
 
-    assertEquals(listOf("endpoint-b", "endpoint-c"), transport.sentPayloads.map { it.endpointId })
+    assertEquals(listOf("endpoint-b"), transport.sentPayloads.map { it.endpointId })
     assertEquals(
-      listOf("Field Team", "Field Team"),
+      listOf("Field Team"),
       transport.sentPayloads.map { (ChatProtocol.decode(it.bytes) as DecodedWireMessage.Hello).groupName },
     )
   }
@@ -248,7 +248,7 @@ class MainScreenViewModelTest {
   }
 
   @Test
-  fun incomingHelloFromNewEndpointRebroadcastsRosterToExistingEndpoints() = runTest {
+  fun incomingHelloFromAdditionalEndpointIsIgnoredWhilePeerIsConnected() = runTest {
     val transport = FakeChatTransport()
     val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) }, payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads")), localDeviceId = "device-a")
 
@@ -287,19 +287,13 @@ class MainScreenViewModelTest {
     )
     advanceUntilIdle()
 
-    assertEquals(listOf("Phone B", "Phone C"), viewModel.uiState.value.groupMembers.map { it.displayName })
-    assertEquals(listOf("endpoint-b", "endpoint-c"), transport.sentPayloads.map { it.endpointId })
-    assertTrue(transport.sentPayloads.all { ChatProtocol.decode(it.bytes) is DecodedWireMessage.Hello })
-    val helloToPhoneB =
-      transport.sentPayloads
-        .firstOrNull { it.endpointId == "endpoint-b" }
-        ?.let { ChatProtocol.decode(it.bytes) as DecodedWireMessage.Hello }
-    assertNotNull(helloToPhoneB)
-    assertEquals(listOf("device-a", "device-b", "device-c"), helloToPhoneB!!.members.map { it.id })
+    assertEquals(listOf("Phone B"), viewModel.uiState.value.groupMembers.map { it.displayName })
+    assertEquals(listOf("endpoint-c"), transport.disconnectedEndpoints)
+    assertEquals(emptyList<SentPayload>(), transport.sentPayloads)
   }
 
   @Test
-  fun disconnectedRelayStartsAdvertisingAndDiscoveryWhenLocalDeviceIsLowestRemainingMember() = runTest {
+  fun peerDisconnectStartsOneToOneRecovery() = runTest {
     val transport = FakeChatTransport()
     val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) }, payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads")), localDeviceId = "device-b")
 
@@ -330,11 +324,11 @@ class MainScreenViewModelTest {
     assertTrue(transport.advertisingStarted)
     assertTrue(transport.discoveryStarted)
     assertEquals(ConnectionStatus.Discovering, viewModel.uiState.value.status)
-    assertEquals(listOf("Phone C"), viewModel.uiState.value.groupMembers.map { it.displayName })
+    assertEquals(emptyList<GroupMember>(), viewModel.uiState.value.groupMembers)
   }
 
   @Test
-  fun disconnectedRelayStartsAdvertisingDiscoveryAndAutoConnectsWhenLocalDeviceIsNotLowestRemainingMember() = runTest {
+  fun recoveryDoesNotConnectToOtherKnownMembers() = runTest {
     val transport = FakeChatTransport()
     val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) }, payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads")), localDeviceId = "device-c")
 
@@ -366,12 +360,12 @@ class MainScreenViewModelTest {
 
     assertTrue(transport.advertisingStarted)
     assertTrue(transport.discoveryStarted)
-    assertEquals(ConnectionStatus.Connecting, viewModel.uiState.value.status)
-    assertEquals(listOf(NearbyEndpoint("endpoint-b", "Phone B")), transport.requestedConnections)
+    assertEquals(ConnectionStatus.Discovering, viewModel.uiState.value.status)
+    assertEquals(emptyList<NearbyEndpoint>(), transport.requestedConnections)
   }
 
   @Test
-  fun disconnectingOneMemberKeepsGroupMemberAndStartsDiscoveryForReconnect() = runTest {
+  fun disconnectingPeerClearsMembersAndStartsDiscoveryForReconnect() = runTest {
     val transport = FakeChatTransport()
     val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) }, payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads")), localDeviceId = "device-a")
 
@@ -419,11 +413,10 @@ class MainScreenViewModelTest {
     transport.emit(TransportEvent.Disconnected("endpoint-b"))
     advanceUntilIdle()
 
-    assertEquals(listOf("Phone B", "Phone C"), viewModel.uiState.value.groupMembers.map { it.displayName })
-    assertEquals(listOf(GroupMemberStatus.Reconnecting, GroupMemberStatus.Online), viewModel.uiState.value.groupMembers.map { it.status })
+    assertEquals(emptyList<GroupMember>(), viewModel.uiState.value.groupMembers)
     assertTrue(transport.advertisingStarted)
     assertTrue(transport.discoveryStarted)
-    assertEquals(ConnectionStatus.Connected, viewModel.uiState.value.status)
+    assertEquals(ConnectionStatus.Discovering, viewModel.uiState.value.status)
   }
 
   @Test
@@ -465,7 +458,7 @@ class MainScreenViewModelTest {
   }
 
   @Test
-  fun disconnectedRelayMarksRemainingMembersReconnectingDuringRecovery() = runTest {
+  fun peerRecoveryDoesNotKeepOfflineGroupMembers() = runTest {
     val transport = FakeChatTransport()
     val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) }, payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads")), localDeviceId = "device-c")
 
@@ -493,11 +486,12 @@ class MainScreenViewModelTest {
     transport.emit(TransportEvent.Disconnected("endpoint-a"))
     advanceUntilIdle()
 
-    assertEquals(listOf(GroupMemberStatus.Reconnecting), viewModel.uiState.value.groupMembers.map { it.status })
+    assertEquals(emptyList<GroupMember>(), viewModel.uiState.value.groupMembers)
+    assertEquals(ConnectionStatus.Discovering, viewModel.uiState.value.status)
   }
 
   @Test
-  fun recoveryDiscoveryIgnoresEndpointsOutsideRemainingRoster() = runTest {
+  fun recoveryDiscoveryOnlyReconnectsLastPeer() = runTest {
     val transport = FakeChatTransport()
     val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) }, payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads")), localDeviceId = "device-c")
 
@@ -532,7 +526,7 @@ class MainScreenViewModelTest {
     transport.emit(TransportEvent.EndpointFound(NearbyEndpoint("endpoint-b", "Phone B")))
     advanceUntilIdle()
 
-    assertEquals(listOf(NearbyEndpoint("endpoint-b", "Phone B")), transport.requestedConnections)
+    assertEquals(emptyList<NearbyEndpoint>(), transport.requestedConnections)
   }
 
   @Test
@@ -563,10 +557,10 @@ class MainScreenViewModelTest {
 
     transport.emit(TransportEvent.Disconnected("endpoint-a"))
     advanceUntilIdle()
-    transport.emit(TransportEvent.EndpointFound(NearbyEndpoint("endpoint-b", "Renamed Phone B", deviceId = "device-b")))
+    transport.emit(TransportEvent.EndpointFound(NearbyEndpoint("endpoint-a2", "Renamed Phone A", deviceId = "device-a")))
     advanceUntilIdle()
 
-    assertEquals(listOf(NearbyEndpoint("endpoint-b", "Renamed Phone B", deviceId = "device-b")), transport.requestedConnections)
+    assertEquals(listOf(NearbyEndpoint("endpoint-a2", "Renamed Phone A", deviceId = "device-a")), transport.requestedConnections)
   }
 
   @Test
@@ -596,7 +590,7 @@ class MainScreenViewModelTest {
     advanceUntilIdle()
     transport.emit(TransportEvent.Disconnected("endpoint-a"))
     advanceUntilIdle()
-    transport.emit(TransportEvent.EndpointFound(NearbyEndpoint("endpoint-b", "Phone B")))
+    transport.emit(TransportEvent.EndpointFound(NearbyEndpoint("endpoint-a2", "Phone A", deviceId = "device-a")))
     advanceUntilIdle()
 
     transport.emit(TransportEvent.OperationFailed("Could not request connection", IllegalStateException("8012: STATUS_ENDPOINT_IO_ERROR")))
@@ -605,15 +599,15 @@ class MainScreenViewModelTest {
     assertEquals(ConnectionStatus.Discovering, viewModel.uiState.value.status)
     assertEquals(null, viewModel.uiState.value.lastError)
 
-    transport.emit(TransportEvent.EndpointFound(NearbyEndpoint("endpoint-b", "Phone B")))
+    transport.emit(TransportEvent.EndpointFound(NearbyEndpoint("endpoint-a2", "Phone A", deviceId = "device-a")))
     advanceUntilIdle()
 
     assertEquals(ConnectionStatus.Connecting, viewModel.uiState.value.status)
     assertEquals(null, viewModel.uiState.value.lastError)
     assertEquals(
       listOf(
-        NearbyEndpoint("endpoint-b", "Phone B"),
-        NearbyEndpoint("endpoint-b", "Phone B"),
+        NearbyEndpoint("endpoint-a2", "Phone A", deviceId = "device-a"),
+        NearbyEndpoint("endpoint-a2", "Phone A", deviceId = "device-a"),
       ),
       transport.requestedConnections,
     )
@@ -665,19 +659,20 @@ class MainScreenViewModelTest {
     transport.emit(
       TransportEvent.ConnectionInitiated(
         PendingConnection(
-          endpointId = "endpoint-c",
-          endpointName = "Phone C",
+          endpointId = "endpoint-a2",
+          endpointName = "Phone A",
           authenticationToken = "1234",
+          deviceId = "device-a",
         ),
       ),
     )
     advanceUntilIdle()
 
-    assertEquals(listOf("endpoint-c"), transport.acceptedConnections)
+    assertEquals(listOf("endpoint-a2"), transport.acceptedConnections)
   }
 
   @Test
-  fun recoveryModeAutomaticallyAcceptsIncomingConnectionRequest() = runTest {
+  fun recoveryModeAutomaticallyAcceptsIncomingConnectionFromLastPeer() = runTest {
     val transport = FakeChatTransport()
     val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) }, payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads")), localDeviceId = "device-b")
 
@@ -707,15 +702,16 @@ class MainScreenViewModelTest {
     transport.emit(
       TransportEvent.ConnectionInitiated(
         PendingConnection(
-          endpointId = "endpoint-c",
-          endpointName = "Phone C",
+          endpointId = "endpoint-a2",
+          endpointName = "Phone A",
           authenticationToken = "1234",
+          deviceId = "device-a",
         ),
       ),
     )
     advanceUntilIdle()
 
-    assertEquals(listOf("endpoint-c"), transport.acceptedConnections)
+    assertEquals(listOf("endpoint-a2"), transport.acceptedConnections)
     assertEquals(null, viewModel.uiState.value.pendingConnection)
   }
 
@@ -750,21 +746,21 @@ class MainScreenViewModelTest {
     transport.emit(
       TransportEvent.ConnectionInitiated(
         PendingConnection(
-          endpointId = "endpoint-c",
-          endpointName = "Renamed Phone C",
+          endpointId = "endpoint-a2",
+          endpointName = "Renamed Phone A",
           authenticationToken = "1234",
-          deviceId = "device-c",
+          deviceId = "device-a",
         ),
       ),
     )
     advanceUntilIdle()
 
-    assertEquals(listOf("endpoint-c"), transport.acceptedConnections)
+    assertEquals(listOf("endpoint-a2"), transport.acceptedConnections)
     assertEquals(null, viewModel.uiState.value.pendingConnection)
   }
 
   @Test
-  fun remainingPeersAutoRequestEachOtherAfterRelayDisconnects() = runTest {
+  fun remainingPeersDoNotAutoRequestEachOtherAfterSharedPeerDisconnects() = runTest {
     val transportA = FakeChatTransport()
     val viewModelA = MainScreenViewModel(transportA, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) }, payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads-a")), localDeviceId = "device-a", defaultDisplayName = "Phone A")
     val transportC = FakeChatTransport()
@@ -815,8 +811,8 @@ class MainScreenViewModelTest {
     transportC.emit(TransportEvent.EndpointFound(NearbyEndpoint("endpoint-a", "Phone A", deviceId = "device-a")))
     advanceUntilIdle()
 
-    assertEquals(listOf(NearbyEndpoint("endpoint-c", "Phone C", deviceId = "device-c")), transportA.requestedConnections)
-    assertEquals(listOf(NearbyEndpoint("endpoint-a", "Phone A", deviceId = "device-a")), transportC.requestedConnections)
+    assertEquals(emptyList<NearbyEndpoint>(), transportA.requestedConnections)
+    assertEquals(emptyList<NearbyEndpoint>(), transportC.requestedConnections)
   }
 
   @Test
@@ -855,9 +851,9 @@ class MainScreenViewModelTest {
     transport.emit(TransportEvent.Disconnected("endpoint-a"))
     advanceUntilIdle()
 
-    assertEquals(1, transport.advertisingStartCount)
-    assertEquals(1, transport.discoveryStartCount)
-    assertEquals(ConnectionStatus.Discovering, viewModel.uiState.value.status)
+    assertEquals(0, transport.advertisingStartCount)
+    assertEquals(0, transport.discoveryStartCount)
+    assertEquals(ConnectionStatus.Disconnected, viewModel.uiState.value.status)
   }
 
   @Test
@@ -1097,7 +1093,7 @@ class MainScreenViewModelTest {
   }
 
   @Test
-  fun connectingAdditionalDeviceKeepsExistingChatConnected() = runTest {
+  fun connectingAdditionalDeviceIsIgnoredWhilePeerIsConnected() = runTest {
     val transport = FakeChatTransport()
     val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) }, payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads")), localDeviceId = "local")
 
@@ -1110,13 +1106,60 @@ class MainScreenViewModelTest {
 
     assertEquals(ConnectionStatus.Connected, viewModel.uiState.value.status)
     assertEquals("Connected to Phone B", viewModel.uiState.value.statusMessage)
-    assertEquals(listOf(NearbyEndpoint("endpoint-c", "Phone C")), transport.requestedConnections)
+    assertEquals(emptyList<NearbyEndpoint>(), transport.requestedConnections)
 
     transport.clearSentPayloads()
     viewModel.sendMessage("while adding c")
 
     assertEquals("endpoint-b", transport.sentPayloads.last().endpointId)
     assertEquals(MessageStatus.Sent, viewModel.uiState.value.messages.last().status)
+  }
+
+  @Test
+  fun incomingConnectionWhilePeerIsConnectedIsRejected() = runTest {
+    val transport = FakeChatTransport()
+    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) }, payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads")), localDeviceId = "local")
+
+    advanceUntilIdle()
+    transport.emit(TransportEvent.Connected(NearbyEndpoint("endpoint-b", "Phone B")))
+    advanceUntilIdle()
+
+    transport.emit(TransportEvent.ConnectionInitiated(PendingConnection("endpoint-c", "Phone C", "123456", deviceId = "device-c")))
+    advanceUntilIdle()
+
+    assertEquals(listOf("endpoint-c"), transport.rejectedConnections)
+    assertEquals(null, viewModel.uiState.value.pendingConnection)
+    assertEquals(listOf(NearbyEndpoint("endpoint-b", "Phone B")), viewModel.uiState.value.connectedEndpoints)
+  }
+
+  @Test
+  fun payloadFromDifferentEndpointIsIgnoredWhilePeerIsConnected() = runTest {
+    val transport = FakeChatTransport()
+    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) }, payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads")), localDeviceId = "local")
+
+    advanceUntilIdle()
+    transport.emit(TransportEvent.Connected(NearbyEndpoint("endpoint-b", "Phone B")))
+    advanceUntilIdle()
+    transport.clearSentPayloads()
+
+    transport.emit(
+      TransportEvent.BytesReceived(
+        endpointId = "endpoint-c",
+        bytes =
+          ChatProtocol.encodeMessage(
+            messageId = "remote-1",
+            conversationId = "one-to-one",
+            senderId = "device-c",
+            text = "third phone",
+            createdAt = 1000L,
+          ),
+      ),
+    )
+    advanceUntilIdle()
+
+    assertEquals(emptyList<ChatMessage>(), viewModel.uiState.value.messages)
+    assertEquals(listOf(NearbyEndpoint("endpoint-b", "Phone B")), viewModel.uiState.value.connectedEndpoints)
+    assertEquals(emptyList<SentPayload>(), transport.sentPayloads)
   }
 
   @Test
@@ -1251,7 +1294,7 @@ class MainScreenViewModelTest {
   }
 
   @Test
-  fun retryOnlySendsPendingMessageToNewlyConnectedEndpointsOnce() = runTest {
+  fun retryOnlySendsPendingMessageToConnectedPeerOnce() = runTest {
     val pendingMessage =
       ChatMessage(
         id = "msg-1",
@@ -1276,11 +1319,11 @@ class MainScreenViewModelTest {
         .mapNotNull { sent ->
           (ChatProtocol.decode(sent.bytes) as? DecodedWireMessage.Message)?.let { sent.endpointId to it.messageId }
         }
-    assertEquals(listOf("endpoint-b" to "msg-1", "endpoint-c" to "msg-1"), retriedPayloads)
+    assertEquals(listOf("endpoint-b" to "msg-1"), retriedPayloads)
   }
 
   @Test
-  fun sendMessageBroadcastsPayloadToEveryConnectedEndpoint() = runTest {
+  fun sendMessageTargetsConnectedPeerOnly() = runTest {
     val transport = FakeChatTransport()
     val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) }, payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads")), localDeviceId = "local")
 
@@ -1292,15 +1335,15 @@ class MainScreenViewModelTest {
 
     viewModel.sendMessage("hello group")
 
-    assertEquals(listOf("endpoint-b", "endpoint-c"), transport.sentPayloads.map { it.endpointId })
+    assertEquals(listOf("endpoint-b"), transport.sentPayloads.map { it.endpointId })
     assertEquals(
-      listOf("hello group", "hello group"),
+      listOf("hello group"),
       transport.sentPayloads.map { (ChatProtocol.decode(it.bytes) as DecodedWireMessage.Message).text },
     )
   }
 
   @Test
-  fun sendVoiceMessageBroadcastsPayloadToEveryConnectedEndpoint() = runTest {
+  fun sendVoiceMessageTargetsConnectedPeerOnly() = runTest {
     val transport = FakeChatTransport()
     val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) }, payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads")), localDeviceId = "local")
 
@@ -1313,9 +1356,9 @@ class MainScreenViewModelTest {
     viewModel.sendVoiceMessage(byteArrayOf(1, 2, 3, 4), durationMs = 2300L, mimeType = "audio/3gpp")
 
     assertEquals(MessageKind.Voice, viewModel.uiState.value.messages.single().kind)
-    assertEquals(listOf("endpoint-b", "endpoint-c"), transport.sentPayloads.map { it.endpointId })
+    assertEquals(listOf("endpoint-b"), transport.sentPayloads.map { it.endpointId })
     assertEquals(
-      listOf("AQIDBA==", "AQIDBA=="),
+      listOf("AQIDBA=="),
       transport.sentPayloads.map { (ChatProtocol.decode(it.bytes) as DecodedWireMessage.VoiceMessage).audioBase64 },
     )
   }
@@ -1335,7 +1378,7 @@ class MainScreenViewModelTest {
   }
 
   @Test
-  fun callTargetOptionsUseKnownGroupMembersWhenOnlyOneEndpointIsDirect() {
+  fun callTargetOptionsUseDirectPeerOnly() {
     val options =
       callTargetOptions(
         ChatUiState(
@@ -1349,8 +1392,8 @@ class MainScreenViewModelTest {
         ),
       )
 
-    assertEquals(listOf("device-b", "device-c"), options.map { it.id })
-    assertEquals(listOf("Phone B", "Phone C"), options.map { it.name })
+    assertEquals(listOf("endpoint-b"), options.map { it.id })
+    assertEquals(listOf("Phone B"), options.map { it.name })
   }
 
   @Test
@@ -1374,7 +1417,7 @@ class MainScreenViewModelTest {
   }
 
   @Test
-  fun startCallCanTargetSelectedConnectedEndpoint() = runTest {
+  fun startCallCannotTargetIgnoredAdditionalEndpoint() = runTest {
     val transport = FakeChatTransport()
     val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) }, payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads")), localDeviceId = "local")
 
@@ -1386,14 +1429,14 @@ class MainScreenViewModelTest {
 
     viewModel.startCall("endpoint-c")
 
-    assertEquals(CallStatus.Outgoing, viewModel.uiState.value.callState.status)
-    assertEquals("endpoint-c", viewModel.uiState.value.callState.peerEndpointId)
-    assertEquals("Phone C", viewModel.uiState.value.callState.peerName)
-    assertEquals(listOf("endpoint-c"), transport.sentPayloads.map { it.endpointId })
+    assertEquals(CallStatus.Idle, viewModel.uiState.value.callState.status)
+    assertEquals(ConnectionStatus.Error, viewModel.uiState.value.status)
+    assertEquals("Call target unavailable", viewModel.uiState.value.statusMessage)
+    assertEquals(emptyList<SentPayload>(), transport.sentPayloads)
   }
 
   @Test
-  fun startCallCanTargetKnownGroupMemberThroughRelayEndpoint() = runTest {
+  fun startCallDoesNotUseRelayTargetsInOneToOneMode() = runTest {
     val transport = FakeChatTransport()
     val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) }, payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads")), localDeviceId = "device-a")
 
@@ -1421,13 +1464,10 @@ class MainScreenViewModelTest {
 
     viewModel.startCall("device-c")
 
-    assertEquals(CallStatus.Outgoing, viewModel.uiState.value.callState.status)
-    assertEquals("endpoint-b", viewModel.uiState.value.callState.peerEndpointId)
-    assertEquals("device-c", viewModel.uiState.value.callState.peerMemberId)
-    assertEquals("Phone C", viewModel.uiState.value.callState.peerName)
-    assertEquals(listOf("endpoint-b"), transport.sentPayloads.map { it.endpointId })
-    val request = ChatProtocol.decode(transport.sentPayloads.single().bytes) as DecodedWireMessage.CallRequest
-    assertEquals("device-c", request.targetId)
+    assertEquals(CallStatus.Idle, viewModel.uiState.value.callState.status)
+    assertEquals(ConnectionStatus.Error, viewModel.uiState.value.status)
+    assertEquals("Call target unavailable", viewModel.uiState.value.statusMessage)
+    assertEquals(emptyList<SentPayload>(), transport.sentPayloads)
   }
 
   @Test
@@ -1449,7 +1489,7 @@ class MainScreenViewModelTest {
   }
 
   @Test
-  fun incomingCallRequestForAnotherMemberIsForwardedToTargetEndpoint() = runTest {
+  fun incomingCallRequestForAnotherMemberIsIgnoredInOneToOneMode() = runTest {
     val transport = FakeChatTransport()
     val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) }, payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads")), localDeviceId = "device-b")
 
@@ -1477,11 +1517,7 @@ class MainScreenViewModelTest {
     advanceUntilIdle()
 
     assertEquals(CallStatus.Idle, viewModel.uiState.value.callState.status)
-    assertEquals(listOf("endpoint-c"), transport.sentPayloads.map { it.endpointId })
-    val request = ChatProtocol.decode(transport.sentPayloads.single().bytes) as DecodedWireMessage.CallRequest
-    assertEquals("call-1", request.callId)
-    assertEquals("device-a", request.senderId)
-    assertEquals("device-c", request.targetId)
+    assertEquals(emptyList<SentPayload>(), transport.sentPayloads)
   }
 
   @Test
@@ -1835,7 +1871,7 @@ class MainScreenViewModelTest {
   }
 
   @Test
-  fun incomingMessageIsForwardedToOtherConnectedEndpoints() = runTest {
+  fun incomingMessageIsNotForwardedToIgnoredAdditionalEndpoints() = runTest {
     val transport = FakeChatTransport()
     val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) }, payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads")), localDeviceId = "local")
 
@@ -1867,16 +1903,14 @@ class MainScreenViewModelTest {
         it.endpointId == "endpoint-b" && ChatProtocol.decode(it.bytes) is DecodedWireMessage.Ack
       },
     )
-    assertTrue(
-      transport.sentPayloads.any {
-        it.endpointId == "endpoint-c" &&
-          (ChatProtocol.decode(it.bytes) as? DecodedWireMessage.Message)?.messageId == "remote-1"
-      },
+    assertEquals(
+      emptyList<SentPayload>(),
+      transport.sentPayloads.filter { it.endpointId == "endpoint-c" },
     )
   }
 
   @Test
-  fun incomingVoiceMessageIsForwardedToOtherConnectedEndpoints() = runTest {
+  fun incomingVoiceMessageIsNotForwardedToIgnoredAdditionalEndpoints() = runTest {
     val transport = FakeChatTransport()
     val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) }, payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads")), localDeviceId = "local")
 
@@ -1910,11 +1944,9 @@ class MainScreenViewModelTest {
         it.endpointId == "endpoint-b" && ChatProtocol.decode(it.bytes) is DecodedWireMessage.Ack
       },
     )
-    assertTrue(
-      transport.sentPayloads.any {
-        it.endpointId == "endpoint-c" &&
-          (ChatProtocol.decode(it.bytes) as? DecodedWireMessage.VoiceMessage)?.messageId == "voice-1"
-      },
+    assertEquals(
+      emptyList<SentPayload>(),
+      transport.sentPayloads.filter { it.endpointId == "endpoint-c" },
     )
   }
 
@@ -1953,6 +1985,8 @@ private class FakeChatTransport(
     private set
   var discoveryStartCount = 0
     private set
+  var advertisingStopped = false
+    private set
   var discoveryStopped = false
     private set
   var sentPayloads: List<SentPayload> = emptyList()
@@ -1962,6 +1996,8 @@ private class FakeChatTransport(
   var acceptedConnections: List<String> = emptyList()
     private set
   var rejectedConnections: List<String> = emptyList()
+    private set
+  var disconnectedEndpoints: List<String> = emptyList()
     private set
   private val queuedSendResults = ArrayDeque<Result<Unit>>()
   private val pendingSendCallbacks = ArrayDeque<(Result<Unit>) -> Unit>()
@@ -1977,6 +2013,7 @@ private class FakeChatTransport(
   fun clearDiscoveryState() {
     discoveryStarted = false
     discoveryStartCount = 0
+    advertisingStopped = false
     discoveryStopped = false
   }
 
@@ -2000,6 +2037,11 @@ private class FakeChatTransport(
     discoveryStarted = true
     discoveryStartCount += 1
     discoveryStopped = false
+  }
+
+  override fun stopAdvertising() {
+    advertisingStopped = true
+    advertisingStarted = false
   }
 
   override fun stopDiscovery() {
@@ -2026,6 +2068,10 @@ private class FakeChatTransport(
     } else {
       pendingSendCallbacks.addLast(onResult)
     }
+  }
+
+  override fun disconnectEndpoint(endpointId: String) {
+    disconnectedEndpoints = disconnectedEndpoints + endpointId
   }
 
   override fun stopAll() = Unit

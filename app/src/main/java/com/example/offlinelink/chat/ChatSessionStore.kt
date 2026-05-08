@@ -78,18 +78,13 @@ class ChatSessionStore(
 
   fun addConnectedEndpoint(endpoint: NearbyEndpoint) {
     val current = mutableState.value
-    val connectedEndpoints =
-      if (current.connectedEndpoints.any { it.id == endpoint.id }) {
-        current.connectedEndpoints.map { if (it.id == endpoint.id) endpoint else it }
-      } else {
-        current.connectedEndpoints + endpoint
-      }
+    val connectedEndpoints = listOf(endpoint)
     mutableState.value =
       current.copy(
         connectedEndpoints = connectedEndpoints,
-        groupMembers = mergeGroupMembers(current.groupMembers, listOf(GroupMember(endpoint.id, endpoint.name, GroupMemberStatus.Online))),
+        groupMembers = listOf(GroupMember(endpoint.id, endpoint.name, GroupMemberStatus.Online)),
         pendingConnection = null,
-        discoveredEndpoints = current.discoveredEndpoints.filterNot { it.id == endpoint.id },
+        discoveredEndpoints = emptyList(),
         status = ConnectionStatus.Connected,
         statusMessage = connectedStatusMessage(connectedEndpoints),
       )
@@ -163,6 +158,12 @@ class ChatSessionStore(
 
   fun removeConnectedEndpoint(endpointId: String) {
     val connectedEndpoints = mutableState.value.connectedEndpoints.filterNot { it.id == endpointId }
+    val groupMembers =
+      if (connectedEndpoints.isEmpty()) {
+        emptyList()
+      } else {
+        connectedEndpoints.map { endpoint -> GroupMember(endpoint.id, endpoint.name, GroupMemberStatus.Online) }
+      }
     val callState =
       if (mutableState.value.callState.peerEndpointId == endpointId) {
         CallState()
@@ -172,6 +173,7 @@ class ChatSessionStore(
     mutableState.value =
       mutableState.value.copy(
         connectedEndpoints = connectedEndpoints,
+        groupMembers = groupMembers,
         status = if (connectedEndpoints.isEmpty()) ConnectionStatus.Disconnected else ConnectionStatus.Connected,
         statusMessage = connectedStatusMessage(connectedEndpoints),
         callState = callState,
@@ -199,6 +201,7 @@ class ChatSessionStore(
       mutableState.value =
         mutableState.value.copy(
           connectedEndpoints = listOf(endpoint),
+          groupMembers = listOf(GroupMember(endpoint.id, endpoint.name, GroupMemberStatus.Online)),
           pendingConnection = null,
           discoveredEndpoints = emptyList(),
           status = ConnectionStatus.Connected,

@@ -14,6 +14,8 @@ interface ChatTransport {
 
   fun startDiscovery()
 
+  fun stopAdvertising()
+
   fun stopDiscovery()
 
   fun requestConnection(endpoint: NearbyEndpoint, displayName: String)
@@ -23,6 +25,8 @@ interface ChatTransport {
   fun rejectConnection(endpointId: String)
 
   fun send(endpointId: String, bytes: ByteArray, onResult: (Result<Unit>) -> Unit)
+
+  fun disconnectEndpoint(endpointId: String)
 
   fun stopAll()
 }

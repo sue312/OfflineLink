@@ -81,7 +81,7 @@ class ChatSessionStoreTest {
   }
 
   @Test
-  fun addConnectedEndpointKeepsMultipleDistinctDevices() {
+  fun addConnectedEndpointReplacesExistingPeerForOneToOneMode() {
     val store = ChatSessionStore(localDeviceId = "device-a")
     val phoneB = NearbyEndpoint("endpoint-b", "Phone B")
     val phoneC = NearbyEndpoint("endpoint-c", "Phone C")
@@ -90,8 +90,9 @@ class ChatSessionStoreTest {
     store.addConnectedEndpoint(phoneC)
     store.addConnectedEndpoint(phoneB)
 
-    assertEquals(listOf(phoneB, phoneC), store.state.value.connectedEndpoints)
-    assertEquals("Connected to 2 devices", store.state.value.statusMessage)
+    assertEquals(listOf(phoneB), store.state.value.connectedEndpoints)
+    assertEquals(listOf(GroupMember("endpoint-b", "Phone B")), store.state.value.groupMembers)
+    assertEquals("Connected to Phone B", store.state.value.statusMessage)
   }
 
   @Test

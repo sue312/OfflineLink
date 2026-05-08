@@ -65,7 +65,6 @@ import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.ErrorOutline
 import androidx.compose.material.icons.rounded.ExpandLess
 import androidx.compose.material.icons.rounded.ExpandMore
-import androidx.compose.material.icons.rounded.Groups
 import androidx.compose.material.icons.rounded.Hearing
 import androidx.compose.material.icons.rounded.Image
 import androidx.compose.material.icons.rounded.Lock
@@ -1350,9 +1349,8 @@ private fun MembersPanel(
   onStartCall: ((String?) -> Unit)? = null,
 ) {
   var callMenuExpanded by remember { mutableStateOf(false) }
-  val members = state.groupMembers
-  val visibleMembers = members.take(3)
-  val overflow = members.size - visibleMembers.size
+  val peer = state.connectedEndpoints.firstOrNull()
+  val peerName = peer?.name ?: state.groupMembers.firstOrNull()?.displayName ?: "Not connected"
   val canShowActions = onDisconnect != null && onStartCall != null
   val callTargets = if (canShowActions) callTargetOptions(state) else emptyList()
   val canStartCall = canShowActions && state.callState.status == CallStatus.Idle && state.connectedEndpoints.isNotEmpty() && callTargets.isNotEmpty()
@@ -1368,19 +1366,14 @@ private fun MembersPanel(
       verticalAlignment = Alignment.CenterVertically,
       horizontalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-      Icon(Icons.Rounded.Groups, contentDescription = null, modifier = Modifier.size(20.dp))
+      Icon(Icons.Rounded.Person, contentDescription = null, modifier = Modifier.size(20.dp))
       Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(1.dp)) {
-        Text("Members (${members.size + 1})", style = MaterialTheme.typography.titleMedium)
-        Text(localMemberSubtitle(state.displayName), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text("Peer", style = MaterialTheme.typography.titleMedium)
+        Text(peerName, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
       }
       Avatar(state.avatarName.ifBlank { state.displayName }, color = MaterialTheme.colorScheme.primary)
-      visibleMembers.forEach { member ->
-        MemberAvatar(member)
-      }
-      if (overflow > 0) {
-        Surface(color = MaterialTheme.colorScheme.surface, shape = CircleShape) {
-          Text("+$overflow", modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp), style = MaterialTheme.typography.labelMedium)
-        }
+      peerName.takeIf { it != "Not connected" }?.let {
+        Avatar(it, color = MaterialTheme.colorScheme.tertiary)
       }
       if (canShowActions) {
         Box {
@@ -2135,10 +2128,10 @@ internal fun nearbyEmptyStateText(): String =
   "No devices found yet. Keep this screen open while another phone taps Search."
 
 internal fun connectedSummarySubtitle(state: ChatUiState): String =
-  countLabel(state.groupMembers.size + 1, "member")
+  state.connectedEndpoints.firstOrNull()?.name ?: state.groupMembers.firstOrNull()?.displayName ?: "Peer"
 
 internal fun connectedSetupSectionLabels(state: ChatUiState): List<String> =
-  if (state.status == ConnectionStatus.Connected) listOf("Members") else emptyList()
+  if (state.status == ConnectionStatus.Connected) listOf("Peer") else emptyList()
 
 internal fun localMemberSubtitle(localDisplayName: String): String = "You: ${localDisplayName.ifBlank { "OfflineLink" }}"
 
@@ -2148,12 +2141,11 @@ internal fun setupHeaderTitle(state: ChatUiState): String =
   if (state.status == ConnectionStatus.Connected) "Connection" else "Setup"
 
 internal fun setupSummaryText(state: ChatUiState): String {
-  val memberCount = state.groupMembers.size + 1
   return when {
     state.pendingConnection != null -> "Request from ${state.pendingConnection.endpointName}"
-    state.status == ConnectionStatus.Connected -> countLabel(memberCount, "member")
+    state.status == ConnectionStatus.Connected -> connectedSummarySubtitle(state)
     state.discoveredEndpoints.isNotEmpty() -> "${countLabel(state.discoveredEndpoints.size, "nearby device")} - ${state.statusMessage}"
-    state.groupMembers.isNotEmpty() -> "${countLabel(memberCount, "member")} - ${state.statusMessage}"
+    state.groupMembers.isNotEmpty() -> "${connectedSummarySubtitle(state)} - ${state.statusMessage}"
     else -> state.statusMessage
   }
 }
@@ -2189,7 +2181,7 @@ private fun diagnosticsFor(
     DiagnosticItem("Permissions", if (hasPermissions) "Granted" else "Missing"),
     DiagnosticItem("Bluetooth", bluetoothStatusLabel(context)),
     DiagnosticItem("Connection", state.status.label()),
-    DiagnosticItem("Members", (state.groupMembers.size + 1).toString()),
+    DiagnosticItem("Peer", state.connectedEndpoints.firstOrNull()?.name ?: "None"),
     DiagnosticItem("Messages", state.messages.size.toString()),
     DiagnosticItem("Call audio", callAudioProcessingMode.displayName),
     DiagnosticItem("Call RX", "${callAudioLinkStats.receivedFrames} rx / ${callAudioLinkStats.lostFrames} lost / ${callAudioLinkStats.lateFrames} late"),
@@ -2264,31 +2256,15 @@ internal data class CallTargetOption(
 )
 
 internal fun callTargetOptions(state: ChatUiState): List<CallTargetOption> {
-  val directEndpoints = state.connectedEndpoints
-  val memberNames = mutableSetOf<String>()
-  val options = linkedMapOf<String, CallTargetOption>()
-
-  state.groupMembers
-    .filter { it.id.isNotBlank() && it.id != state.localDeviceId }
-    .forEach { member ->
-      val displayName = member.displayName.ifBlank { "Nearby device" }
-      val direct =
-        directEndpoints.any { endpoint ->
-          endpoint.id == member.id || endpoint.name.equals(displayName, ignoreCase = true)
-        }
-      options.putIfAbsent(member.id, CallTargetOption(id = member.id, name = displayName, isDirect = direct))
-      memberNames += displayName.trim().lowercase()
+  return state.connectedEndpoints
+    .filter { endpoint -> endpoint.id.isNotBlank() && endpoint.id != state.localDeviceId }
+    .map { endpoint ->
+      CallTargetOption(
+        id = endpoint.id,
+        name = endpoint.name.ifBlank { "Nearby device" },
+        isDirect = true,
+      )
     }
-
-  directEndpoints.forEach { endpoint ->
-    val endpointName = endpoint.name.ifBlank { "Nearby device" }
-    val representedByMemberName = endpointName.trim().lowercase() in memberNames
-    if (endpoint.id.isNotBlank() && endpoint.id != state.localDeviceId && !representedByMemberName) {
-      options.putIfAbsent(endpoint.id, CallTargetOption(id = endpoint.id, name = endpointName, isDirect = true))
-    }
-  }
-
-  return options.values.toList()
 }
 
 private fun decodeImageBitmap(rawBytes: ByteArray): ImageBitmap {
