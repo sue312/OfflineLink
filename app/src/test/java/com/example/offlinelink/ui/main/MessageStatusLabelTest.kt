@@ -117,7 +117,7 @@ class MessageStatusLabelTest {
   }
 
   @Test
-  fun connectedSetupUsesSingleMembersSection() {
+  fun connectedSetupUsesInlineActionsOnly() {
     val state =
       ChatUiState(
         localDeviceId = "device-a",
@@ -128,11 +128,61 @@ class MessageStatusLabelTest {
       )
 
     assertEquals(
-      listOf("Peer"),
+      emptyList<String>(),
       connectedSetupSectionLabels(state),
     )
-    assertEquals("Connection", setupHeaderTitle(state))
+    assertEquals("Connected", setupHeaderTitle(state))
     assertEquals("Phone B", setupSummaryText(state))
+    assertEquals(listOf("Call", "Disconnect"), connectedHeaderActionLabels(state))
+  }
+
+  @Test
+  fun setupSummaryUsesCompactConnectionStateCopy() {
+    assertEquals(
+      "Hidden",
+      setupSummaryText(ChatUiState(localDeviceId = "device-a", status = ConnectionStatus.Idle, statusMessage = "Ready")),
+    )
+    assertEquals(
+      "Visible",
+      setupSummaryText(
+        ChatUiState(
+          localDeviceId = "device-a",
+          status = ConnectionStatus.Advertising,
+          isVisibleToNearby = true,
+          statusMessage = "Visible to nearby devices",
+        ),
+      ),
+    )
+    assertEquals(
+      "Searching",
+      setupSummaryText(ChatUiState(localDeviceId = "device-a", status = ConnectionStatus.Discovering, statusMessage = "Searching nearby devices")),
+    )
+  }
+
+  @Test
+  fun emptyChatCopyFollowsConnectionState() {
+    assertEquals("Ready to link", emptyChatTitle(ChatUiState(localDeviceId = "device-a")))
+    assertEquals("Turn on Visible or search nearby.", emptyChatSubtitle(ChatUiState(localDeviceId = "device-a")))
+
+    assertEquals(
+      "Searching nearby",
+      emptyChatTitle(ChatUiState(localDeviceId = "device-a", status = ConnectionStatus.Discovering)),
+    )
+    assertEquals(
+      "Visible phones will appear above.",
+      emptyChatSubtitle(ChatUiState(localDeviceId = "device-a", status = ConnectionStatus.Discovering)),
+    )
+
+    assertEquals(
+      "No messages yet",
+      emptyChatTitle(
+        ChatUiState(
+          localDeviceId = "device-a",
+          status = ConnectionStatus.Connected,
+          connectedEndpoints = listOf(com.example.offlinelink.model.NearbyEndpoint("device-b", "Phone B")),
+        ),
+      ),
+    )
   }
 
   @Test

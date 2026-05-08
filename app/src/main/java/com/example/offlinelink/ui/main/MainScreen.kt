@@ -56,6 +56,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.Send
 import androidx.compose.material.icons.automirrored.rounded.VolumeUp
+import androidx.compose.material.icons.rounded.AttachFile
 import androidx.compose.material.icons.rounded.Call
 import androidx.compose.material.icons.rounded.CallEnd
 import androidx.compose.material.icons.rounded.Check
@@ -413,6 +414,12 @@ private fun OfflineChatContent(
     }
   }
 
+  LaunchedEffect(state.status, state.connectedEndpoint?.id, state.pendingConnection?.endpointId) {
+    if (state.status == ConnectionStatus.Connected && state.pendingConnection == null) {
+      isSetupExpanded = false
+    }
+  }
+
   LaunchedEffect(state.callState.status, state.callState.callId) {
     if (state.callState.status == CallStatus.Active) {
       onStartCallAudio { frame ->
@@ -491,7 +498,7 @@ private fun OfflineChatContent(
           .padding(start = 12.dp, top = 10.dp, end = 12.dp, bottom = 8.dp),
       verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-      Header(state = state, onOpenSettings = { showSettings = true })
+      Header(onOpenSettings = { showSettings = true })
 
       if (!hasPermissions) {
         PermissionPanel(onRequestPermissions, modifier = Modifier.fillMaxWidth())
@@ -510,6 +517,7 @@ private fun OfflineChatContent(
           onReject = onReject,
         )
         MessageList(
+          state = state,
           messages = state.messages,
           localDeviceId = state.localDeviceId,
           localDisplayName = state.displayName,
@@ -631,7 +639,6 @@ private fun OfflineChatContent(
 
 @Composable
 private fun Header(
-  state: ChatUiState,
   onOpenSettings: () -> Unit,
 ) {
   Row(
@@ -642,36 +649,6 @@ private fun Header(
     Text("OfflineLink", style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
     IconButton(onClick = onOpenSettings, modifier = Modifier.size(38.dp)) {
       Icon(Icons.Rounded.Settings, contentDescription = "Settings", modifier = Modifier.size(20.dp))
-    }
-    StatusChip(status = state.status)
-  }
-}
-
-@Composable
-private fun StatusChip(status: ConnectionStatus) {
-  val containerColor =
-    when (status) {
-      ConnectionStatus.Connected -> MaterialTheme.colorScheme.primaryContainer
-      ConnectionStatus.Advertising, ConnectionStatus.Discovering, ConnectionStatus.Connecting -> MaterialTheme.colorScheme.secondaryContainer
-      ConnectionStatus.Error -> MaterialTheme.colorScheme.errorContainer
-      else -> MaterialTheme.colorScheme.surfaceVariant
-    }
-  val dotColor =
-    when (status) {
-      ConnectionStatus.Connected -> MaterialTheme.colorScheme.primary
-      ConnectionStatus.Advertising, ConnectionStatus.Discovering, ConnectionStatus.Connecting -> MaterialTheme.colorScheme.secondary
-      ConnectionStatus.Error -> MaterialTheme.colorScheme.error
-      else -> MaterialTheme.colorScheme.outline
-    }
-
-  Surface(color = containerColor, shape = CircleShape) {
-    Row(
-      modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp),
-      horizontalArrangement = Arrangement.spacedBy(7.dp),
-      verticalAlignment = Alignment.CenterVertically,
-    ) {
-      Box(modifier = Modifier.size(7.dp).background(dotColor, CircleShape))
-      Text(status.label(), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurface)
     }
   }
 }
@@ -1010,25 +987,20 @@ private fun SetupDisclosure(
     modifier = Modifier.fillMaxWidth().animateContentSize(),
     verticalArrangement = Arrangement.spacedBy(8.dp),
   ) {
-    SetupToggleHeader(state = state, expanded = expanded, onToggle = onToggle)
-    AnimatedVisibility(visible = expanded) {
+    SetupToggleHeader(
+      state = state,
+      expanded = expanded,
+      onToggle = onToggle,
+      onDisconnect = onDisconnect,
+      onStartCall = onStartCall,
+    )
+    AnimatedVisibility(visible = expanded && state.status != ConnectionStatus.Connected) {
       Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        if (state.status == ConnectionStatus.Connected) {
-          MembersPanel(
-            state = state,
-            onDisconnect = onDisconnect,
-            onStartCall = onStartCall,
-          )
-        } else {
-          ConnectionConsole(
-            state = state,
-            onDiscover = onDiscover,
-            onVisibleToNearbyChange = onVisibleToNearbyChange,
-          )
-          if (state.connectedEndpoints.isNotEmpty() || state.groupMembers.isNotEmpty()) {
-            MembersPanel(state = state)
-          }
-        }
+        ConnectionConsole(
+          state = state,
+          onDiscover = onDiscover,
+          onVisibleToNearbyChange = onVisibleToNearbyChange,
+        )
         state.pendingConnection?.let { pending ->
           PendingConnectionPanel(
             title = pending.endpointName,
@@ -1050,7 +1022,10 @@ private fun SetupToggleHeader(
   state: ChatUiState,
   expanded: Boolean,
   onToggle: () -> Unit,
+  onDisconnect: () -> Unit,
+  onStartCall: (String?) -> Unit,
 ) {
+  val isConnected = state.status == ConnectionStatus.Connected
   val dotColor =
     when (state.status) {
       ConnectionStatus.Connected -> MaterialTheme.colorScheme.primary
@@ -1066,12 +1041,13 @@ private fun SetupToggleHeader(
     border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
     modifier = Modifier.fillMaxWidth(),
   ) {
+    val rowModifier =
+      Modifier
+        .fillMaxWidth()
+        .then(if (isConnected) Modifier else Modifier.clickable(onClick = onToggle))
+        .padding(horizontal = 12.dp, vertical = 9.dp)
     Row(
-      modifier =
-        Modifier
-          .fillMaxWidth()
-          .clickable(onClick = onToggle)
-          .padding(horizontal = 12.dp, vertical = 9.dp),
+      modifier = rowModifier,
       horizontalArrangement = Arrangement.spacedBy(10.dp),
       verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -1080,12 +1056,30 @@ private fun SetupToggleHeader(
         Text(setupHeaderTitle(state), style = MaterialTheme.typography.titleMedium)
         Text(setupSummaryText(state), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
       }
-      Icon(
-        imageVector = if (expanded) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore,
-        contentDescription = if (expanded) "Collapse setup" else "Expand setup",
-        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-        modifier = Modifier.size(22.dp),
-      )
+      if (isConnected) {
+        val callTargets = callTargetOptions(state)
+        val canStartCall = state.callState.status == CallStatus.Idle && state.connectedEndpoints.isNotEmpty() && callTargets.isNotEmpty()
+        ComposerActionButton(
+          icon = Icons.Rounded.Call,
+          contentDescription = "Start call",
+          enabled = canStartCall,
+          primary = canStartCall,
+          onClick = { onStartCall(callTargets.firstOrNull()?.id) },
+        )
+        ComposerActionButton(
+          icon = Icons.Rounded.Close,
+          contentDescription = "Disconnect",
+          enabled = true,
+          onClick = onDisconnect,
+        )
+      } else {
+        Icon(
+          imageVector = if (expanded) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore,
+          contentDescription = if (expanded) "Collapse setup" else "Expand setup",
+          tint = MaterialTheme.colorScheme.onSurfaceVariant,
+          modifier = Modifier.size(22.dp),
+        )
+      }
     }
   }
 }
@@ -1102,21 +1096,14 @@ private fun ConnectionConsole(
     border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
     modifier = Modifier.fillMaxWidth(),
   ) {
-    Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+    Row(
+      modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 8.dp),
+      horizontalArrangement = Arrangement.spacedBy(10.dp),
+      verticalAlignment = Alignment.CenterVertically,
+    ) {
       Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically,
-      ) {
-        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-          Text("Link setup", style = MaterialTheme.typography.titleMedium)
-          Text(state.statusMessage, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
-      }
-
-      Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween,
+        modifier = Modifier.weight(1f),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
         verticalAlignment = Alignment.CenterVertically,
       ) {
         Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(1.dp)) {
@@ -1129,60 +1116,31 @@ private fun ConnectionConsole(
           enabled = connectionVisibilityEnabled(state.status),
         )
       }
-
-      connectionSetupActionLabels(state.status).forEach { label ->
-        if (label == "Search") {
-          ConnectionActionButton(
-            icon = Icons.Rounded.Search,
-            label = label,
-            onClick = onDiscover,
-            enabled = state.status != ConnectionStatus.Connected,
-            selected = state.status == ConnectionStatus.Discovering,
-            modifier = Modifier.fillMaxWidth(),
-          )
+      val searchEnabled = state.status != ConnectionStatus.Connected
+      val searching = state.status == ConnectionStatus.Discovering
+      if (searching) {
+        Button(
+          onClick = onDiscover,
+          enabled = searchEnabled,
+          shape = RoundedCornerShape(8.dp),
+          contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+        ) {
+          Icon(Icons.Rounded.Search, contentDescription = null, modifier = Modifier.size(17.dp))
+          Spacer(Modifier.width(6.dp))
+          Text(connectionSearchLabel(state.status), style = MaterialTheme.typography.labelLarge)
+        }
+      } else {
+        OutlinedButton(
+          onClick = onDiscover,
+          enabled = searchEnabled,
+          shape = RoundedCornerShape(8.dp),
+          contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+        ) {
+          Icon(Icons.Rounded.Search, contentDescription = null, modifier = Modifier.size(17.dp))
+          Spacer(Modifier.width(6.dp))
+          Text(connectionSearchLabel(state.status), style = MaterialTheme.typography.labelLarge)
         }
       }
-    }
-  }
-}
-
-@Composable
-private fun ConnectionActionButton(
-  icon: ImageVector,
-  label: String,
-  enabled: Boolean,
-  selected: Boolean,
-  onClick: () -> Unit,
-  modifier: Modifier = Modifier,
-  contentDescription: String = label,
-) {
-  val container =
-    when {
-      selected -> MaterialTheme.colorScheme.primary
-      enabled -> MaterialTheme.colorScheme.surfaceVariant
-      else -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f)
-    }
-  val content =
-    when {
-      selected -> MaterialTheme.colorScheme.onPrimary
-      enabled -> MaterialTheme.colorScheme.onSurfaceVariant
-      else -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.45f)
-    }
-
-  Column(modifier = modifier, horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(4.dp)) {
-    Surface(color = container, contentColor = content, shape = CircleShape) {
-      IconButton(onClick = onClick, enabled = enabled, modifier = Modifier.size(42.dp)) {
-        Icon(icon, contentDescription = contentDescription, modifier = Modifier.size(20.dp))
-      }
-    }
-    val labelColor =
-      if (enabled) {
-        MaterialTheme.colorScheme.onSurfaceVariant
-      } else {
-        MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.45f)
-      }
-    if (label.isNotEmpty()) {
-      Text(label, style = MaterialTheme.typography.labelMedium, color = labelColor, maxLines = 1, softWrap = false)
     }
   }
 }
@@ -1366,101 +1324,6 @@ private fun callScreenBackground(): Brush =
   )
 
 @Composable
-private fun MembersPanel(
-  state: ChatUiState,
-  onDisconnect: (() -> Unit)? = null,
-  onStartCall: ((String?) -> Unit)? = null,
-) {
-  var callMenuExpanded by remember { mutableStateOf(false) }
-  val peer = state.connectedEndpoints.firstOrNull()
-  val peerName = peer?.name ?: state.groupMembers.firstOrNull()?.displayName ?: "Not connected"
-  val canShowActions = onDisconnect != null && onStartCall != null
-  val callTargets = if (canShowActions) callTargetOptions(state) else emptyList()
-  val canStartCall = canShowActions && state.callState.status == CallStatus.Idle && state.connectedEndpoints.isNotEmpty() && callTargets.isNotEmpty()
-
-  Surface(
-    color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.55f),
-    contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
-    shape = RoundedCornerShape(8.dp),
-    modifier = Modifier.fillMaxWidth(),
-  ) {
-    Row(
-      modifier = Modifier.padding(horizontal = 12.dp, vertical = 9.dp),
-      verticalAlignment = Alignment.CenterVertically,
-      horizontalArrangement = Arrangement.spacedBy(10.dp),
-    ) {
-      Icon(Icons.Rounded.Person, contentDescription = null, modifier = Modifier.size(20.dp))
-      Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(1.dp)) {
-        Text("Peer", style = MaterialTheme.typography.titleMedium)
-        Text(peerName, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
-      }
-      Avatar(state.avatarName.ifBlank { state.displayName }, color = MaterialTheme.colorScheme.primary)
-      peerName.takeIf { it != "Not connected" }?.let {
-        Avatar(it, color = MaterialTheme.colorScheme.tertiary)
-      }
-      if (canShowActions) {
-        Box {
-          ComposerActionButton(
-            icon = Icons.Rounded.Call,
-            contentDescription = "Start call",
-            enabled = canStartCall,
-            primary = canStartCall,
-            onClick = {
-              if (callTargets.size <= 1) {
-                onStartCall(callTargets.firstOrNull()?.id)
-              } else {
-                callMenuExpanded = true
-              }
-            },
-          )
-          DropdownMenu(expanded = callMenuExpanded, onDismissRequest = { callMenuExpanded = false }) {
-            callTargets.forEach { target ->
-              DropdownMenuItem(
-                text = {
-                  Column(verticalArrangement = Arrangement.spacedBy(1.dp)) {
-                    Text("Call ${target.name}")
-                    if (!target.isDirect) {
-                      Text("via relay", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
-                  }
-                },
-                leadingIcon = { Icon(Icons.Rounded.Call, contentDescription = null, modifier = Modifier.size(18.dp)) },
-                onClick = {
-                  callMenuExpanded = false
-                  onStartCall(target.id)
-                },
-              )
-            }
-          }
-        }
-        ComposerActionButton(
-          icon = Icons.Rounded.Close,
-          contentDescription = "Leave",
-          enabled = true,
-          onClick = onDisconnect,
-        )
-      }
-    }
-  }
-}
-
-@Composable
-private fun MemberAvatar(member: GroupMember) {
-  val color =
-    when (member.status) {
-      GroupMemberStatus.Online -> MaterialTheme.colorScheme.secondary
-      GroupMemberStatus.Reconnecting -> MaterialTheme.colorScheme.tertiary
-      GroupMemberStatus.Offline -> MaterialTheme.colorScheme.outline
-  }
-  Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(2.dp)) {
-    Avatar(member.displayName, color = color)
-    groupMemberStatusText(member.status)?.let { statusText ->
-      Text(statusText, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
-    }
-  }
-}
-
-@Composable
 private fun Avatar(
   name: String,
   color: Color,
@@ -1541,6 +1404,7 @@ private fun EndpointList(
 
 @Composable
 private fun MessageList(
+  state: ChatUiState,
   messages: List<ChatMessage>,
   localDeviceId: String,
   localDisplayName: String,
@@ -1562,7 +1426,7 @@ private fun MessageList(
     verticalArrangement = Arrangement.spacedBy(8.dp),
   ) {
     if (messages.isEmpty()) {
-      item(contentType = "empty") { EmptyChatState() }
+      item(contentType = "empty") { EmptyChatState(state = state) }
     } else {
       items(
         items = messages,
@@ -1584,7 +1448,7 @@ private fun MessageList(
 }
 
 @Composable
-private fun EmptyChatState() {
+private fun EmptyChatState(state: ChatUiState) {
   Surface(
     color = MaterialTheme.colorScheme.surface.copy(alpha = 0.72f),
     shape = RoundedCornerShape(8.dp),
@@ -1592,9 +1456,9 @@ private fun EmptyChatState() {
     modifier = Modifier.fillMaxWidth(),
   ) {
     Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-      Text("No messages yet", style = MaterialTheme.typography.titleMedium)
+      Text(emptyChatTitle(state), style = MaterialTheme.typography.titleMedium)
       Text(
-        "Connect nearby phones, then send text, voice, location, or an image.",
+        emptyChatSubtitle(state),
         style = MaterialTheme.typography.bodyMedium,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
       )
@@ -1982,6 +1846,7 @@ private fun MessageComposer(
   onSendLocation: () -> Unit,
   onPickImage: () -> Unit,
 ) {
+  var attachmentMenuExpanded by remember { mutableStateOf(false) }
   Surface(
     color = MaterialTheme.colorScheme.surface,
     shape = RoundedCornerShape(8.dp),
@@ -2012,18 +1877,32 @@ private fun MessageComposer(
           selected = isRecordingVoice,
           onClick = onToggleVoice,
         )
-        ComposerActionButton(
-          icon = Icons.Rounded.Place,
-          contentDescription = "Send location",
-          enabled = enabled && !isRecordingVoice && !isSendingLocation,
-          onClick = onSendLocation,
-        )
-        ComposerActionButton(
-          icon = Icons.Rounded.Image,
-          contentDescription = "Send image",
-          enabled = enabled && !isRecordingVoice && !isSendingLocation,
-          onClick = onPickImage,
-        )
+        Box {
+          ComposerActionButton(
+            icon = Icons.Rounded.AttachFile,
+            contentDescription = "Attachments",
+            enabled = enabled && !isRecordingVoice && !isSendingLocation,
+            onClick = { attachmentMenuExpanded = true },
+          )
+          DropdownMenu(expanded = attachmentMenuExpanded, onDismissRequest = { attachmentMenuExpanded = false }) {
+            DropdownMenuItem(
+              text = { Text("Location") },
+              leadingIcon = { Icon(Icons.Rounded.Place, contentDescription = null, modifier = Modifier.size(18.dp)) },
+              onClick = {
+                attachmentMenuExpanded = false
+                onSendLocation()
+              },
+            )
+            DropdownMenuItem(
+              text = { Text("Image") },
+              leadingIcon = { Icon(Icons.Rounded.Image, contentDescription = null, modifier = Modifier.size(18.dp)) },
+              onClick = {
+                attachmentMenuExpanded = false
+                onPickImage()
+              },
+            )
+          }
+        }
         ComposerActionButton(
           icon = Icons.AutoMirrored.Rounded.Send,
           contentDescription = "Send message",
@@ -2141,6 +2020,9 @@ internal fun defaultSetupExpanded(messageCount: Int): Boolean = messageCount == 
 internal fun connectionSetupActionLabels(status: ConnectionStatus): List<String> =
   if (status == ConnectionStatus.Connected) emptyList() else listOf("Search")
 
+internal fun connectionSearchLabel(status: ConnectionStatus): String =
+  if (status == ConnectionStatus.Discovering) "Searching" else "Search"
+
 internal fun connectionVisibilityLabel(isVisible: Boolean): String =
   if (isVisible) "Visible" else "Hidden"
 
@@ -2160,24 +2042,46 @@ internal fun connectedSummarySubtitle(state: ChatUiState): String =
   state.connectedEndpoints.firstOrNull()?.name ?: state.groupMembers.firstOrNull()?.displayName ?: "Peer"
 
 internal fun connectedSetupSectionLabels(state: ChatUiState): List<String> =
-  if (state.status == ConnectionStatus.Connected) listOf("Peer") else emptyList()
+  emptyList()
+
+internal fun connectedHeaderActionLabels(state: ChatUiState): List<String> =
+  if (state.status == ConnectionStatus.Connected) listOf("Call", "Disconnect") else emptyList()
 
 internal fun localMemberSubtitle(localDisplayName: String): String = "You: ${localDisplayName.ifBlank { "OfflineLink" }}"
 
 internal fun groupMemberStatusText(status: GroupMemberStatus): String? = null
 
 internal fun setupHeaderTitle(state: ChatUiState): String =
-  if (state.status == ConnectionStatus.Connected) "Connection" else "Setup"
+  if (state.status == ConnectionStatus.Connected) "Connected" else "Setup"
 
 internal fun setupSummaryText(state: ChatUiState): String {
   return when {
     state.pendingConnection != null -> "Request from ${state.pendingConnection.endpointName}"
     state.status == ConnectionStatus.Connected -> connectedSummarySubtitle(state)
-    state.discoveredEndpoints.isNotEmpty() -> "${countLabel(state.discoveredEndpoints.size, "nearby device")} - ${state.statusMessage}"
-    state.groupMembers.isNotEmpty() -> "${connectedSummarySubtitle(state)} - ${state.statusMessage}"
-    else -> state.statusMessage
+    state.status == ConnectionStatus.Discovering -> "Searching"
+    state.status == ConnectionStatus.Advertising || state.isVisibleToNearby -> "Visible"
+    state.discoveredEndpoints.isNotEmpty() -> countLabel(state.discoveredEndpoints.size, "nearby device")
+    state.groupMembers.isNotEmpty() -> connectedSummarySubtitle(state)
+    state.status == ConnectionStatus.Error -> "Issue"
+    else -> connectionVisibilityLabel(isVisible = false)
   }
 }
+
+internal fun emptyChatTitle(state: ChatUiState): String =
+  when (state.status) {
+    ConnectionStatus.Connected -> "No messages yet"
+    ConnectionStatus.Discovering -> "Searching nearby"
+    ConnectionStatus.Advertising -> "Visible to nearby"
+    else -> "Ready to link"
+  }
+
+internal fun emptyChatSubtitle(state: ChatUiState): String =
+  when (state.status) {
+    ConnectionStatus.Connected -> "Messages appear here."
+    ConnectionStatus.Discovering -> "Visible phones will appear above."
+    ConnectionStatus.Advertising -> "Waiting for a nearby phone."
+    else -> "Turn on Visible or search nearby."
+  }
 
 private fun countLabel(
   count: Int,
