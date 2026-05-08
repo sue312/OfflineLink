@@ -24,8 +24,11 @@ class CallAudioStream(context: Context) {
   private val appContext = context.applicationContext
   private val audioManager = appContext.getSystemService(AudioManager::class.java)
   private val lock = Any()
+  @Suppress("PLATFORM_CLASS_MAPPED_TO_KOTLIN")
+  private val playbackLock = Object()
   private val running = AtomicBoolean(false)
   private val noiseGate = CallAudioNoiseGate()
+  private val playbackBuffer = CallAudioJitterBuffer()
   private var audioEncoder: CallAudioEncoder? = null
   private var audioDecoder: CallAudioDecoder = CallAudioCodecFactory.createDecoder()
   private var audioRecord: AudioRecord? = null
@@ -34,6 +37,7 @@ class CallAudioStream(context: Context) {
   private var audioEffects: List<AudioEffect> = emptyList()
   private var diagnosticRecorder: CallAudioDiagnosticRecorder? = null
   private var captureThread: Thread? = null
+  private var playbackThread: Thread? = null
   private var previousAudioMode: Int? = null
   private var previousSpeakerphoneOn: Boolean? = null
   private var previousCommunicationDevice: AudioDeviceInfo? = null
@@ -94,12 +98,18 @@ class CallAudioStream(context: Context) {
           audioEffects = if (mode.useSystemEffects) createVoiceEffects(record) else emptyList()
           diagnosticRecorder = diagnostics
           noiseGate.reset()
+          resetPlaybackBufferLocked()
           running.set(true)
           started = true
           track.play()
           record.startRecording()
           captureThread =
             Thread({ captureLoop(record, encoder, mode, diagnostics, onFrame) }, "OfflineLinkCallAudio").apply {
+              isDaemon = true
+              start()
+            }
+          playbackThread =
+            Thread({ playbackLoop() }, "OfflineLinkCallPlayback").apply {
               isDaemon = true
               start()
             }
@@ -137,13 +147,9 @@ class CallAudioStream(context: Context) {
       if (frame.bytes.isEmpty()) return@runCatching
       val pcmFrame = audioDecoder.decode(frame).getOrThrow() ?: return@runCatching
       diagnosticRecorder?.writeReceivedDecoded(pcmFrame.bytes, pcmFrame.bytes.size, pcmFrame.sampleRateHz)
-      synchronized(lock) {
-        val track = ensurePlayerLocked(pcmFrame.sampleRateHz)
-        if (track.playState != AudioTrack.PLAYSTATE_PLAYING) {
-          track.play()
-        }
-        val written = track.write(pcmFrame.bytes, 0, pcmFrame.bytes.size, AudioTrack.WRITE_NON_BLOCKING)
-        check(written >= 0) { "Call audio playback failed: $written" }
+      synchronized(playbackLock) {
+        playbackBuffer.enqueue(pcmFrame)
+        playbackLock.notifyAll()
       }
     }
 
@@ -167,7 +173,8 @@ class CallAudioStream(context: Context) {
     val decoder: CallAudioDecoder
     val effects: List<AudioEffect>
     val diagnostics: CallAudioDiagnosticRecorder?
-    val thread: Thread?
+    val capture: Thread?
+    val playback: Thread?
     synchronized(lock) {
       running.set(false)
       record = audioRecord
@@ -176,7 +183,8 @@ class CallAudioStream(context: Context) {
       decoder = audioDecoder
       effects = audioEffects
       diagnostics = diagnosticRecorder
-      thread = captureThread
+      capture = captureThread
+      playback = playbackThread
       audioRecord = null
       audioTrack = null
       audioTrackSampleRateHz = null
@@ -185,11 +193,19 @@ class CallAudioStream(context: Context) {
       audioEffects = emptyList()
       diagnosticRecorder = null
       captureThread = null
+      playbackThread = null
+    }
+    synchronized(playbackLock) {
+      playbackBuffer.reset()
+      playbackLock.notifyAll()
     }
 
     runCatching { record?.stop() }
-    if (thread != null && thread != Thread.currentThread()) {
-      runCatching { thread.join(STOP_JOIN_TIMEOUT_MS) }
+    if (capture != null && capture != Thread.currentThread()) {
+      runCatching { capture.join(STOP_JOIN_TIMEOUT_MS) }
+    }
+    if (playback != null && playback != Thread.currentThread()) {
+      runCatching { playback.join(STOP_JOIN_TIMEOUT_MS) }
     }
     releaseEffects(effects)
     diagnostics?.close()
@@ -244,6 +260,43 @@ class CallAudioStream(context: Context) {
             }
           }
         }
+      }
+    }
+  }
+
+  private fun playbackLoop() {
+    runCatching { Process.setThreadPriority(Process.THREAD_PRIORITY_AUDIO) }
+    while (running.get()) {
+      val frame =
+        synchronized(playbackLock) {
+          var readyFrame = playbackBuffer.pollReady()
+          while (readyFrame == null && running.get()) {
+            playbackLock.wait(PLAYBACK_WAIT_TIMEOUT_MS)
+            readyFrame = playbackBuffer.pollReady()
+          }
+          readyFrame
+        } ?: continue
+      runCatching { writePlaybackFrame(frame) }
+    }
+  }
+
+  private fun writePlaybackFrame(frame: PcmAudioFrame) {
+    val track =
+      synchronized(lock) {
+        val player = ensurePlayerLocked(frame.sampleRateHz)
+        if (player.playState != AudioTrack.PLAYSTATE_PLAYING) {
+          player.play()
+        }
+        player
+      }
+    var offset = 0
+    while (offset < frame.bytes.size && running.get()) {
+      val written = track.write(frame.bytes, offset, frame.bytes.size - offset, AudioTrack.WRITE_BLOCKING)
+      check(written >= 0) { "Call audio playback failed: $written" }
+      if (written == 0) {
+        Thread.yield()
+      } else {
+        offset += written
       }
     }
   }
@@ -447,7 +500,15 @@ class CallAudioStream(context: Context) {
   private fun diagnosticsDirectory(): File =
     File(appContext.getExternalFilesDir(null) ?: appContext.filesDir, "call-audio-diagnostics")
 
+  private fun resetPlaybackBufferLocked() {
+    synchronized(playbackLock) {
+      playbackBuffer.reset()
+      playbackLock.notifyAll()
+    }
+  }
+
   private companion object {
     private const val STOP_JOIN_TIMEOUT_MS = 250L
+    private const val PLAYBACK_WAIT_TIMEOUT_MS = 40L
   }
 }
