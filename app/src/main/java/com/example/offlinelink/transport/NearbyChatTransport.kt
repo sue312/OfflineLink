@@ -61,10 +61,15 @@ class NearbyChatTransport(context: Context) : ChatTransport {
     client.stopDiscovery()
   }
 
-  override fun requestConnection(endpoint: NearbyEndpoint, displayName: String) {
+  override fun requestConnection(
+    endpoint: NearbyEndpoint,
+    displayName: String,
+    deviceId: String,
+  ) {
     endpoints[endpoint.id] = AdvertisedEndpoint(endpoint.name, endpoint.deviceId)
+    val connectionName = advertisedEndpointName(displayName, deviceId)
     client
-      .requestConnection(localAdvertisedName, endpoint.id, connectionLifecycleCallback)
+      .requestConnection(connectionName, endpoint.id, connectionLifecycleCallback)
       .addOnFailureListener { emitFailure("Could not request connection", it) }
   }
 

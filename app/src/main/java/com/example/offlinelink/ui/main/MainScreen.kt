@@ -200,6 +200,10 @@ fun MainScreen(
     remember(preferences) {
       preferences.getString(KEY_AVATAR_NAME, null).orEmpty()
     }
+  val trustedDeviceIds =
+    remember(preferences) {
+      preferences.getStringSet(KEY_TRUSTED_DEVICE_IDS, emptySet()).orEmpty().toSet()
+    }
   val viewModel: MainScreenViewModel =
     viewModel {
       MainScreenViewModel(
@@ -210,6 +214,10 @@ fun MainScreen(
         defaultAvatarName = defaultAvatarName,
         historyRepository = historyRepository,
         payloadCache = payloadCache,
+        initialTrustedDeviceIds = trustedDeviceIds,
+        onTrustedDeviceIdsChanged = { ids ->
+          preferences.edit().putStringSet(KEY_TRUSTED_DEVICE_IDS, ids).apply()
+        },
       )
     }
   val voiceRecorder = remember(context) { VoiceRecorder(context.applicationContext) }
@@ -2250,6 +2258,7 @@ private const val KEY_DISPLAY_NAME = "display_name"
 private const val KEY_AVATAR_NAME = "avatar_name"
 private const val KEY_CALL_AUDIO_PROCESSING_MODE = "call_audio_processing_mode"
 private const val KEY_CALL_AUDIO_DIAGNOSTICS_ENABLED = "call_audio_diagnostics_enabled"
+private const val KEY_TRUSTED_DEVICE_IDS = "trusted_device_ids"
 
 @Preview(showBackground = true)
 @Composable

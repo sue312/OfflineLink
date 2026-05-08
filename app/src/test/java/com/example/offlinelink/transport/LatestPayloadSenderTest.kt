@@ -82,7 +82,11 @@ class LatestPayloadSenderTest {
     override fun startDiscovery() = Unit
     override fun stopAdvertising() = Unit
     override fun stopDiscovery() = Unit
-    override fun requestConnection(endpoint: NearbyEndpoint, displayName: String) = Unit
+    override fun requestConnection(
+      endpoint: NearbyEndpoint,
+      displayName: String,
+      deviceId: String,
+    ) = Unit
     override fun acceptConnection(endpointId: String) = Unit
     override fun rejectConnection(endpointId: String) = Unit
 

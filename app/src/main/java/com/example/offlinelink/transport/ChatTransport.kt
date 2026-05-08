@@ -18,7 +18,11 @@ interface ChatTransport {
 
   fun stopDiscovery()
 
-  fun requestConnection(endpoint: NearbyEndpoint, displayName: String)
+  fun requestConnection(
+    endpoint: NearbyEndpoint,
+    displayName: String,
+    deviceId: String,
+  )
 
   fun acceptConnection(endpointId: String)
 

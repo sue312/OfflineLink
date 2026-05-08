@@ -166,7 +166,11 @@ class PriorityPayloadSenderTest {
 
     override fun stopDiscovery() = Unit
 
-    override fun requestConnection(endpoint: NearbyEndpoint, displayName: String) = Unit
+    override fun requestConnection(
+      endpoint: NearbyEndpoint,
+      displayName: String,
+      deviceId: String,
+    ) = Unit
 
     override fun acceptConnection(endpointId: String) = Unit
 

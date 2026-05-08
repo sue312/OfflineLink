@@ -20,6 +20,7 @@ import com.example.offlinelink.model.GroupMemberStatus
 import com.example.offlinelink.model.MessageKind
 import com.example.offlinelink.model.MessageStatus
 import com.example.offlinelink.model.NearbyEndpoint
+import com.example.offlinelink.model.PendingConnection
 import com.example.offlinelink.protocol.ChatProtocol
 import com.example.offlinelink.protocol.DecodedWireMessage
 import com.example.offlinelink.protocol.WireMember
@@ -54,6 +55,8 @@ class MainScreenViewModel(
   defaultAvatarName: String = "",
   private val historyRepository: ChatHistoryRepository = NoOpChatHistoryRepository,
   private val payloadCache: PayloadCache,
+  initialTrustedDeviceIds: Set<String> = emptySet(),
+  private val onTrustedDeviceIdsChanged: (Set<String>) -> Unit = {},
 ) : ViewModel() {
   private val store = ChatSessionStore(localDeviceId = localDeviceId, payloadCache = payloadCache)
   private val payloadSender = PriorityPayloadSender(transport)
@@ -64,6 +67,7 @@ class MainScreenViewModel(
   private val recoveryConnectionAttempts = mutableSetOf<String>()
   private val handledCallVoiceClipIds = mutableSetOf<String>()
   private val retriedMessageEndpointIds = mutableMapOf<String, MutableSet<String>>()
+  private val trustedDeviceIds = initialTrustedDeviceIds.toMutableSet()
   private var nextCallAudioSequenceNumber = 0
   private var locationRequestJob: Job? = null
   private var pendingLocationResult: ((Result<Unit>) -> Unit)? = null
@@ -168,7 +172,7 @@ class MainScreenViewModel(
   }
 
   fun connectTo(endpoint: NearbyEndpoint) {
-    if (isConnectedToDifferentEndpoint(endpoint.id)) {
+    if (isConnectedToDifferentEndpoint(endpoint.id, endpoint.deviceId)) {
       store.restoreConnectedStatus()
       return
     }
@@ -178,27 +182,27 @@ class MainScreenViewModel(
     } else {
       store.restoreConnectedStatus()
     }
-    transport.requestConnection(endpoint, uiState.value.displayName)
+    transport.requestConnection(endpoint, uiState.value.displayName, uiState.value.localDeviceId)
   }
 
   fun acceptPendingConnection() {
     val pending = uiState.value.pendingConnection ?: return
-    if (isConnectedToDifferentEndpoint(pending.endpointId)) {
-      transport.rejectConnection(pending.endpointId)
-      store.setPendingConnection(null)
+    if (isConnectedToDifferentEndpoint(pending.endpointId, pending.deviceId)) {
+      rejectIncomingConnection(pending.endpointId)
       store.restoreConnectedStatus()
       return
     }
     recoveryMode = false
     recoveryConnectionAttempts.clear()
-    store.setStatus(ConnectionStatus.Connecting, "Accepting ${pending.endpointName}")
+    trustDevice(pending.deviceId)
+    store.setPendingConnection(null)
+    store.setStatus(ConnectionStatus.Connecting, "Connecting to ${pending.endpointName}")
     transport.acceptConnection(pending.endpointId)
   }
 
   fun rejectPendingConnection() {
     val pending = uiState.value.pendingConnection ?: return
-    transport.rejectConnection(pending.endpointId)
-    store.setPendingConnection(null)
+    rejectIncomingConnection(pending.endpointId)
     store.setStatus(ConnectionStatus.Idle, "Connection rejected")
   }
 
@@ -681,8 +685,28 @@ class MainScreenViewModel(
     throwable is LatestPayloadSender.StalePayloadDroppedException ||
       throwable is LatestPayloadSender.EndpointClearedException
 
-  private fun isConnectedToDifferentEndpoint(endpointId: String): Boolean =
-    uiState.value.connectedEndpoints.any { it.id != endpointId }
+  private fun normalizedDeviceId(deviceId: String?): String? =
+    deviceId?.trim()?.takeIf { it.isNotEmpty() }
+
+  private fun connectedEndpointForSameDevice(
+    endpointId: String,
+    deviceId: String?,
+  ): NearbyEndpoint? {
+    val stableDeviceId = normalizedDeviceId(deviceId) ?: return null
+    return uiState.value.connectedEndpoints.firstOrNull { endpoint ->
+      endpoint.id != endpointId && normalizedDeviceId(endpoint.deviceId) == stableDeviceId
+    }
+  }
+
+  private fun isConnectedToDifferentEndpoint(
+    endpointId: String,
+    deviceId: String? = null,
+  ): Boolean {
+    val connectedEndpoints = uiState.value.connectedEndpoints
+    if (connectedEndpoints.isEmpty()) return false
+    if (connectedEndpoints.any { it.id == endpointId }) return false
+    return connectedEndpointForSameDevice(endpointId, deviceId) == null
+  }
 
   private fun isFromNonPeer(endpointId: String): Boolean =
     uiState.value.connectedEndpoints.isNotEmpty() && uiState.value.connectedEndpoints.none { it.id == endpointId }
@@ -799,42 +823,25 @@ class MainScreenViewModel(
       }
       is TransportEvent.EndpointLost -> store.removeEndpoint(event.endpointId)
       is TransportEvent.ConnectionInitiated -> {
-        if (event.pendingConnection.deviceId == uiState.value.localDeviceId) {
-          transport.rejectConnection(event.pendingConnection.endpointId)
-          store.setPendingConnection(null)
-          return
-        }
-        if (isConnectedToDifferentEndpoint(event.pendingConnection.endpointId)) {
-          transport.rejectConnection(event.pendingConnection.endpointId)
-          store.setPendingConnection(null)
-          store.restoreConnectedStatus()
-          return
-        }
-        if (recoveryMode) {
-          if (!isExpectedRecoveryEndpoint(event.pendingConnection.endpointName, event.pendingConnection.deviceId)) {
-            transport.rejectConnection(event.pendingConnection.endpointId)
-            store.setPendingConnection(null)
-            return
-          }
-          store.setPendingConnection(null)
-          store.setStatus(ConnectionStatus.Connecting, "Rejoining ${event.pendingConnection.endpointName}")
-          transport.acceptConnection(event.pendingConnection.endpointId)
-        } else {
-          store.setPendingConnection(event.pendingConnection)
-          store.setStatus(ConnectionStatus.Connecting, "Confirm ${event.pendingConnection.endpointName}")
-        }
+        handleConnectionInitiated(event.pendingConnection)
       }
       is TransportEvent.Connected -> {
         if (event.endpoint.isLocalDevice()) {
           clearPayloadSenders(event.endpoint.id)
           return
         }
-        if (isConnectedToDifferentEndpoint(event.endpoint.id)) {
+        if (isConnectedToDifferentEndpoint(event.endpoint.id, event.endpoint.deviceId)) {
           transport.disconnectEndpoint(event.endpoint.id)
           clearPayloadSenders(event.endpoint.id)
           return
         }
+        connectedEndpointForSameDevice(event.endpoint.id, event.endpoint.deviceId)?.let { staleEndpoint ->
+          clearPayloadSenders(staleEndpoint.id)
+          endpointMemberIds.remove(staleEndpoint.id)
+          transport.disconnectEndpoint(staleEndpoint.id)
+        }
         lastPeerEndpoint = event.endpoint
+        trustDevice(event.endpoint.deviceId)
         recoveryMode = false
         recoveryConnectionAttempts.remove(event.endpoint.id)
         stopAdvertisingAndDiscovery()
@@ -1277,6 +1284,59 @@ class MainScreenViewModel(
   private fun forwardIncomingImageMessage(sourceEndpointId: String, message: DecodedWireMessage.ImageMessage) = Unit
 
   private fun forwardIncomingLocationMessage(sourceEndpointId: String, message: DecodedWireMessage.LocationMessage) = Unit
+
+  private fun handleConnectionInitiated(pendingConnection: PendingConnection) {
+    if (pendingConnection.deviceId == uiState.value.localDeviceId) {
+      rejectIncomingConnection(pendingConnection.endpointId)
+      return
+    }
+    if (isConnectedToDifferentEndpoint(pendingConnection.endpointId, pendingConnection.deviceId)) {
+      rejectIncomingConnection(pendingConnection.endpointId)
+      store.restoreConnectedStatus()
+      return
+    }
+    if (shouldAutoAcceptIncomingConnection(pendingConnection)) {
+      store.setPendingConnection(null)
+      store.setStatus(
+        ConnectionStatus.Connecting,
+        if (recoveryMode) "Rejoining ${pendingConnection.endpointName}" else "Connecting to ${pendingConnection.endpointName}",
+      )
+      trustDevice(pendingConnection.deviceId)
+      transport.acceptConnection(pendingConnection.endpointId)
+    } else if (uiState.value.isVisibleToNearby) {
+      store.setPendingConnection(pendingConnection)
+      store.setStatus(ConnectionStatus.Connecting, "Confirm ${pendingConnection.endpointName}")
+    } else {
+      rejectIncomingConnection(pendingConnection.endpointId)
+    }
+  }
+
+  private fun shouldAutoAcceptIncomingConnection(pendingConnection: PendingConnection): Boolean {
+    if (recoveryMode) {
+      return isExpectedRecoveryEndpoint(pendingConnection.endpointName, pendingConnection.deviceId)
+    }
+    val stableDeviceId = normalizedDeviceId(pendingConnection.deviceId)
+    if (stableDeviceId != null &&
+      trustedDeviceIds.contains(stableDeviceId) &&
+      connectedEndpointForSameDevice(pendingConnection.endpointId, pendingConnection.deviceId) != null
+    ) {
+      return true
+    }
+    return recoveryConnectionAttempts.contains(pendingConnection.endpointId) ||
+      (stableDeviceId != null && uiState.value.isVisibleToNearby && trustedDeviceIds.contains(stableDeviceId))
+  }
+
+  private fun rejectIncomingConnection(endpointId: String) {
+    transport.rejectConnection(endpointId)
+    store.setPendingConnection(null)
+  }
+
+  private fun trustDevice(deviceId: String?) {
+    val stableDeviceId = deviceId?.trim()?.takeIf { it.isNotEmpty() } ?: return
+    if (trustedDeviceIds.add(stableDeviceId)) {
+      onTrustedDeviceIdsChanged(trustedDeviceIds.toSet())
+    }
+  }
 
   private fun broadcastHello() {
     uiState.value.connectedEndpoints.forEach { endpoint ->
