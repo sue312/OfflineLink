@@ -44,8 +44,8 @@ class CallAudioCodecTest {
   }
 
   @Test
-  fun opusMimeTypeIsTreatedAsStreamingCallAudio() {
-    assertEquals(true, isStreamingCallAudioMimeType("audio/opus;rate=16000"))
+  fun amrWbMimeTypeIsTreatedAsStreamingCallAudio() {
+    assertEquals(true, isStreamingCallAudioMimeType("audio/amr-wb;rate=16000"))
   }
 
   private fun pcmFrame(vararg samples: Short): ByteArray {

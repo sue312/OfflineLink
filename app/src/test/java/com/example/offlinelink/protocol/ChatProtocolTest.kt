@@ -269,7 +269,7 @@ class ChatProtocolTest {
         targetId = "device-b",
         audioBytes = byteArrayOf(1, 2, 3, 4, 5),
         durationMs = 20L,
-        mimeType = "audio/opus;rate=16000",
+        mimeType = "audio/amr-wb;rate=16000",
         sequenceNumber = 42,
         createdAt = 1234L,
         sentAt = 5678L,
@@ -285,7 +285,7 @@ class ChatProtocolTest {
     assertEquals("device-b", frame.targetId)
     assertEquals(listOf(1, 2, 3, 4, 5), frame.audioBytes.map { it.toInt() })
     assertEquals(20L, frame.durationMs)
-    assertEquals("audio/opus;rate=16000", frame.mimeType)
+    assertEquals("audio/amr-wb;rate=16000", frame.mimeType)
     assertEquals(42, frame.sequenceNumber)
     assertEquals(1234L, frame.createdAt)
     assertEquals(5678L, frame.sentAt)
@@ -302,7 +302,7 @@ class ChatProtocolTest {
         targetId = "device-b",
         audioBytes = payload,
         durationMs = 20L,
-        mimeType = "audio/opus;rate=16000",
+        mimeType = "audio/amr-wb;rate=16000",
         sequenceNumber = 1,
         createdAt = 1234L,
         sentAt = 5678L,
@@ -315,7 +315,7 @@ class ChatProtocolTest {
         targetId = "device-b",
         audioBase64 = java.util.Base64.getEncoder().encodeToString(payload),
         durationMs = 20L,
-        mimeType = "audio/opus;rate=16000",
+        mimeType = "audio/amr-wb;rate=16000",
         createdAt = 1234L,
         sentAt = 5678L,
       )

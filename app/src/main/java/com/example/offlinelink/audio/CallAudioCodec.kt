@@ -51,21 +51,33 @@ class PcmCallAudioDecoder : CallAudioDecoder {
 
 class DefaultCallAudioDecoder : CallAudioDecoder {
   private val pcmDecoder = PcmCallAudioDecoder()
+  private var amrWbDecoder: CallAudioDecoder? = null
   private var opusDecoder: CallAudioDecoder? = null
 
   override fun decode(frame: CallAudioFrame): Result<PcmAudioFrame?> {
-    if (!frame.mimeType.startsWith("audio/opus", ignoreCase = true)) {
-      return pcmDecoder.decode(frame)
+    val mimeType = frame.mimeType.trim()
+    if (mimeType.startsWith("audio/amr-wb", ignoreCase = true)) {
+      val decoder =
+        amrWbDecoder
+          ?: MediaCodecAmrWbCallAudioDecoder.createOrNull()
+            ?.also { amrWbDecoder = it }
+          ?: return Result.failure(IllegalStateException("AMR-WB decoder is not available"))
+      return decoder.decode(frame)
     }
-    val decoder =
-      opusDecoder
-        ?: MediaCodecOpusCallAudioDecoder.createOrNull()
-          ?.also { opusDecoder = it }
-        ?: return Result.failure(IllegalStateException("Opus decoder is not available"))
-    return decoder.decode(frame)
+    if (mimeType.startsWith("audio/opus", ignoreCase = true)) {
+      val decoder =
+        opusDecoder
+          ?: MediaCodecOpusCallAudioDecoder.createOrNull()
+            ?.also { opusDecoder = it }
+          ?: return Result.failure(IllegalStateException("Opus decoder is not available"))
+      return decoder.decode(frame)
+    }
+    return pcmDecoder.decode(frame)
   }
 
   override fun close() {
+    amrWbDecoder?.close()
+    amrWbDecoder = null
     opusDecoder?.close()
     opusDecoder = null
   }
@@ -73,7 +85,7 @@ class DefaultCallAudioDecoder : CallAudioDecoder {
 
 object CallAudioCodecFactory {
   fun createEncoder(): CallAudioEncoder =
-    MediaCodecOpusCallAudioEncoder.createOrNull() ?: PcmCallAudioEncoder()
+    MediaCodecAmrWbCallAudioEncoder.createOrNull() ?: PcmCallAudioEncoder()
 
   fun createDecoder(): CallAudioDecoder = DefaultCallAudioDecoder()
 }

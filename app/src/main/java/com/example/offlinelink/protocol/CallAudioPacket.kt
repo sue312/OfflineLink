@@ -22,6 +22,7 @@ object CallAudioPacketCodec {
   private const val VERSION = 1
   private const val CODEC_PCM16 = 1
   private const val CODEC_OPUS = 2
+  private const val CODEC_AMR_WB = 3
   private const val NULL_STRING_LENGTH = 0xffff
 
   fun isCallAudioPacket(bytes: ByteArray): Boolean {
@@ -106,6 +107,7 @@ object CallAudioPacketCodec {
 
   private fun codecId(mimeType: String): Int =
     when {
+      mimeType.startsWith("audio/amr-wb", ignoreCase = true) -> CODEC_AMR_WB
       mimeType.startsWith("audio/opus", ignoreCase = true) -> CODEC_OPUS
       mimeType.startsWith("audio/pcm", ignoreCase = true) -> CODEC_PCM16
       else -> 0

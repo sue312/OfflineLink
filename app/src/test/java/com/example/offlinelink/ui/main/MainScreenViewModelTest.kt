@@ -1615,7 +1615,7 @@ class MainScreenViewModelTest {
     viewModel.sendCallVoiceMessage(
       audioBytes = byteArrayOf(1, 2, 3, 4),
       durationMs = 40L,
-      mimeType = "audio/pcm;rate=8000;encoding=pcm16",
+      mimeType = "audio/amr-wb;rate=16000",
     )
 
     assertEquals(emptyList<com.example.offlinelink.model.ChatMessage>(), viewModel.uiState.value.messages)
@@ -1623,7 +1623,7 @@ class MainScreenViewModelTest {
     assertEquals(listOf("endpoint-b"), transport.sentPayloads.map { it.endpointId })
     val callAudio = ChatProtocol.decode(transport.sentPayloads.single().bytes) as DecodedWireMessage.CallAudioFrame
     assertEquals("call-1", callAudio.callId)
-    assertEquals("audio/pcm;rate=8000;encoding=pcm16", callAudio.mimeType)
+    assertEquals("audio/amr-wb;rate=16000", callAudio.mimeType)
     assertEquals(40L, callAudio.durationMs)
     assertEquals(listOf(1, 2, 3, 4), callAudio.audioBytes.map { it.toInt() })
   }
@@ -1650,7 +1650,7 @@ class MainScreenViewModelTest {
     viewModel.sendCallVoiceMessage(
       audioBytes = byteArrayOf(1, 2, 3, 4),
       durationMs = 40L,
-      mimeType = "audio/pcm;rate=8000;encoding=pcm16",
+      mimeType = "audio/amr-wb;rate=16000",
     )
 
     assertTrue(
@@ -1780,7 +1780,7 @@ class MainScreenViewModelTest {
             senderId = "device-b",
             audioBytes = byteArrayOf(1, 2, 3, 4),
             durationMs = 20L,
-            mimeType = "audio/opus;rate=16000",
+            mimeType = "audio/amr-wb;rate=16000",
             sequenceNumber = 7,
             createdAt = 2000L,
           ),
@@ -1795,7 +1795,7 @@ class MainScreenViewModelTest {
     val playback = playbackFrames.single()
     assertEquals("frame-1", playback.frameId)
     assertEquals(listOf(1, 2, 3, 4), playback.audioBytes.map { it.toInt() })
-    assertEquals("audio/opus;rate=16000", playback.mimeType)
+    assertEquals("audio/amr-wb;rate=16000", playback.mimeType)
     assertEquals(20L, playback.durationMs)
   }
 
