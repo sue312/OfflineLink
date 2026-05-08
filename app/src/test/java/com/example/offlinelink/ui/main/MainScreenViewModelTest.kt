@@ -59,14 +59,50 @@ class MainScreenViewModelTest {
   }
 
   @Test
-  fun startDiscoveryAlsoAdvertisesForFasterPairing() = runTest {
+  fun startDiscoveryDoesNotAdvertiseWhenVisibilityIsOff() = runTest {
     val transport = FakeChatTransport()
     val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) }, payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads")), localDeviceId = "local")
 
     viewModel.startDiscovery()
 
     assertTrue(transport.discoveryStarted)
+    assertEquals(false, transport.advertisingStarted)
+    assertEquals(false, viewModel.uiState.value.isVisibleToNearby)
+  }
+
+  @Test
+  fun visibleToggleControlsAdvertisingWithoutDiscovery() = runTest {
+    val transport = FakeChatTransport()
+    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) }, payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads")), localDeviceId = "local")
+
+    viewModel.setVisibleToNearby(true)
+
+    assertEquals(true, viewModel.uiState.value.isVisibleToNearby)
+    assertEquals(ConnectionStatus.Advertising, viewModel.uiState.value.status)
     assertTrue(transport.advertisingStarted)
+    assertEquals(false, transport.discoveryStarted)
+
+    viewModel.setVisibleToNearby(false)
+
+    assertEquals(false, viewModel.uiState.value.isVisibleToNearby)
+    assertTrue(transport.advertisingStopped)
+    assertEquals(ConnectionStatus.Idle, viewModel.uiState.value.status)
+  }
+
+  @Test
+  fun searchWhileVisibleKeepsAdvertisingAndStartsDiscoveryOnly() = runTest {
+    val transport = FakeChatTransport()
+    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) }, payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads")), localDeviceId = "local")
+
+    viewModel.setVisibleToNearby(true)
+    transport.clearDiscoveryState()
+
+    viewModel.startDiscovery()
+
+    assertEquals(true, viewModel.uiState.value.isVisibleToNearby)
+    assertTrue(transport.discoveryStarted)
+    assertEquals(0, transport.advertisingStartCount)
+    assertEquals(false, transport.advertisingStopped)
   }
 
   @Test
@@ -321,7 +357,7 @@ class MainScreenViewModelTest {
     transport.emit(TransportEvent.Disconnected("endpoint-a"))
     advanceUntilIdle()
 
-    assertTrue(transport.advertisingStarted)
+    assertEquals(false, transport.advertisingStarted)
     assertTrue(transport.discoveryStarted)
     assertEquals(ConnectionStatus.Discovering, viewModel.uiState.value.status)
     assertEquals(emptyList<GroupMember>(), viewModel.uiState.value.groupMembers)
@@ -358,7 +394,7 @@ class MainScreenViewModelTest {
     transport.emit(TransportEvent.EndpointFound(NearbyEndpoint("endpoint-b", "Phone B")))
     advanceUntilIdle()
 
-    assertTrue(transport.advertisingStarted)
+    assertEquals(false, transport.advertisingStarted)
     assertTrue(transport.discoveryStarted)
     assertEquals(ConnectionStatus.Discovering, viewModel.uiState.value.status)
     assertEquals(emptyList<NearbyEndpoint>(), transport.requestedConnections)
@@ -414,7 +450,7 @@ class MainScreenViewModelTest {
     advanceUntilIdle()
 
     assertEquals(emptyList<GroupMember>(), viewModel.uiState.value.groupMembers)
-    assertTrue(transport.advertisingStarted)
+    assertEquals(false, transport.advertisingStarted)
     assertTrue(transport.discoveryStarted)
     assertEquals(ConnectionStatus.Discovering, viewModel.uiState.value.status)
   }
@@ -453,7 +489,7 @@ class MainScreenViewModelTest {
 
     assertEquals(ConnectionStatus.Discovering, viewModel.uiState.value.status)
     assertEquals(emptyList<GroupMember>(), viewModel.uiState.value.groupMembers)
-    assertTrue(transport.advertisingStarted)
+    assertEquals(false, transport.advertisingStarted)
     assertTrue(transport.discoveryStarted)
   }
 
@@ -2011,6 +2047,8 @@ private class FakeChatTransport(
   }
 
   fun clearDiscoveryState() {
+    advertisingStarted = false
+    advertisingStartCount = 0
     discoveryStarted = false
     discoveryStartCount = 0
     advertisingStopped = false

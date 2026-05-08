@@ -102,15 +102,32 @@ class MainScreenViewModel(
   }
 
   fun startAdvertising() {
+    setVisibleToNearby(true)
+  }
+
+  fun setVisibleToNearby(isVisible: Boolean) {
     if (uiState.value.connectedEndpoints.isNotEmpty()) {
+      if (!isVisible) {
+        store.setVisibleToNearby(false)
+      }
       store.restoreConnectedStatus()
       return
     }
-    lastPeerEndpoint = null
     recoveryMode = false
     recoveryConnectionAttempts.clear()
-    store.setStatus(ConnectionStatus.Advertising, "Visible and searching as ${uiState.value.displayName}")
-    startAdvertisingAndDiscovery()
+    store.setVisibleToNearby(isVisible)
+    if (isVisible) {
+      lastPeerEndpoint = null
+      if (uiState.value.status != ConnectionStatus.Discovering) {
+        store.setStatus(ConnectionStatus.Advertising, "Visible to nearby devices")
+      }
+      transport.startAdvertising(uiState.value.displayName, uiState.value.localDeviceId)
+    } else {
+      transport.stopAdvertising()
+      if (uiState.value.status == ConnectionStatus.Advertising) {
+        store.setStatus(ConnectionStatus.Idle, "Ready")
+      }
+    }
   }
 
   fun startDiscovery() {
@@ -123,11 +140,10 @@ class MainScreenViewModel(
     if (uiState.value.connectedEndpoints.isEmpty()) {
       lastPeerEndpoint = null
       endpointMemberIds.clear()
-      store.clearConnectedEndpoints()
       store.setDiscoveredEndpoints(emptyList())
-      store.setStatus(ConnectionStatus.Discovering, "Visible and searching nearby devices")
+      store.setStatus(ConnectionStatus.Discovering, "Searching nearby devices")
     }
-    startAdvertisingAndDiscovery()
+    transport.startDiscovery()
   }
 
   fun recoverGroup() {
@@ -1268,7 +1284,10 @@ class MainScreenViewModel(
     recoveryConnectionAttempts.clear()
     store.setStatus(ConnectionStatus.Discovering, "Reconnecting $memberName")
     store.setDiscoveredEndpoints(emptyList())
-    startAdvertisingAndDiscovery()
+    if (uiState.value.isVisibleToNearby) {
+      transport.startAdvertising(uiState.value.displayName, uiState.value.localDeviceId)
+    }
+    transport.startDiscovery()
   }
 
   private fun maybeConnectToRecoveryEndpoint(endpoint: NearbyEndpoint) {
@@ -1301,11 +1320,6 @@ class MainScreenViewModel(
 
   private fun TransportEvent.OperationFailed.isConnectionAttemptFailure(): Boolean =
     message.startsWith("Could not request connection") || message.startsWith("Connection failed")
-
-  private fun startAdvertisingAndDiscovery() {
-    transport.startAdvertising(uiState.value.displayName, uiState.value.localDeviceId)
-    transport.startDiscovery()
-  }
 
   private fun stopAdvertisingAndDiscovery() {
     transport.stopAdvertising()

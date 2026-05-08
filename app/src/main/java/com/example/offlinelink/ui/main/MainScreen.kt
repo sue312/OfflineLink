@@ -88,6 +88,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -282,6 +283,7 @@ fun MainScreen(
       viewModel.setAvatarName(avatarName)
     },
     onDiscover = viewModel::startDiscovery,
+    onVisibleToNearbyChange = viewModel::setVisibleToNearby,
     onConnect = viewModel::connectTo,
     onAccept = viewModel::acceptPendingConnection,
     onReject = viewModel::rejectPendingConnection,
@@ -349,6 +351,7 @@ private fun OfflineChatContent(
   onDisplayNameChange: (String) -> Unit,
   onAvatarNameChange: (String) -> Unit,
   onDiscover: () -> Unit,
+  onVisibleToNearbyChange: (Boolean) -> Unit,
   onConnect: (NearbyEndpoint) -> Unit,
   onAccept: () -> Unit,
   onReject: () -> Unit,
@@ -499,6 +502,7 @@ private fun OfflineChatContent(
           expanded = isSetupExpanded,
           onToggle = { isSetupExpanded = !isSetupExpanded },
           onDiscover = onDiscover,
+          onVisibleToNearbyChange = onVisibleToNearbyChange,
           onDisconnect = onDisconnect,
           onStartCall = onStartCall,
           onConnect = onConnect,
@@ -995,6 +999,7 @@ private fun SetupDisclosure(
   expanded: Boolean,
   onToggle: () -> Unit,
   onDiscover: () -> Unit,
+  onVisibleToNearbyChange: (Boolean) -> Unit,
   onDisconnect: () -> Unit,
   onStartCall: (String?) -> Unit,
   onConnect: (NearbyEndpoint) -> Unit,
@@ -1018,6 +1023,7 @@ private fun SetupDisclosure(
           ConnectionConsole(
             state = state,
             onDiscover = onDiscover,
+            onVisibleToNearbyChange = onVisibleToNearbyChange,
           )
           if (state.connectedEndpoints.isNotEmpty() || state.groupMembers.isNotEmpty()) {
             MembersPanel(state = state)
@@ -1088,6 +1094,7 @@ private fun SetupToggleHeader(
 private fun ConnectionConsole(
   state: ChatUiState,
   onDiscover: () -> Unit,
+  onVisibleToNearbyChange: (Boolean) -> Unit,
 ) {
   Surface(
     color = MaterialTheme.colorScheme.surface,
@@ -1107,6 +1114,22 @@ private fun ConnectionConsole(
         }
       }
 
+      Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+      ) {
+        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(1.dp)) {
+          Text("Visible", style = MaterialTheme.typography.labelLarge)
+          Text(connectionVisibilityLabel(state.isVisibleToNearby), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        Switch(
+          checked = state.isVisibleToNearby,
+          onCheckedChange = onVisibleToNearbyChange,
+          enabled = connectionVisibilityEnabled(state.status),
+        )
+      }
+
       connectionSetupActionLabels(state.status).forEach { label ->
         if (label == "Search") {
           ConnectionActionButton(
@@ -1114,7 +1137,7 @@ private fun ConnectionConsole(
             label = label,
             onClick = onDiscover,
             enabled = state.status != ConnectionStatus.Connected,
-            selected = state.status == ConnectionStatus.Advertising || state.status == ConnectionStatus.Discovering,
+            selected = state.status == ConnectionStatus.Discovering,
             modifier = Modifier.fillMaxWidth(),
           )
         }
@@ -2118,6 +2141,12 @@ internal fun defaultSetupExpanded(messageCount: Int): Boolean = messageCount == 
 internal fun connectionSetupActionLabels(status: ConnectionStatus): List<String> =
   if (status == ConnectionStatus.Connected) emptyList() else listOf("Search")
 
+internal fun connectionVisibilityLabel(isVisible: Boolean): String =
+  if (isVisible) "Visible" else "Hidden"
+
+internal fun connectionVisibilityEnabled(status: ConnectionStatus): Boolean =
+  status != ConnectionStatus.Connected && status != ConnectionStatus.Connecting
+
 internal fun connectionSetupFieldLabels(status: ConnectionStatus): List<String> =
   emptyList()
 
@@ -2125,7 +2154,7 @@ internal fun connectionRecoveryActionLabels(state: ChatUiState): List<String> =
   emptyList()
 
 internal fun nearbyEmptyStateText(): String =
-  "No devices found yet. Keep this screen open while another phone taps Search."
+  "No visible devices nearby."
 
 internal fun connectedSummarySubtitle(state: ChatUiState): String =
   state.connectedEndpoints.firstOrNull()?.name ?: state.groupMembers.firstOrNull()?.displayName ?: "Peer"
@@ -2200,7 +2229,7 @@ private fun bluetoothStatusLabel(context: Context): String =
 private fun ConnectionStatus.label(): String =
   when (this) {
     ConnectionStatus.Idle -> "Ready"
-    ConnectionStatus.Advertising -> "Searching"
+    ConnectionStatus.Advertising -> "Visible"
     ConnectionStatus.Discovering -> "Searching"
     ConnectionStatus.Connecting -> "Pairing"
     ConnectionStatus.Connected -> "Online"
@@ -2335,6 +2364,7 @@ private fun OfflineChatContentPreview() {
       onDisplayNameChange = {},
       onAvatarNameChange = {},
       onDiscover = {},
+      onVisibleToNearbyChange = {},
       onConnect = {},
       onAccept = {},
       onReject = {},

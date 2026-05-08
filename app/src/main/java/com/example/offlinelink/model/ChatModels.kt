@@ -136,6 +136,7 @@ data class ChatUiState(
   val groupName: String = "Offline group",
   val status: ConnectionStatus = ConnectionStatus.Idle,
   val statusMessage: String = "Ready",
+  val isVisibleToNearby: Boolean = false,
   val discoveredEndpoints: List<NearbyEndpoint> = emptyList(),
   val pendingConnection: PendingConnection? = null,
   val connectedEndpoints: List<NearbyEndpoint> = emptyList(),

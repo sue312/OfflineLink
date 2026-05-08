@@ -54,6 +54,15 @@ class MessageStatusLabelTest {
   }
 
   @Test
+  fun visibilityToggleReflectsDiscoverableState() {
+    assertEquals("Hidden", connectionVisibilityLabel(isVisible = false))
+    assertEquals("Visible", connectionVisibilityLabel(isVisible = true))
+    assertEquals(true, connectionVisibilityEnabled(ConnectionStatus.Idle))
+    assertEquals(true, connectionVisibilityEnabled(ConnectionStatus.Discovering))
+    assertEquals(false, connectionVisibilityEnabled(ConnectionStatus.Connected))
+  }
+
+  @Test
   fun disconnectedSetupDoesNotExposeNameFields() {
     assertEquals(emptyList<String>(), connectionSetupFieldLabels(ConnectionStatus.Idle))
     assertEquals(emptyList<String>(), connectionSetupFieldLabels(ConnectionStatus.Discovering))
@@ -84,9 +93,9 @@ class MessageStatusLabelTest {
   }
 
   @Test
-  fun searchEmptyStateDoesNotMentionVisibleMode() {
+  fun searchEmptyStateMentionsOnlyVisibleDevices() {
     assertEquals(
-      "No devices found yet. Keep this screen open while another phone taps Search.",
+      "No visible devices nearby.",
       nearbyEmptyStateText(),
     )
   }

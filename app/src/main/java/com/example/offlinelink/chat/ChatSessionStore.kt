@@ -49,6 +49,10 @@ class ChatSessionStore(
     mutableState.value = mutableState.value.copy(status = status, statusMessage = message, lastError = error)
   }
 
+  fun setVisibleToNearby(isVisible: Boolean) {
+    mutableState.value = mutableState.value.copy(isVisibleToNearby = isVisible)
+  }
+
   fun restoreConnectedStatus(error: String? = null) {
     val current = mutableState.value
     if (current.connectedEndpoints.isEmpty()) return
@@ -83,6 +87,7 @@ class ChatSessionStore(
       current.copy(
         connectedEndpoints = connectedEndpoints,
         groupMembers = listOf(GroupMember(endpoint.id, endpoint.name, GroupMemberStatus.Online)),
+        isVisibleToNearby = false,
         pendingConnection = null,
         discoveredEndpoints = emptyList(),
         status = ConnectionStatus.Connected,
@@ -202,6 +207,7 @@ class ChatSessionStore(
         mutableState.value.copy(
           connectedEndpoints = listOf(endpoint),
           groupMembers = listOf(GroupMember(endpoint.id, endpoint.name, GroupMemberStatus.Online)),
+          isVisibleToNearby = false,
           pendingConnection = null,
           discoveredEndpoints = emptyList(),
           status = ConnectionStatus.Connected,
@@ -215,6 +221,7 @@ class ChatSessionStore(
       mutableState.value.copy(
         connectedEndpoints = emptyList(),
         groupMembers = emptyList(),
+        isVisibleToNearby = false,
         pendingConnection = null,
         status = ConnectionStatus.Disconnected,
         statusMessage = "Disconnected",
