@@ -20,17 +20,12 @@ import android.os.Process
 import androidx.core.content.ContextCompat
 import java.util.concurrent.atomic.AtomicBoolean
 
-data class CallAudioFrame(
-  val bytes: ByteArray,
-  val durationMs: Long = CALL_AUDIO_FRAME_DURATION_MS.toLong(),
-  val mimeType: String = CALL_AUDIO_MIME_TYPE,
-)
-
 class CallAudioStream(context: Context) {
   private val appContext = context.applicationContext
   private val audioManager = appContext.getSystemService(AudioManager::class.java)
   private val lock = Any()
   private val running = AtomicBoolean(false)
+  private val noiseGate = CallAudioNoiseGate()
   private var audioRecord: AudioRecord? = null
   private var audioTrack: AudioTrack? = null
   private var audioEffects: List<AudioEffect> = emptyList()
@@ -72,6 +67,7 @@ class CallAudioStream(context: Context) {
           audioTrack = track
           configureAudioMode()
           audioEffects = createVoiceEffects(record)
+          noiseGate.reset()
           running.set(true)
           started = true
           track.play()
@@ -166,12 +162,14 @@ class CallAudioStream(context: Context) {
     onFrame: (CallAudioFrame) -> Unit,
   ) {
     runCatching { Process.setThreadPriority(Process.THREAD_PRIORITY_AUDIO) }
-    val buffer = ByteArray(FRAME_BYTES)
+    val buffer = ByteArray(CALL_AUDIO_FRAME_BYTES)
     while (running.get()) {
       val read = record.read(buffer, 0, buffer.size, AudioRecord.READ_BLOCKING)
       if (read > 0) {
         runCatching {
-          if (!muted) {
+          if (muted) {
+            noiseGate.reset()
+          } else if (noiseGate.shouldTransmit(buffer, read)) {
             onFrame(CallAudioFrame(bytes = buffer.copyOf(read)))
           }
         }
@@ -186,7 +184,7 @@ class CallAudioStream(context: Context) {
         CALL_AUDIO_SAMPLE_RATE_HZ,
         AudioFormat.CHANNEL_IN_MONO,
         AudioFormat.ENCODING_PCM_16BIT,
-      ).coerceAtLeast(FRAME_BYTES * 4)
+      ).coerceAtLeast(CALL_AUDIO_FRAME_BYTES * 4)
     val record =
       AudioRecord(
         MediaRecorder.AudioSource.VOICE_COMMUNICATION,
@@ -205,7 +203,7 @@ class CallAudioStream(context: Context) {
         CALL_AUDIO_SAMPLE_RATE_HZ,
         AudioFormat.CHANNEL_OUT_MONO,
         AudioFormat.ENCODING_PCM_16BIT,
-      ).coerceAtLeast(FRAME_BYTES * 8)
+      ).coerceAtLeast(CALL_AUDIO_FRAME_BYTES * 4)
     val track =
       AudioTrack.Builder()
         .setAudioAttributes(
@@ -353,8 +351,6 @@ class CallAudioStream(context: Context) {
   }
 
   private companion object {
-    private const val BYTES_PER_SAMPLE = 2
-    private const val FRAME_BYTES = CALL_AUDIO_SAMPLE_RATE_HZ * BYTES_PER_SAMPLE * CALL_AUDIO_FRAME_DURATION_MS / 1_000
     private const val STOP_JOIN_TIMEOUT_MS = 250L
   }
 }

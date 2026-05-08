@@ -24,6 +24,7 @@ import com.example.offlinelink.protocol.ChatProtocol
 import com.example.offlinelink.protocol.DecodedWireMessage
 import com.example.offlinelink.protocol.WireMember
 import com.example.offlinelink.transport.ChatTransport
+import com.example.offlinelink.transport.LatestPayloadSender
 import com.example.offlinelink.transport.PriorityPayloadSender
 import com.example.offlinelink.transport.PriorityPayloadSender.PayloadPriority
 import com.example.offlinelink.transport.TransportEvent
@@ -52,6 +53,7 @@ class MainScreenViewModel(
 ) : ViewModel() {
   private val store = ChatSessionStore(localDeviceId = localDeviceId, payloadCache = payloadCache)
   private val payloadSender = PriorityPayloadSender(transport)
+  private val liveAudioSender = LatestPayloadSender(transport)
   private val endpointMemberIds = mutableMapOf<String, String>()
   private var recoveryMode = false
   private val recoveryConnectionAttempts = mutableSetOf<String>()
@@ -236,7 +238,7 @@ class MainScreenViewModel(
     sendPayload(endpoint.id, bytes, callVoicePriority(mimeType)) { result ->
       if (result.isSuccess) {
         store.setCallActivity(if (isStreamingCallAudioMimeType(mimeType)) "Live voice" else "Voice sent")
-      } else {
+      } else if (!isExpectedLiveAudioDrop(result.exceptionOrNull())) {
         store.setStatus(ConnectionStatus.Error, "Call voice failed", result.exceptionOrNull()?.message)
       }
     }
@@ -458,7 +460,7 @@ class MainScreenViewModel(
       sendPayload(endpoint.id, ChatProtocol.encodeDisconnect("User disconnected"), PayloadPriority.Control) { }
     }
     transport.stopAll()
-    endpoints.forEach { payloadSender.clearEndpoint(it.id) }
+    endpoints.forEach { clearPayloadSenders(it.id) }
     recoveryMode = false
     recoveryConnectionAttempts.clear()
     endpointMemberIds.clear()
@@ -553,11 +555,20 @@ class MainScreenViewModel(
     onResult: (Result<Unit>) -> Unit = {},
   ) {
     if (priority == PayloadPriority.CallAudio) {
-      transport.send(endpointId, bytes, onResult)
+      liveAudioSender.send(endpointId, bytes, onResult)
       return
     }
     payloadSender.enqueue(endpointId = endpointId, bytes = bytes, priority = priority, onResult = onResult)
   }
+
+  private fun clearPayloadSenders(endpointId: String) {
+    payloadSender.clearEndpoint(endpointId)
+    liveAudioSender.clearEndpoint(endpointId)
+  }
+
+  private fun isExpectedLiveAudioDrop(throwable: Throwable?): Boolean =
+    throwable is LatestPayloadSender.StalePayloadDroppedException ||
+      throwable is LatestPayloadSender.EndpointClearedException
 
   private fun messagePriority(kind: MessageKind): PayloadPriority =
     when (kind) {
@@ -688,7 +699,7 @@ class MainScreenViewModel(
       }
       is TransportEvent.Connected -> {
         if (event.endpoint.isLocalDevice()) {
-          payloadSender.clearEndpoint(event.endpoint.id)
+          clearPayloadSenders(event.endpoint.id)
           return
         }
         recoveryMode = false
@@ -1190,7 +1201,7 @@ class MainScreenViewModel(
     endpointId: String,
     shouldReconnect: Boolean = true,
   ) {
-    payloadSender.clearEndpoint(endpointId)
+    clearPayloadSenders(endpointId)
     val stateBeforeRemoval = uiState.value
     val wasConnected = stateBeforeRemoval.connectedEndpoints.any { it.id == endpointId }
     val mappedMemberId = endpointMemberIds.remove(endpointId)
