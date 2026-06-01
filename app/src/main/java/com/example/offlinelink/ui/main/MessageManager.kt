@@ -313,10 +313,11 @@ internal fun MainScreenViewModel.handleIncomingBytes(endpointId: String, bytes: 
     }
     is DecodedWireMessage.Message -> {
       ensureEndpointConnected(endpointId)
+      val conversationId = ensureConversationForIncoming(endpointId, decoded.senderId)
       val wasNewMessage =
         store.receiveRemoteMessage(
           messageId = decoded.messageId,
-          conversationId = decoded.conversationId,
+          conversationId = conversationId,
           senderId = decoded.senderId,
           text = decoded.text,
           createdAt = decoded.createdAt,
@@ -339,10 +340,11 @@ internal fun MainScreenViewModel.handleIncomingBytes(endpointId: String, bytes: 
     }
     is DecodedWireMessage.LocationMessage -> {
       ensureEndpointConnected(endpointId)
+      val conversationId = ensureConversationForIncoming(endpointId, decoded.senderId)
       val wasNewMessage =
         store.receiveRemoteLocationMessage(
           messageId = decoded.messageId,
-          conversationId = decoded.conversationId,
+          conversationId = conversationId,
           senderId = decoded.senderId,
           latitude = decoded.latitude,
           longitude = decoded.longitude,
@@ -425,10 +427,11 @@ internal fun MainScreenViewModel.handleIncomingVoiceMessage(
       },
     ) ?: return
   val payloadKey = payloadCache.put(payloadBytes)
+  val conversationId = ensureConversationForIncoming(endpointId, message.senderId)
   val wasNewMessage =
     store.receiveRemoteVoiceMessage(
       messageId = message.messageId,
-      conversationId = message.conversationId,
+      conversationId = conversationId,
       senderId = message.senderId,
       payloadKey = payloadKey,
       durationMs = message.durationMs,
@@ -455,10 +458,11 @@ internal fun MainScreenViewModel.handleIncomingImageMessage(
       },
     ) ?: return
   val payloadKey = payloadCache.put(payloadBytes)
+  val conversationId = ensureConversationForIncoming(endpointId, message.senderId)
   val wasNewMessage =
     store.receiveRemoteImageMessage(
       messageId = message.messageId,
-      conversationId = message.conversationId,
+      conversationId = conversationId,
       senderId = message.senderId,
       payloadKey = payloadKey,
       mimeType = message.mimeType,

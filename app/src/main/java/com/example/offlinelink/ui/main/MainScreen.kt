@@ -142,7 +142,6 @@ import com.example.offlinelink.audio.RecordedVoiceClip
 import com.example.offlinelink.audio.VoicePlayer
 import com.example.offlinelink.audio.VoiceRecorder
 import com.example.offlinelink.audio.initialCallAudioProcessingMode
-import com.example.offlinelink.crypto.EncryptedChatTransport
 import com.example.offlinelink.data.JsonChatHistoryRepository
 import com.example.offlinelink.data.PayloadCache
 import com.example.offlinelink.image.ImageCompressor
@@ -163,8 +162,9 @@ import com.example.offlinelink.model.callToneModeFor
 import com.example.offlinelink.permissions.requiredBluetoothRuntimePermissions
 import com.example.offlinelink.service.OfflineKeepAliveService
 import com.example.offlinelink.theme.MyApplicationTheme
-import com.example.offlinelink.transport.BluetoothChatTransport
+import com.example.offlinelink.offlineLinkSession
 import java.io.File
+import java.util.UUID
 import kotlin.io.encoding.Base64
 import kotlin.io.encoding.ExperimentalEncodingApi
 import kotlinx.coroutines.Dispatchers
@@ -183,6 +183,7 @@ fun MainScreen(
   modifier: Modifier = Modifier,
 ) {
   val context = LocalContext.current
+  val appSession = remember(context.applicationContext) { context.applicationContext.offlineLinkSession }
   val locationHelper = remember(context) { LocationHelper(context.applicationContext) }
   val contentResolver = context.applicationContext.contentResolver
   val historyRepository =
@@ -204,14 +205,24 @@ fun MainScreen(
     remember(preferences) {
       preferences.getStringSet(KEY_TRUSTED_DEVICE_IDS, emptySet()).orEmpty().toSet()
     }
+  val localDeviceId =
+    remember(preferences) {
+      preferences.getString(KEY_LOCAL_DEVICE_ID, null)
+        ?.trim()
+        ?.takeIf { it.isNotEmpty() }
+        ?: UUID.randomUUID().toString().also { generatedId ->
+          preferences.edit().putString(KEY_LOCAL_DEVICE_ID, generatedId).apply()
+        }
+    }
   val viewModel: MainScreenViewModel =
     viewModel {
       MainScreenViewModel(
-        EncryptedChatTransport(BluetoothChatTransport(context.applicationContext)),
+        appSession.transport,
         locationHelper::currentLocation,
         { uri -> ImageCompressor.compress(contentResolver, uri) },
         defaultDisplayName = defaultDisplayName,
         defaultAvatarName = defaultAvatarName,
+        localDeviceId = localDeviceId,
         historyRepository = historyRepository,
         payloadCache = payloadCache,
         initialTrustedDeviceIds = trustedDeviceIds,
@@ -276,12 +287,6 @@ fun MainScreen(
       runCatching { OfflineKeepAliveService.stop(context.applicationContext) }
     }
   }
-  DisposableEffect(context) {
-    onDispose {
-      runCatching { OfflineKeepAliveService.stop(context.applicationContext) }
-    }
-  }
-
   androidx.compose.runtime.CompositionLocalProvider(LocalPayloadCache provides payloadCache) {
     OfflineChatContent(
     state = state,
@@ -673,6 +678,7 @@ private const val KEY_CALL_AUDIO_PROCESSING_MODE = "call_audio_processing_mode"
 private const val KEY_CALL_AUDIO_PROCESSING_MODE_USER_SELECTED = "call_audio_processing_mode_user_selected"
 private const val KEY_CALL_AUDIO_DIAGNOSTICS_ENABLED = "call_audio_diagnostics_enabled"
 private const val KEY_TRUSTED_DEVICE_IDS = "trusted_device_ids"
+private const val KEY_LOCAL_DEVICE_ID = "local_device_id"
 
 @Preview(showBackground = true)
 @Composable

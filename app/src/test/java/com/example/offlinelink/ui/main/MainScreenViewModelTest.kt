@@ -62,6 +62,16 @@ class MainScreenViewModelTest {
   }
 
   @Test
+  fun clearingViewModelDoesNotStopApplicationScopedTransport() = runTest {
+    val transport = FakeChatTransport()
+    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) }, payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads")), localDeviceId = "local")
+
+    viewModel.clearForTest()
+
+    assertEquals(0, transport.stopAllCount)
+  }
+
+  @Test
   fun startDiscoveryDoesNotAdvertiseWhenVisibilityIsOff() = runTest {
     val transport = FakeChatTransport()
     val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) }, payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads")), localDeviceId = "local")
@@ -431,24 +441,50 @@ class MainScreenViewModelTest {
   }
 
   @Test
-  fun initLoadsPersistedMessagesIntoUiState() = runTest {
+  fun initKeepsPersistedMessagesHiddenUntilCorrespondingPeerConnects() = runTest {
     val persisted =
       listOf(
         ChatMessage(
           id = "msg-1",
-          conversationId = "one-to-one",
+          conversationId = "device-b",
           senderId = "local",
-          text = "saved",
+          text = "saved for b",
           createdAt = 1000L,
+          status = MessageStatus.Received,
+          isLocal = true,
+        ),
+        ChatMessage(
+          id = "msg-2",
+          conversationId = "device-c",
+          senderId = "local",
+          text = "saved for c",
+          createdAt = 2000L,
           status = MessageStatus.Received,
           isLocal = true,
         ),
       )
     val historyRepository = FakeChatHistoryRepository(persisted)
+    val transport = FakeChatTransport()
 
-    val viewModel = MainScreenViewModel(FakeChatTransport(), requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) }, payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads")), localDeviceId = "local", historyRepository = historyRepository)
+    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) }, payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads")), localDeviceId = "local", historyRepository = historyRepository)
 
-    assertEquals(persisted, viewModel.uiState.value.messages)
+    assertEquals(emptyList<ChatMessage>(), viewModel.uiState.value.messages)
+
+    advanceUntilIdle()
+    transport.emit(TransportEvent.Connected(NearbyEndpoint("endpoint-b", "Phone B", deviceId = "device-b")))
+    advanceUntilIdle()
+
+    assertEquals(listOf("saved for b"), viewModel.uiState.value.messages.map { it.text })
+
+    transport.emit(TransportEvent.Disconnected("endpoint-b"))
+    advanceUntilIdle()
+
+    assertEquals(emptyList<ChatMessage>(), viewModel.uiState.value.messages)
+
+    transport.emit(TransportEvent.Connected(NearbyEndpoint("endpoint-c", "Phone C", deviceId = "device-c")))
+    advanceUntilIdle()
+
+    assertEquals(listOf("saved for c"), viewModel.uiState.value.messages.map { it.text })
   }
 
   @Test
@@ -501,7 +537,7 @@ class MainScreenViewModelTest {
     val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) }, payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads")), localDeviceId = "local")
 
     advanceUntilIdle()
-    transport.emit(TransportEvent.Connected(NearbyEndpoint("endpoint-b", "Phone B")))
+    transport.emit(TransportEvent.Connected(NearbyEndpoint("endpoint-b", "Phone B", deviceId = "device-b")))
     advanceUntilIdle()
     transport.clearSentPayloads()
 
@@ -1644,11 +1680,38 @@ class MainScreenViewModelTest {
   }
 
   @Test
+  fun savingCurrentPeerMessagesPreservesOtherPeerHistory() = runTest {
+    val otherPeerMessage =
+      ChatMessage(
+        id = "msg-c",
+        conversationId = "device-c",
+        senderId = "device-c",
+        text = "keep c",
+        createdAt = 1000L,
+        status = MessageStatus.Received,
+        isLocal = false,
+      )
+    val transport = FakeChatTransport()
+    val historyRepository = FakeChatHistoryRepository(listOf(otherPeerMessage))
+    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) }, payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads")), localDeviceId = "local", historyRepository = historyRepository)
+
+    advanceUntilIdle()
+    transport.emit(TransportEvent.Connected(NearbyEndpoint("endpoint-b", "Phone B", deviceId = "device-b")))
+    advanceUntilIdle()
+    viewModel.sendMessage("hello b")
+    advanceUntilIdle()
+
+    val saved = historyRepository.savedMessages.last()
+    assertEquals(listOf("keep c", "hello b"), saved.map { it.text })
+    assertEquals(listOf("device-c", "device-b"), saved.map { it.conversationId })
+  }
+
+  @Test
   fun connectedEventRetriesPersistedLocalMessagesThatAreNotDelivered() = runTest {
     val pendingMessage =
       ChatMessage(
         id = "msg-1",
-        conversationId = "one-to-one",
+        conversationId = "device-b",
         senderId = "local",
         text = "retry me",
         createdAt = 1000L,
@@ -1665,7 +1728,7 @@ class MainScreenViewModelTest {
     val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) }, payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads")), localDeviceId = "local", historyRepository = FakeChatHistoryRepository(listOf(pendingMessage, deliveredMessage)))
 
     advanceUntilIdle()
-    transport.emit(TransportEvent.Connected(NearbyEndpoint("endpoint-b", "Phone B")))
+    transport.emit(TransportEvent.Connected(NearbyEndpoint("endpoint-b", "Phone B", deviceId = "device-b")))
     advanceUntilIdle()
 
     val retriedMessages =
@@ -1708,7 +1771,7 @@ class MainScreenViewModelTest {
       listOf(
         ChatMessage(
           id = "msg-1",
-          conversationId = "one-to-one",
+          conversationId = "device-b",
           senderId = "local",
           text = "saved",
           createdAt = 1000L,
@@ -1717,7 +1780,12 @@ class MainScreenViewModelTest {
         ),
       )
     val historyRepository = FakeChatHistoryRepository(persisted)
-    val viewModel = MainScreenViewModel(FakeChatTransport(), requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) }, payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads")), localDeviceId = "local", historyRepository = historyRepository)
+    val transport = FakeChatTransport()
+    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) }, payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads")), localDeviceId = "local", historyRepository = historyRepository)
+
+    advanceUntilIdle()
+    transport.emit(TransportEvent.Connected(NearbyEndpoint("endpoint-b", "Phone B", deviceId = "device-b")))
+    advanceUntilIdle()
 
     viewModel.clearMessages()
     advanceUntilIdle()
@@ -1731,7 +1799,7 @@ class MainScreenViewModelTest {
     val pendingMessage =
       ChatMessage(
         id = "msg-1",
-        conversationId = "one-to-one",
+        conversationId = "device-b",
         senderId = "local",
         text = "retry me",
         createdAt = 1000L,
@@ -1742,9 +1810,9 @@ class MainScreenViewModelTest {
     val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) }, payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads")), localDeviceId = "local", historyRepository = FakeChatHistoryRepository(listOf(pendingMessage)))
 
     advanceUntilIdle()
-    transport.emit(TransportEvent.Connected(NearbyEndpoint("endpoint-b", "Phone B")))
+    transport.emit(TransportEvent.Connected(NearbyEndpoint("endpoint-b", "Phone B", deviceId = "device-b")))
     advanceUntilIdle()
-    transport.emit(TransportEvent.Connected(NearbyEndpoint("endpoint-c", "Phone C")))
+    transport.emit(TransportEvent.Connected(NearbyEndpoint("endpoint-c", "Phone C", deviceId = "device-c")))
     advanceUntilIdle()
 
     val retriedPayloads =
@@ -2106,7 +2174,7 @@ class MainScreenViewModelTest {
     val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) }, payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads")), localDeviceId = "local")
 
     advanceUntilIdle()
-    transport.emit(TransportEvent.Connected(NearbyEndpoint("endpoint-b", "Phone B")))
+    transport.emit(TransportEvent.Connected(NearbyEndpoint("endpoint-b", "Phone B", deviceId = "device-b")))
     advanceUntilIdle()
     transport.emit(
       TransportEvent.BytesReceived(
@@ -2142,7 +2210,7 @@ class MainScreenViewModelTest {
     val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) }, payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads")), localDeviceId = "local")
 
     advanceUntilIdle()
-    transport.emit(TransportEvent.Connected(NearbyEndpoint("endpoint-b", "Phone B")))
+    transport.emit(TransportEvent.Connected(NearbyEndpoint("endpoint-b", "Phone B", deviceId = "device-b")))
     advanceUntilIdle()
     transport.emit(
       TransportEvent.BytesReceived(
@@ -2556,6 +2624,8 @@ private class FakeChatTransport(
     private set
   var signalMonitoringStops: List<Unit> = emptyList()
     private set
+  var stopAllCount = 0
+    private set
   private val queuedSendResults = ArrayDeque<Result<Unit>>()
   private val pendingSendCallbacks = ArrayDeque<(Result<Unit>) -> Unit>()
 
@@ -2653,7 +2723,9 @@ private class FakeChatTransport(
     disconnectedEndpoints = disconnectedEndpoints + endpointId
   }
 
-  override fun stopAll() = Unit
+  override fun stopAll() {
+    stopAllCount += 1
+  }
 
   private fun nextSendResult(): Result<Unit> =
     if (queuedSendResults.isEmpty()) {
@@ -2661,6 +2733,12 @@ private class FakeChatTransport(
     } else {
       queuedSendResults.removeFirst()
     }
+}
+
+private fun MainScreenViewModel.clearForTest() {
+  val clearMethod = MainScreenViewModel::class.java.getDeclaredMethod("onCleared")
+  clearMethod.isAccessible = true
+  clearMethod.invoke(this)
 }
 
 private class FakeChatHistoryRepository(

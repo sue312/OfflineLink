@@ -18,7 +18,10 @@ class EncryptedChatTransport(
   private val mutableEvents = MutableSharedFlow<TransportEvent>(extraBufferCapacity = 64)
   private val lock = Any()
   private val sessions = mutableMapOf<String, SecureSession>()
-  private val collectJob = scope.launch { delegate.events.collect(::handleDelegateEvent) }
+
+  init {
+    scope.launch { delegate.events.collect(::handleDelegateEvent) }
+  }
 
   override val events: Flow<TransportEvent> = mutableEvents.asSharedFlow()
 
@@ -77,7 +80,6 @@ class EncryptedChatTransport(
     synchronized(lock) {
       sessions.clear()
     }
-    collectJob.cancel()
     delegate.stopAll()
   }
 

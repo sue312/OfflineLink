@@ -4,17 +4,20 @@ import com.example.offlinelink.model.NearbyEndpoint
 import com.example.offlinelink.model.PendingConnection
 import com.example.offlinelink.transport.ChatTransport
 import com.example.offlinelink.transport.TransportEvent
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
+@OptIn(ExperimentalCoroutinesApi::class)
 class EncryptedChatTransportTest {
   @Test
   fun keyExchangeCompletesBeforeConnectedAndPayloadsAreEncryptedOnWire() = runTest {
@@ -51,6 +54,39 @@ class EncryptedChatTransportTest {
       runCurrent()
       val received = receivedPayload.await()
       assertArrayEquals(plaintext, received.bytes)
+    } finally {
+      secureA.stopAll()
+      secureB.stopAll()
+    }
+  }
+
+  @Test
+  fun stopAllResetsSessionsWithoutMakingTransportDead() = runTest {
+    val rawA = RecordingTransport()
+    val rawB = RecordingTransport()
+    val secureA = EncryptedChatTransport(rawA, backgroundScope)
+    val secureB = EncryptedChatTransport(rawB, backgroundScope)
+    try {
+      secureA.stopAll()
+      secureB.stopAll()
+
+      val connectedA = backgroundScope.async {
+        withTimeout(1_000) { secureA.events.first { it is TransportEvent.Connected } }
+      }
+      val connectedB = backgroundScope.async {
+        withTimeout(1_000) { secureB.events.first { it is TransportEvent.Connected } }
+      }
+      runCurrent()
+
+      rawA.emit(TransportEvent.Connected(NearbyEndpoint("b", "Phone B")))
+      rawB.emit(TransportEvent.Connected(NearbyEndpoint("a", "Phone A")))
+      runCurrent()
+      rawA.drainSentTo(rawB, "a")
+      rawB.drainSentTo(rawA, "b")
+      runCurrent()
+
+      connectedA.await()
+      connectedB.await()
     } finally {
       secureA.stopAll()
       secureB.stopAll()

@@ -142,6 +142,7 @@ internal fun MainScreenViewModel.handleTransportEvent(event: TransportEvent) {
       recoveryConnectionAttempts.remove(connectedEndpoint.id)
       stopAdvertisingAndDiscovery()
       store.addConnectedEndpoint(connectedEndpoint)
+      showConversationFor(connectedEndpoint)
       startConnectedSignalMonitoring()
       sendHello(connectedEndpoint.id)
       retryUndeliveredMessages()
@@ -180,11 +181,13 @@ internal fun MainScreenViewModel.ensureEndpointConnected(
   val endpoint = NearbyEndpoint(endpointId, displayName.ifBlank { "Nearby device" })
   lastPeerEndpoint = endpoint
   store.addConnectedEndpoint(endpoint)
+  showConversationFor(endpoint)
   retryUndeliveredMessages()
 }
 
 internal fun MainScreenViewModel.mergeIncomingRoster(endpointId: String, hello: DecodedWireMessage.Hello): Boolean {
   endpointMemberIds[endpointId] = hello.senderId
+  showConversation(hello.senderId, carryVisibleMessages = true)
   lastPeerEndpoint = uiState.value.connectedEndpoints.firstOrNull { it.id == endpointId }?.copy(deviceId = hello.senderId) ?: lastPeerEndpoint
   return store.replaceGroupMember(endpointId, GroupMember(hello.senderId, hello.displayName, GroupMemberStatus.Online))
 }
@@ -300,6 +303,9 @@ internal fun MainScreenViewModel.handleEndpointDisconnected(
     stopConnectedSignalMonitoring()
   }
   store.removeConnectedEndpoint(endpointId)
+  if (uiState.value.connectedEndpoints.isEmpty()) {
+    showConversation(null)
+  }
   if (shouldReconnect && wasConnected) {
     startPeerRecovery(disconnectedDisplayName)
   } else {

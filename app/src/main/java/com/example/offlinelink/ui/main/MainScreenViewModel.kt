@@ -75,6 +75,8 @@ class MainScreenViewModel(
   internal val pendingVoiceMessages = mutableMapOf<String, PendingVoiceMessage>()
   internal val pendingImageMessages = mutableMapOf<String, PendingImageMessage>()
   internal val trustedDeviceIds = initialTrustedDeviceIds.toMutableSet()
+  internal var persistedMessages: List<ChatMessage> = historyRepository.loadMessages().distinctBy { it.id }
+  internal var activeConversationId: String? = null
   internal var nextCallAudioSequenceNumber = 0
   internal val previousRedundantCallAudioFrames = ArrayDeque<CallAudioFrameRedundancy>()
   internal var locationRequestJob: Job? = null
@@ -91,13 +93,13 @@ class MainScreenViewModel(
   init {
     store.setDisplayName(defaultDisplayName)
     store.setAvatarName(defaultAvatarName)
-    store.loadMessages(historyRepository.loadMessages())
+    store.loadMessages(emptyList())
     viewModelScope.launch {
       store.state
         .map { it.messages }
         .distinctUntilChanged()
         .collect { messages ->
-          historyRepository.saveMessages(messages)
+          persistVisibleMessages(messages)
         }
     }
     viewModelScope.launch {
@@ -597,6 +599,7 @@ class MainScreenViewModel(
     handledCallVoiceClipIds.clear()
     retriedMessageEndpointIds.clear()
     store.clearConnectedEndpoints()
+    showConversation(null)
   }
 
   fun retryMessage(messageId: String) {
@@ -624,7 +627,6 @@ class MainScreenViewModel(
 
   override fun onCleared() {
     cancelPendingLocationRequest()
-    transport.stopAll()
     super.onCleared()
   }
 
@@ -638,4 +640,69 @@ class MainScreenViewModel(
     const val MAX_BLUETOOTH_REDUNDANT_CALL_AUDIO_FRAMES = 1
     const val MAX_REDUNDANT_CALL_AUDIO_FRAME_HISTORY = 2
   }
+
+  internal fun showConversation(
+    conversationId: String?,
+    carryVisibleMessages: Boolean = false,
+  ) {
+    val previousConversationId = activeConversationId
+    if (carryVisibleMessages && previousConversationId != null && conversationId != null && previousConversationId != conversationId) {
+      val carriedMessages = uiState.value.messages.map { it.copy(conversationId = conversationId) }
+      if (carriedMessages.isNotEmpty()) {
+        persistedMessages =
+          mergeMessages(
+            persistedMessages.filterNot { it.conversationId == previousConversationId || it.conversationId == conversationId },
+            persistedMessages.filter { it.conversationId == conversationId } + carriedMessages,
+          )
+      }
+    }
+    activeConversationId = conversationId
+    if (conversationId == null) {
+      store.loadMessages(emptyList())
+      return
+    }
+    store.setConversationId(conversationId)
+    store.loadMessages(persistedMessages.filter { it.conversationId == conversationId })
+  }
+
+  internal fun showConversationFor(endpoint: NearbyEndpoint) {
+    showConversation(conversationIdForEndpoint(endpoint))
+  }
+
+  internal fun ensureConversationForIncoming(
+    endpointId: String,
+    senderId: String,
+  ): String {
+    val conversationId = normalizedDeviceId(senderId) ?: conversationIdForEndpointId(endpointId) ?: endpointId
+    if (activeConversationId != conversationId) {
+      showConversation(conversationId, carryVisibleMessages = true)
+    }
+    return conversationId
+  }
+
+  internal fun conversationIdForEndpoint(endpoint: NearbyEndpoint): String =
+    normalizedDeviceId(endpoint.deviceId) ?: endpoint.id
+
+  internal fun conversationIdForEndpointId(endpointId: String): String? =
+    uiState.value.connectedEndpoints.firstOrNull { it.id == endpointId }?.let(::conversationIdForEndpoint)
+      ?: normalizedDeviceId(endpointMemberIds[endpointId])
+
+  private fun persistVisibleMessages(messages: List<ChatMessage>) {
+    val conversationId = activeConversationId ?: return
+    val normalizedMessages = messages.map { if (it.conversationId == conversationId) it else it.copy(conversationId = conversationId) }
+    persistedMessages =
+      mergeMessages(
+        persistedMessages.filterNot { it.conversationId == conversationId },
+        normalizedMessages,
+      )
+    historyRepository.saveMessages(persistedMessages)
+  }
+
+  private fun mergeMessages(
+    base: List<ChatMessage>,
+    replacement: List<ChatMessage>,
+  ): List<ChatMessage> =
+    (base + replacement)
+      .distinctBy { it.id }
+      .sortedWith(compareBy<ChatMessage> { it.createdAt }.thenBy { it.id })
 }

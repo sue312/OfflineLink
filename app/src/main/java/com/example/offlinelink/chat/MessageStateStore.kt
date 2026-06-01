@@ -19,11 +19,16 @@ data class MessageSessionState(
 
 class MessageStateStore(
   private val localDeviceId: String,
-  private val conversationId: String = "one-to-one",
+  conversationId: String = "one-to-one",
   private val payloadCache: PayloadCache? = null,
 ) {
   private val mutableState = MutableStateFlow(MessageSessionState())
+  private var activeConversationId = conversationId
   val state: StateFlow<MessageSessionState> = mutableState.asStateFlow()
+
+  fun setConversationId(conversationId: String) {
+    activeConversationId = conversationId.ifBlank { "one-to-one" }
+  }
 
   fun loadMessages(messages: List<ChatMessage>) =
     update { it.copy(messages = messages.distinctBy { message -> message.id }, messageRevision = it.messageRevision + 1) }
@@ -46,7 +51,7 @@ class MessageStateStore(
     now: Long = System.currentTimeMillis(),
   ): ChatMessage =
     append(
-      ChatMessage(UUID.randomUUID().toString(), conversationId, localDeviceId, text, now, MessageStatus.Queued, isLocal = true),
+      ChatMessage(UUID.randomUUID().toString(), activeConversationId, localDeviceId, text, now, MessageStatus.Queued, isLocal = true),
     )
 
   fun queueOutgoingVoiceMessage(
@@ -58,7 +63,7 @@ class MessageStateStore(
     append(
       ChatMessage(
         id = UUID.randomUUID().toString(),
-        conversationId = conversationId,
+        conversationId = activeConversationId,
         senderId = localDeviceId,
         text = voiceLabel(durationMs),
         createdAt = now,
@@ -78,7 +83,7 @@ class MessageStateStore(
     append(
       ChatMessage(
         UUID.randomUUID().toString(),
-        conversationId,
+        activeConversationId,
         localDeviceId,
         locationLabel(latitude, longitude),
         now,
@@ -99,7 +104,7 @@ class MessageStateStore(
     append(
       ChatMessage(
         UUID.randomUUID().toString(),
-        conversationId,
+        activeConversationId,
         localDeviceId,
         imageLabel(width, height),
         now,

@@ -62,6 +62,7 @@ class ChatSessionStore(
   fun renameConnectedEndpoint(endpointId: String, displayName: String) = sync { connectionStore.renameConnectedEndpoint(endpointId, displayName) }
 
   fun loadMessages(messages: List<ChatMessage>) = sync { messageStore.loadMessages(messages) }
+  fun setConversationId(conversationId: String) = sync { messageStore.setConversationId(conversationId) }
   fun clearMessages() = sync { messageStore.clearMessages() }
   fun deleteMessage(messageId: String) = sync { messageStore.deleteMessage(messageId) }
   fun localMessagesPendingDelivery(): List<ChatMessage> = messageStore.localMessagesPendingDelivery()
