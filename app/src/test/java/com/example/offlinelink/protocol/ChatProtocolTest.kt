@@ -1,6 +1,8 @@
 package com.example.offlinelink.protocol
 
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -152,6 +154,32 @@ class ChatProtocolTest {
   }
 
   @Test
+  fun encodeAndDecodeVoiceMessageCanUseBinaryPayloadRefWithoutBase64() {
+    val bytes =
+      ChatProtocol.encodeVoiceMessage(
+        messageId = "voice-2",
+        conversationId = "conversation-a",
+        senderId = "device-a",
+        audioBase64 = "",
+        payloadRef = "payload-voice-2",
+        durationMs = 2300L,
+        mimeType = "audio/3gpp",
+        createdAt = 1234L,
+        sentAt = 5678L,
+      )
+
+    val encoded = bytes.decodeToString()
+    assertFalse(encoded.contains("AQIDBA=="))
+
+    val decoded = ChatProtocol.decode(bytes)
+
+    assertTrue(decoded is DecodedWireMessage.VoiceMessage)
+    val message = decoded as DecodedWireMessage.VoiceMessage
+    assertEquals("payload-voice-2", message.payloadRef)
+    assertEquals("", message.audioBase64)
+  }
+
+  @Test
   fun encodeAndDecodeAckPayloadPreservesAcknowledgedMessageId() {
     val bytes = ChatProtocol.encodeAck(messageId = "msg-2", sentAt = 8765L)
 
@@ -260,6 +288,22 @@ class ChatProtocolTest {
   }
 
   @Test
+  fun encodeAndDecodeBinaryPayloadPreservesRawBytes() {
+    val rawBytes = byteArrayOf(0, 1, 2, 3, 4, 127, -128)
+    val bytes = ChatProtocol.encodeBinaryPayload(payloadRef = "payload-1", bytes = rawBytes, sentAt = 4321L)
+
+    assertFalse(bytes.decodeToString().contains("AAECAwR/"))
+
+    val decoded = ChatProtocol.decode(bytes)
+
+    assertTrue(decoded is DecodedWireMessage.BinaryPayload)
+    val payload = decoded as DecodedWireMessage.BinaryPayload
+    assertEquals("payload-1", payload.payloadRef)
+    assertArrayEquals(rawBytes, payload.bytes)
+    assertEquals(4321L, payload.sentAt)
+  }
+
+  @Test
   fun encodeAndDecodeBinaryCallAudioFramePreservesMetadata() {
     val bytes =
       ChatProtocol.encodeCallAudioFrame(
@@ -322,5 +366,167 @@ class ChatProtocolTest {
 
     assertTrue(binary.size < legacyJson.size)
     assertTrue(!binary.decodeToString().contains("audioBase64"))
+  }
+
+  @Test
+  fun compactCallAudioFrameKeepsRealtimeMetadataSmall() {
+    val payload = ByteArray(23) { it.toByte() }
+    val compact =
+      ChatProtocol.encodeCallAudioFrame(
+        callId = "call-1",
+        frameId = "frame-1",
+        senderId = "device-a",
+        targetId = "device-b",
+        audioBytes = payload,
+        durationMs = 20L,
+        mimeType = "audio/opus;rate=16000",
+        sequenceNumber = 7,
+        createdAt = 1234L,
+        sentAt = 5678L,
+        compact = true,
+      )
+    val legacy =
+      ChatProtocol.encodeCallAudioFrame(
+        callId = "call-1",
+        frameId = "frame-1",
+        senderId = "device-a",
+        targetId = "device-b",
+        audioBytes = payload,
+        durationMs = 20L,
+        mimeType = "audio/opus;rate=16000",
+        sequenceNumber = 7,
+        createdAt = 1234L,
+        sentAt = 5678L,
+      )
+
+    val decoded = ChatProtocol.decode(compact)
+
+    assertTrue(compact.size < legacy.size / 2)
+    assertEquals(35, compact.size)
+    assertTrue(decoded is DecodedWireMessage.CallAudioFrame)
+    val frame = decoded as DecodedWireMessage.CallAudioFrame
+    assertEquals("", frame.callId)
+    assertEquals("", frame.frameId)
+    assertEquals("", frame.senderId)
+    assertEquals(null, frame.targetId)
+    assertEquals("audio/opus;rate=16000", frame.mimeType)
+    assertEquals(20L, frame.durationMs)
+    assertEquals(7, frame.sequenceNumber)
+    assertEquals(payload.toList(), frame.audioBytes.toList())
+  }
+
+  @Test
+  fun compactCallAudioFrameSupportsLyraCodec() {
+    val payload = ByteArray(8) { (it + 1).toByte() }
+    val compact =
+      ChatProtocol.encodeCallAudioFrame(
+        callId = "call-1",
+        frameId = "frame-1",
+        senderId = "device-a",
+        targetId = "device-b",
+        audioBytes = payload,
+        durationMs = 20L,
+        mimeType = "audio/lyra;rate=16000;bitrate=3200",
+        sequenceNumber = 11,
+        createdAt = 1234L,
+        sentAt = 5678L,
+        compact = true,
+      )
+
+    val decoded = ChatProtocol.decode(compact)
+
+    assertEquals(20, compact.size)
+    assertTrue(decoded is DecodedWireMessage.CallAudioFrame)
+    val frame = decoded as DecodedWireMessage.CallAudioFrame
+    assertEquals("audio/lyra;rate=16000;bitrate=3200", frame.mimeType)
+    assertEquals(20L, frame.durationMs)
+    assertEquals(11, frame.sequenceNumber)
+    assertEquals(payload.toList(), frame.audioBytes.toList())
+  }
+
+  @Test
+  fun compactCallAudioFrameCanCarryPreviousFrameRedundancy() {
+    val previousPayload = ByteArray(23) { (it + 1).toByte() }
+    val currentPayload = ByteArray(23) { (it + 31).toByte() }
+    val redundant =
+      ChatProtocol.encodeCallAudioFrame(
+        callId = "call-1",
+        frameId = "frame-7",
+        senderId = "device-a",
+        targetId = "device-b",
+        audioBytes = currentPayload,
+        durationMs = 20L,
+        mimeType = "audio/opus;rate=16000",
+        sequenceNumber = 7,
+        createdAt = 1234L,
+        sentAt = 5678L,
+        compact = true,
+        redundantPrevious =
+          CallAudioFrameRedundancy(
+            audioBytes = previousPayload,
+            durationMs = 20L,
+            mimeType = "audio/opus;rate=16000",
+            sequenceNumber = 6,
+          ),
+      )
+
+    val decodedFrames = ChatProtocol.decodeAll(redundant).filterIsInstance<DecodedWireMessage.CallAudioFrame>()
+    val decodedCurrent = ChatProtocol.decode(redundant)
+
+    assertEquals(70, redundant.size)
+    assertEquals(2, decodedFrames.size)
+    assertEquals(6, decodedFrames[0].sequenceNumber)
+    assertEquals(previousPayload.toList(), decodedFrames[0].audioBytes.toList())
+    assertEquals(7, decodedFrames[1].sequenceNumber)
+    assertEquals(currentPayload.toList(), decodedFrames[1].audioBytes.toList())
+    assertTrue(decodedCurrent is DecodedWireMessage.CallAudioFrame)
+    assertEquals(7, (decodedCurrent as DecodedWireMessage.CallAudioFrame).sequenceNumber)
+  }
+
+  @Test
+  fun compactCallAudioFrameCanCarryMultiplePreviousFramesForBurstLossRecovery() {
+    val firstPayload = ByteArray(23) { (it + 1).toByte() }
+    val secondPayload = ByteArray(23) { (it + 31).toByte() }
+    val currentPayload = ByteArray(23) { (it + 61).toByte() }
+    val redundant =
+      ChatProtocol.encodeCallAudioFrame(
+        callId = "call-1",
+        frameId = "frame-9",
+        senderId = "device-a",
+        targetId = "device-b",
+        audioBytes = currentPayload,
+        durationMs = 20L,
+        mimeType = "audio/opus;rate=16000",
+        sequenceNumber = 9,
+        createdAt = 1234L,
+        sentAt = 5678L,
+        compact = true,
+        redundantPreviousFrames =
+          listOf(
+            CallAudioFrameRedundancy(
+              audioBytes = firstPayload,
+              durationMs = 20L,
+              mimeType = "audio/opus;rate=16000",
+              sequenceNumber = 7,
+            ),
+            CallAudioFrameRedundancy(
+              audioBytes = secondPayload,
+              durationMs = 20L,
+              mimeType = "audio/opus;rate=16000",
+              sequenceNumber = 8,
+            ),
+          ),
+      )
+
+    val decodedFrames = ChatProtocol.decodeAll(redundant).filterIsInstance<DecodedWireMessage.CallAudioFrame>()
+    val decodedCurrent = ChatProtocol.decode(redundant)
+
+    assertEquals(102, redundant.size)
+    assertEquals(listOf(7, 8, 9), decodedFrames.map { it.sequenceNumber })
+    assertEquals(firstPayload.toList(), decodedFrames[0].audioBytes.toList())
+    assertEquals(secondPayload.toList(), decodedFrames[1].audioBytes.toList())
+    assertEquals(currentPayload.toList(), decodedFrames[2].audioBytes.toList())
+    assertTrue(decodedCurrent is DecodedWireMessage.CallAudioFrame)
+    assertEquals(9, (decodedCurrent as DecodedWireMessage.CallAudioFrame).sequenceNumber)
   }
 }

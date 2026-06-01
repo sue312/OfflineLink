@@ -1,5 +1,6 @@
 package com.example.offlinelink.audio
 
+import android.content.Context
 import java.io.Closeable
 
 data class PcmAudioFrame(
@@ -49,13 +50,24 @@ class PcmCallAudioDecoder : CallAudioDecoder {
     )
 }
 
-class DefaultCallAudioDecoder : CallAudioDecoder {
+class DefaultCallAudioDecoder(
+  private val context: Context? = null,
+) : CallAudioDecoder {
   private val pcmDecoder = PcmCallAudioDecoder()
   private var amrWbDecoder: CallAudioDecoder? = null
   private var opusDecoder: CallAudioDecoder? = null
+  private var lyraDecoder: CallAudioDecoder? = null
 
   override fun decode(frame: CallAudioFrame): Result<PcmAudioFrame?> {
     val mimeType = frame.mimeType.trim()
+    if (mimeType.startsWith("audio/lyra", ignoreCase = true)) {
+      val decoder =
+        lyraDecoder
+          ?: LyraCallAudioDecoder.createOrNull(context)
+            ?.also { lyraDecoder = it }
+          ?: return Result.failure(IllegalStateException("Lyra decoder is not available"))
+      return decoder.decode(frame)
+    }
     if (mimeType.startsWith("audio/amr-wb", ignoreCase = true)) {
       val decoder =
         amrWbDecoder
@@ -80,14 +92,22 @@ class DefaultCallAudioDecoder : CallAudioDecoder {
     amrWbDecoder = null
     opusDecoder?.close()
     opusDecoder = null
+    lyraDecoder?.close()
+    lyraDecoder = null
   }
 }
 
 object CallAudioCodecFactory {
-  fun createEncoder(): CallAudioEncoder =
-    MediaCodecAmrWbCallAudioEncoder.createOrNull() ?: PcmCallAudioEncoder()
+  fun createEncoder(
+    context: Context? = null,
+    linkStatsProvider: () -> CallAudioLinkStats = { CallAudioLinkStats() },
+  ): CallAudioEncoder =
+    AdaptiveCallAudioEncoder(
+      linkStatsProvider = linkStatsProvider,
+      context = context,
+    )
 
-  fun createDecoder(): CallAudioDecoder = DefaultCallAudioDecoder()
+  fun createDecoder(context: Context? = null): CallAudioDecoder = DefaultCallAudioDecoder(context)
 }
 
 fun callAudioPcmFrameBytes(sampleRateHz: Int): Int =

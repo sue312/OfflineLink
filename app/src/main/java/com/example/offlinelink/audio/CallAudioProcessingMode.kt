@@ -39,9 +39,19 @@ enum class CallAudioProcessingMode(
   ;
 
   companion object {
-    val Default = System
+    val Default = Balanced
   }
 }
 
 fun callAudioProcessingModeFromName(name: String?): CallAudioProcessingMode =
   CallAudioProcessingMode.entries.firstOrNull { it.name == name } ?: CallAudioProcessingMode.Default
+
+fun initialCallAudioProcessingMode(
+  savedName: String?,
+  userSelected: Boolean,
+): CallAudioProcessingMode =
+  if (userSelected) {
+    callAudioProcessingModeFromName(savedName)
+  } else {
+    CallAudioProcessingMode.Default
+  }

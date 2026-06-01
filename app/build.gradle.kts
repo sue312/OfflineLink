@@ -53,7 +53,6 @@ dependencies {
   implementation(libs.androidx.lifecycle.runtime.ktx)
   implementation(libs.androidx.activity.compose)
   implementation(libs.kotlinx.serialization.json)
-  implementation(libs.play.services.nearby)
   implementation(libs.play.services.location)
 
   // Arch Components

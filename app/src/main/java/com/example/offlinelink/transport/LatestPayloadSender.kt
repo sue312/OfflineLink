@@ -1,8 +1,15 @@
 package com.example.offlinelink.transport
 
-class LatestPayloadSender(private val transport: ChatTransport) {
+class LatestPayloadSender(
+  private val transport: ChatTransport,
+  private val maxPendingPerEndpoint: Int = DEFAULT_MAX_PENDING_PER_ENDPOINT,
+) {
   private val lock = Any()
   private val endpoints = mutableMapOf<String, EndpointState>()
+
+  init {
+    require(maxPendingPerEndpoint > 0) { "maxPendingPerEndpoint must be greater than 0" }
+  }
 
   fun send(
     endpointId: String,
@@ -16,8 +23,10 @@ class LatestPayloadSender(private val transport: ChatTransport) {
     synchronized(lock) {
       val state = endpoints.getOrPut(endpointId) { EndpointState() }
       if (state.inFlight) {
-        dropped = state.latest
-        state.latest = item
+        if (state.pending.size >= maxPendingPerEndpoint) {
+          dropped = state.pending.removeFirst()
+        }
+        state.pending.addLast(item)
       } else {
         state.inFlight = true
         dispatchState = state
@@ -31,9 +40,11 @@ class LatestPayloadSender(private val transport: ChatTransport) {
   fun clearEndpoint(endpointId: String) {
     val dropped =
       synchronized(lock) {
-        endpoints.remove(endpointId)?.latest
+        endpoints.remove(endpointId)?.pending?.toList().orEmpty()
       }
-    dropped?.onResult?.invoke(Result.failure(EndpointClearedException("Live payload queue cleared for $endpointId")))
+    dropped.forEach {
+      it.onResult(Result.failure(EndpointClearedException("Live payload queue cleared for $endpointId")))
+    }
   }
 
   private fun dispatch(item: PendingPayload, state: EndpointState) {
@@ -45,12 +56,12 @@ class LatestPayloadSender(private val transport: ChatTransport) {
           if (endpoints[item.endpointId] !== state) {
             null
           } else {
-            state.latest.also { pending ->
-              state.latest = null
-              if (pending == null) {
-                state.inFlight = false
-                endpoints.remove(item.endpointId)
-              }
+            if (state.pending.isNotEmpty()) {
+              state.pending.removeFirst()
+            } else {
+              state.inFlight = false
+              endpoints.remove(item.endpointId)
+              null
             }
           }
         }
@@ -63,7 +74,7 @@ class LatestPayloadSender(private val transport: ChatTransport) {
 
   private class EndpointState(
     var inFlight: Boolean = false,
-    var latest: PendingPayload? = null,
+    val pending: ArrayDeque<PendingPayload> = ArrayDeque(),
   )
 
   private data class PendingPayload(
@@ -75,4 +86,8 @@ class LatestPayloadSender(private val transport: ChatTransport) {
   class StalePayloadDroppedException(message: String) : IllegalStateException(message)
 
   class EndpointClearedException(message: String) : IllegalStateException(message)
+
+  private companion object {
+    const val DEFAULT_MAX_PENDING_PER_ENDPOINT = 12
+  }
 }

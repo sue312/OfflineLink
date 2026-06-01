@@ -31,8 +31,8 @@ class CallAudioNoiseGate(
   }
 
   private companion object {
-    const val DEFAULT_THRESHOLD = 96
-    const val DEFAULT_HANGOVER_FRAMES = 4
+    const val DEFAULT_THRESHOLD = 48
+    const val DEFAULT_HANGOVER_FRAMES = 8
   }
 }
 

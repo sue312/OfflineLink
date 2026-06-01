@@ -50,6 +50,40 @@ class CallAudioLinkMonitorTest {
     assertEquals(1, monitor.snapshot().lateFrames)
   }
 
+  @Test
+  fun rejectsLateFramesBeforeDecode() {
+    val monitor = CallAudioLinkMonitor()
+
+    monitor.process(pcmFrame(sample = 1_000), sequenceNumber = 5)
+    monitor.process(pcmFrame(sample = 2_000), sequenceNumber = 6)
+
+    assertEquals(false, monitor.shouldDecode(sequenceNumber = 5))
+    assertEquals(true, monitor.shouldDecode(sequenceNumber = 7))
+    assertEquals(1, monitor.snapshot().lateFrames)
+    assertEquals(2, monitor.snapshot().receivedFrames)
+  }
+
+  @Test
+  fun recentStatsDropOldInterArrivalSpikeAfterWindowMovesOn() {
+    var nowMs = 1_000L
+    val monitor = CallAudioLinkMonitor(recentWindowFrames = 3, clockMs = { nowMs })
+
+    monitor.process(pcmFrame(sample = 1_000), sequenceNumber = 1)
+    nowMs += 180
+    monitor.process(pcmFrame(sample = 2_000), sequenceNumber = 2)
+    repeat(3) { index ->
+      nowMs += 20
+      monitor.process(pcmFrame(sample = (3_000 + index).toShort()), sequenceNumber = 3 + index)
+    }
+
+    val stats = monitor.snapshot()
+    assertEquals(180L, stats.maxInterArrivalMs)
+    assertEquals(20L, stats.recentMaxInterArrivalMs)
+    assertEquals(20L, stats.recentAverageInterArrivalMs)
+    assertEquals(3, stats.recentReceivedFrames)
+    assertEquals(0, stats.recentLostFrames)
+  }
+
   private fun pcmFrame(sample: Short): PcmAudioFrame {
     val bytes = ByteArray(callAudioPcmFrameBytes(sampleRateHz = 16_000))
     var index = 0

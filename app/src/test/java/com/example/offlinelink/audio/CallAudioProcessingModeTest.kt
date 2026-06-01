@@ -5,8 +5,14 @@ import org.junit.Test
 
 class CallAudioProcessingModeTest {
   @Test
-  fun defaultsToSystemMode() {
-    assertEquals(CallAudioProcessingMode.System, callAudioProcessingModeFromName(null))
-    assertEquals(CallAudioProcessingMode.System, callAudioProcessingModeFromName("missing"))
+  fun defaultsToBalancedMode() {
+    assertEquals(CallAudioProcessingMode.Balanced, callAudioProcessingModeFromName(null))
+    assertEquals(CallAudioProcessingMode.Balanced, callAudioProcessingModeFromName("missing"))
+  }
+
+  @Test
+  fun legacySavedSystemDefaultMigratesToBalancedUntilUserExplicitlySelectsMode() {
+    assertEquals(CallAudioProcessingMode.Balanced, initialCallAudioProcessingMode("System", userSelected = false))
+    assertEquals(CallAudioProcessingMode.System, initialCallAudioProcessingMode("System", userSelected = true))
   }
 }

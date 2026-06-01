@@ -54,7 +54,7 @@ class CallAudioJitterBuffer(
   }
 
   private companion object {
-    const val DEFAULT_TARGET_BUFFER_MS = 60L
-    const val DEFAULT_MAX_BUFFER_MS = 220L
+    const val DEFAULT_TARGET_BUFFER_MS = 100L
+    const val DEFAULT_MAX_BUFFER_MS = 400L
   }
 }

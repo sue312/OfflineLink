@@ -1,5 +1,6 @@
 package com.example.offlinelink.protocol
 
+import java.nio.ByteBuffer
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 
@@ -30,6 +31,7 @@ sealed interface DecodedWireMessage {
     val conversationId: String,
     val senderId: String,
     val audioBase64: String,
+    val payloadRef: String?,
     val durationMs: Long,
     val mimeType: String,
     val createdAt: Long,
@@ -45,6 +47,7 @@ sealed interface DecodedWireMessage {
     val conversationId: String,
     val senderId: String,
     val imageBase64: String,
+    val payloadRef: String?,
     val mimeType: String,
     val width: Int,
     val height: Int,
@@ -120,6 +123,12 @@ sealed interface DecodedWireMessage {
     val createdAt: Long,
     override val sentAt: Long,
   ) : DecodedWireMessage
+
+  data class BinaryPayload(
+    val payloadRef: String,
+    val bytes: ByteArray,
+    override val sentAt: Long,
+  ) : DecodedWireMessage
 }
 
 data class WireMember(
@@ -132,7 +141,9 @@ object ChatProtocol {
   const val CAPABILITY_CALL_TARGETING = "call_targeting"
   const val CAPABILITY_PRIORITY_QUEUE = "priority_queue"
   const val CAPABILITY_BINARY_CALL_AUDIO = "binary_call_audio"
-  val DEFAULT_CAPABILITIES: Set<String> = setOf(CAPABILITY_CALL_TARGETING, CAPABILITY_BINARY_CALL_AUDIO)
+  const val CAPABILITY_BINARY_PAYLOAD = "binary_payload"
+  const val TYPE_BINARY_PAYLOAD = "binary_payload"
+  val DEFAULT_CAPABILITIES: Set<String> = setOf(CAPABILITY_CALL_TARGETING, CAPABILITY_BINARY_CALL_AUDIO, CAPABILITY_BINARY_PAYLOAD)
 
   private const val TYPE_HELLO = "hello"
   private const val TYPE_MESSAGE = "message"
@@ -146,6 +157,7 @@ object ChatProtocol {
   private const val TYPE_CALL_REJECT = "call_reject"
   private const val TYPE_CALL_END = "call_end"
   private const val TYPE_CALL_VOICE = "call_voice"
+  private val BINARY_PAYLOAD_MAGIC = byteArrayOf('O'.code.toByte(), 'L'.code.toByte(), 'B'.code.toByte(), '1'.code.toByte())
 
   private val json = Json {
     ignoreUnknownKeys = true
@@ -160,6 +172,9 @@ object ChatProtocol {
 
   fun supportsBinaryCallAudio(capabilities: Collection<String>): Boolean =
     CAPABILITY_BINARY_CALL_AUDIO in capabilities
+
+  fun supportsBinaryPayload(capabilities: Collection<String>): Boolean =
+    CAPABILITY_BINARY_PAYLOAD in capabilities
 
   fun encodeHello(
     senderId: String,
@@ -188,9 +203,10 @@ object ChatProtocol {
     durationMs: Long,
     mimeType: String,
     createdAt: Long,
+    payloadRef: String? = null,
     sentAt: Long = System.currentTimeMillis(),
   ): ByteArray =
-    encodeEnvelope(TYPE_VOICE_MESSAGE, VoiceMessagePayload(messageId, conversationId, senderId, audioBase64, durationMs, mimeType, createdAt), sentAt)
+    encodeEnvelope(TYPE_VOICE_MESSAGE, VoiceMessagePayload(messageId, conversationId, senderId, audioBase64, payloadRef, durationMs, mimeType, createdAt), sentAt)
 
   fun encodeAck(messageId: String, sentAt: Long = System.currentTimeMillis()): ByteArray =
     encodeEnvelope(TYPE_ACK, AckPayload(messageId), sentAt)
@@ -207,9 +223,27 @@ object ChatProtocol {
     width: Int,
     height: Int,
     createdAt: Long,
+    payloadRef: String? = null,
     sentAt: Long = System.currentTimeMillis(),
   ): ByteArray =
-    encodeEnvelope(TYPE_IMAGE, ImagePayload(messageId, conversationId, senderId, imageBase64, mimeType, width, height, createdAt), sentAt)
+    encodeEnvelope(TYPE_IMAGE, ImagePayload(messageId, conversationId, senderId, imageBase64, payloadRef, mimeType, width, height, createdAt), sentAt)
+
+  fun encodeBinaryPayload(
+    payloadRef: String,
+    bytes: ByteArray,
+    sentAt: Long = System.currentTimeMillis(),
+  ): ByteArray {
+    val payloadRefBytes = payloadRef.encodeToByteArray()
+    require(payloadRefBytes.isNotEmpty()) { "payloadRef must not be blank" }
+    return ByteBuffer
+      .allocate(BINARY_PAYLOAD_MAGIC.size + Long.SIZE_BYTES + Int.SIZE_BYTES + payloadRefBytes.size + bytes.size)
+      .put(BINARY_PAYLOAD_MAGIC)
+      .putLong(sentAt)
+      .putInt(payloadRefBytes.size)
+      .put(payloadRefBytes)
+      .put(bytes)
+      .array()
+  }
 
   fun encodeLocation(
     messageId: String,
@@ -288,6 +322,9 @@ object ChatProtocol {
     sequenceNumber: Int,
     createdAt: Long,
     sentAt: Long = System.currentTimeMillis(),
+    compact: Boolean = false,
+    redundantPrevious: CallAudioFrameRedundancy? = null,
+    redundantPreviousFrames: List<CallAudioFrameRedundancy> = emptyList(),
   ): ByteArray =
     CallAudioPacketCodec.encode(
       CallAudioPacket(
@@ -302,22 +339,51 @@ object ChatProtocol {
         createdAt = createdAt,
         sentAt = sentAt,
       ),
+      compact = compact,
+      redundantPrevious =
+        redundantPrevious?.let {
+          CallAudioPacket(
+            callId = "",
+            frameId = "",
+            senderId = "",
+            targetId = null,
+            audioBytes = it.audioBytes,
+            durationMs = it.durationMs,
+            mimeType = it.mimeType,
+            sequenceNumber = it.sequenceNumber,
+            createdAt = 0L,
+            sentAt = sentAt,
+          )
+        },
+      redundantPreviousPackets =
+        redundantPreviousFrames.map {
+          CallAudioPacket(
+            callId = "",
+            frameId = "",
+            senderId = "",
+            targetId = null,
+            audioBytes = it.audioBytes,
+            durationMs = it.durationMs,
+            mimeType = it.mimeType,
+            sequenceNumber = it.sequenceNumber,
+            createdAt = 0L,
+            sentAt = sentAt,
+          )
+        },
     )
 
+  fun decodeAll(bytes: ByteArray): List<DecodedWireMessage> {
+    decodeBinaryPayload(bytes)?.let { return listOf(it) }
+    CallAudioPacketCodec.decodeAll(bytes)?.let { packets ->
+      return packets.map { it.toDecodedCallAudioFrame() }
+    }
+    return listOf(decode(bytes))
+  }
+
   fun decode(bytes: ByteArray): DecodedWireMessage {
+    decodeBinaryPayload(bytes)?.let { return it }
     CallAudioPacketCodec.decode(bytes)?.let { packet ->
-      return DecodedWireMessage.CallAudioFrame(
-        callId = packet.callId,
-        frameId = packet.frameId,
-        senderId = packet.senderId,
-        targetId = packet.targetId,
-        audioBytes = packet.audioBytes,
-        durationMs = packet.durationMs,
-        mimeType = packet.mimeType,
-        sequenceNumber = packet.sequenceNumber,
-        createdAt = packet.createdAt,
-        sentAt = packet.sentAt,
-      )
+      return packet.toDecodedCallAudioFrame()
     }
     val envelope = json.decodeFromString(WireEnvelope.serializer(), bytes.decodeToString())
     require(envelope.protocolVersion <= CURRENT_PROTOCOL_VERSION) {
@@ -354,6 +420,7 @@ object ChatProtocol {
           conversationId = payload.conversationId,
           senderId = payload.senderId,
           audioBase64 = payload.audioBase64,
+          payloadRef = payload.payloadRef,
           durationMs = payload.durationMs,
           mimeType = payload.mimeType,
           createdAt = payload.createdAt,
@@ -375,6 +442,7 @@ object ChatProtocol {
           conversationId = payload.conversationId,
           senderId = payload.senderId,
           imageBase64 = payload.imageBase64,
+          payloadRef = payload.payloadRef,
           mimeType = payload.mimeType,
           width = payload.width,
           height = payload.height,
@@ -454,6 +522,35 @@ object ChatProtocol {
     }
   }
 
+  private fun decodeBinaryPayload(bytes: ByteArray): DecodedWireMessage.BinaryPayload? {
+    if (bytes.size < BINARY_PAYLOAD_MAGIC.size + Long.SIZE_BYTES + Int.SIZE_BYTES) return null
+    if (!bytes.copyOfRange(0, BINARY_PAYLOAD_MAGIC.size).contentEquals(BINARY_PAYLOAD_MAGIC)) return null
+    val buffer = ByteBuffer.wrap(bytes)
+    buffer.position(BINARY_PAYLOAD_MAGIC.size)
+    val sentAt = buffer.long
+    val payloadRefSize = buffer.int
+    require(payloadRefSize in 1..buffer.remaining()) { "Invalid binary payloadRef size $payloadRefSize" }
+    val payloadRefBytes = ByteArray(payloadRefSize)
+    buffer.get(payloadRefBytes)
+    val payload = ByteArray(buffer.remaining())
+    buffer.get(payload)
+    return DecodedWireMessage.BinaryPayload(payloadRef = payloadRefBytes.decodeToString(), bytes = payload, sentAt = sentAt)
+  }
+
+  private fun CallAudioPacket.toDecodedCallAudioFrame(): DecodedWireMessage.CallAudioFrame =
+    DecodedWireMessage.CallAudioFrame(
+      callId = callId,
+      frameId = frameId,
+      senderId = senderId,
+      targetId = targetId,
+      audioBytes = audioBytes,
+      durationMs = durationMs,
+      mimeType = mimeType,
+      sequenceNumber = sequenceNumber,
+      createdAt = createdAt,
+      sentAt = sentAt,
+    )
+
   private inline fun <reified T> encodeEnvelope(type: String, payload: T, sentAt: Long): ByteArray {
     val envelope =
       WireEnvelope(
@@ -505,6 +602,7 @@ private data class VoiceMessagePayload(
   val conversationId: String,
   val senderId: String,
   val audioBase64: String,
+  val payloadRef: String? = null,
   val durationMs: Long,
   val mimeType: String,
   val createdAt: Long,
@@ -522,6 +620,7 @@ private data class ImagePayload(
   val conversationId: String,
   val senderId: String,
   val imageBase64: String,
+  val payloadRef: String? = null,
   val mimeType: String,
   val width: Int,
   val height: Int,

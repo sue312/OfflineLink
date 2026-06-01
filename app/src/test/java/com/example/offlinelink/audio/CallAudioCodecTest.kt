@@ -48,6 +48,11 @@ class CallAudioCodecTest {
     assertEquals(true, isStreamingCallAudioMimeType("audio/amr-wb;rate=16000"))
   }
 
+  @Test
+  fun lyraMimeTypeIsTreatedAsStreamingCallAudio() {
+    assertEquals(true, isStreamingCallAudioMimeType("audio/lyra;rate=16000;bitrate=3200"))
+  }
+
   private fun pcmFrame(vararg samples: Short): ByteArray {
     val bytes = ByteArray(samples.size * 2)
     samples.forEachIndexed { index, sample ->

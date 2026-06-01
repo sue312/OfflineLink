@@ -166,4 +166,4 @@ class MediaCodecAmrWbCallAudioDecoder private constructor(
 private const val CALL_AUDIO_CHANNEL_COUNT = 1
 private const val CALL_AUDIO_AMR_WB_BITRATE_BPS = 12_650
 private const val CALL_AUDIO_AMR_WB_MAX_FRAME_BYTES = 64
-private const val CODEC_TIMEOUT_US = 1_000L
+private const val CODEC_TIMEOUT_US = 10_000L

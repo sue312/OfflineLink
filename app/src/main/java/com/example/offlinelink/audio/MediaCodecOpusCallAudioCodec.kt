@@ -2,6 +2,7 @@ package com.example.offlinelink.audio
 
 import android.media.MediaCodec
 import android.media.MediaCodec.BufferInfo
+import android.media.MediaCodecInfo
 import android.media.MediaFormat
 import android.os.Build
 import java.nio.ByteBuffer
@@ -72,7 +73,7 @@ class MediaCodecOpusCallAudioEncoder private constructor(
   }
 
   companion object {
-    fun createOrNull(): MediaCodecOpusCallAudioEncoder? {
+    fun createOrNull(bitrateBps: Int = CALL_AUDIO_OPUS_BITRATE_BPS): MediaCodecOpusCallAudioEncoder? {
       if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return null
       return runCatching {
         val codec = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_AUDIO_OPUS)
@@ -82,7 +83,9 @@ class MediaCodecOpusCallAudioEncoder private constructor(
             CALL_AUDIO_OPUS_SAMPLE_RATE_HZ,
             CALL_AUDIO_CHANNEL_COUNT,
           ).apply {
-            setInteger(MediaFormat.KEY_BIT_RATE, CALL_AUDIO_OPUS_BITRATE_BPS)
+            setInteger(MediaFormat.KEY_BIT_RATE, bitrateBps)
+            runCatching { setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR) }
+            runCatching { setInteger(MediaFormat.KEY_COMPLEXITY, OPUS_ENCODER_COMPLEXITY) }
             setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, callAudioPcmFrameBytes(CALL_AUDIO_OPUS_SAMPLE_RATE_HZ))
           }
         codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
@@ -193,7 +196,8 @@ private fun longBuffer(value: Long): ByteBuffer =
 
 private const val CALL_AUDIO_CHANNEL_COUNT = 1
 private const val CALL_AUDIO_OPUS_BITRATE_BPS = 16_000
-private const val CODEC_TIMEOUT_US = 1_000L
+private const val CODEC_TIMEOUT_US = 10_000L
+private const val OPUS_ENCODER_COMPLEXITY = 10
 private const val OPUS_PRE_SKIP_SAMPLES = 312
 private const val OPUS_CODEC_DELAY_NS = 0L
 private const val OPUS_SEEK_PREROLL_NS = 80_000_000L

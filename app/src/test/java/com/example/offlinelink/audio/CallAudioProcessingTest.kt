@@ -40,6 +40,19 @@ class CallAudioProcessingTest {
     assertFalse(gate.shouldTransmit(quietFrame, quietFrame.size))
   }
 
+  @Test
+  fun defaultNoiseGatePreservesSoftSpeechAndLongerWordEndings() {
+    val gate = CallAudioNoiseGate()
+    val softVoiceFrame = repeatedPcmFrame(sample = 64, sampleCount = 320)
+    val quietFrame = repeatedPcmFrame(sample = 8, sampleCount = 320)
+
+    assertTrue(gate.shouldTransmit(softVoiceFrame, softVoiceFrame.size))
+    repeat(8) {
+      assertTrue(gate.shouldTransmit(quietFrame, quietFrame.size))
+    }
+    assertFalse(gate.shouldTransmit(quietFrame, quietFrame.size))
+  }
+
   private fun repeatedPcmFrame(sample: Short, sampleCount: Int): ByteArray =
     pcmFrame(*ShortArray(sampleCount) { sample })
 
