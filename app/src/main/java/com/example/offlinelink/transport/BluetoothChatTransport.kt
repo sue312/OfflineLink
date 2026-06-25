@@ -43,7 +43,7 @@ class BluetoothChatTransport(context: Context) : ChatTransport {
   private val pendingSockets = mutableMapOf<String, BluetoothSocket>()
   private val connections = mutableMapOf<String, BluetoothConnection>()
   private val bleL2capEndpoints = mutableMapOf<String, BleL2capEndpoint>()
-  private val verifiedOfflineLinkEndpoints = mutableSetOf<String>()
+  private val emittedEndpointIds = mutableSetOf<String>()
   private val lastSignalUpdateAtMs = mutableMapOf<String, Long>()
 
   private var l2capServerSocket: BluetoothServerSocket? = null
@@ -242,7 +242,7 @@ class BluetoothChatTransport(context: Context) : ChatTransport {
         connections.clear()
         pendingSockets.clear()
         bleL2capEndpoints.clear()
-        verifiedOfflineLinkEndpoints.clear()
+        emittedEndpointIds.clear()
         lastSignalUpdateAtMs.clear()
         Pair(activeConnections, pending)
       }
@@ -387,7 +387,7 @@ class BluetoothChatTransport(context: Context) : ChatTransport {
   private fun clearServiceChecks() {
     synchronized(lock) {
       bleL2capEndpoints.clear()
-      verifiedOfflineLinkEndpoints.clear()
+      emittedEndpointIds.clear()
     }
   }
 
@@ -613,6 +613,11 @@ class BluetoothChatTransport(context: Context) : ChatTransport {
           codedPhySupported = adapter.isLeCodedPhySupported,
           extendedAdvertisingSupported = adapter.isLeExtendedAdvertisingSupported,
         )
+    val requestExtendedAdvertisements =
+      BluetoothScanCompatibilityPolicy.shouldRequestExtendedAdvertisements(
+        useLongRangeScan = useLongRangeScan,
+        advertiserMayFallbackToLegacy = true,
+      )
 
     val callback =
       object : ScanCallback() {
@@ -646,7 +651,7 @@ class BluetoothChatTransport(context: Context) : ChatTransport {
           }
           if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && adapter.isLeCodedPhySupported) {
             setPhy(ScanSettings.PHY_LE_ALL_SUPPORTED)
-            if (useLongRangeScan) {
+            if (requestExtendedAdvertisements) {
               setLegacy(false)
             }
           }
@@ -656,6 +661,7 @@ class BluetoothChatTransport(context: Context) : ChatTransport {
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
       logDebug(
         "Bluetooth BLE scan settings longRange=$useLongRangeScan " +
+          "extended=$requestExtendedAdvertisements " +
           "codedPhySupported=${adapter.isLeCodedPhySupported} " +
           "extendedAdvertisingSupported=${adapter.isLeExtendedAdvertisingSupported}",
       )
@@ -713,7 +719,7 @@ class BluetoothChatTransport(context: Context) : ChatTransport {
     val shouldEmit =
       synchronized(lock) {
         bleL2capEndpoints[endpoint.id] = BleL2capEndpoint(result.device, psm)
-        verifiedOfflineLinkEndpoints.add(endpoint.id)
+        emittedEndpointIds.add(endpoint.id)
       }
     if (!shouldEmit) return
     logDebug("OfflineLink endpoint found ${endpoint.logLabel()} source=ble ${result.phyLogSuffix()}")

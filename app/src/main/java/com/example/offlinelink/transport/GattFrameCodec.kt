@@ -4,7 +4,7 @@ import java.nio.ByteBuffer
 
 object GattFrameCodec {
   const val HEADER_BYTES = 14
-  const val MAX_FRAME_BYTES = BluetoothFrameCodec.MAX_FRAME_BYTES
+  const val MAX_FRAME_BYTES = 1024 * 1024
 
   private const val MAGIC: Byte = 0x47
   private const val VERSION: Byte = 1
@@ -55,22 +55,32 @@ object GattFrameCodec {
       .put(chunk)
       .array()
 
-  class Reassembler {
+  class Reassembler(
+    private val maxPendingFrames: Int = DEFAULT_MAX_PENDING_FRAMES,
+    private val maxPendingBytes: Int = DEFAULT_MAX_PENDING_BYTES,
+    private val pendingFrameTtlMs: Long = DEFAULT_PENDING_FRAME_TTL_MS,
+    private val clockMs: () -> Long = { System.currentTimeMillis() },
+  ) {
     private val pending = mutableMapOf<Int, PendingFrame>()
+
+    init {
+      require(maxPendingFrames > 0) { "maxPendingFrames must be greater than 0" }
+      require(maxPendingBytes > 0) { "maxPendingBytes must be greater than 0" }
+      require(pendingFrameTtlMs > 0L) { "pendingFrameTtlMs must be greater than 0" }
+    }
 
     fun accept(fragmentBytes: ByteArray): ByteArray? {
       val fragment = decodeFragment(fragmentBytes)
       if (fragment.totalLength == 0) return ByteArray(0)
+      evictExpiredFrames()
 
       val frame =
-        pending.getOrPut(fragment.messageId) {
-          PendingFrame(
-            totalLength = fragment.totalLength,
-            payload = ByteArray(fragment.totalLength),
-            received = BooleanArray(fragment.totalLength),
-          )
-        }
+        pending[fragment.messageId]
+          ?: newPendingFrame(fragment).also {
+            pending[fragment.messageId] = it
+          }
       require(frame.totalLength == fragment.totalLength) {
+        pending.remove(fragment.messageId)
         "GATT fragment total length changed for message ${fragment.messageId}"
       }
 
@@ -88,6 +98,23 @@ object GattFrameCodec {
       if (frame.receivedBytes < frame.totalLength) return null
       pending.remove(fragment.messageId)
       return frame.payload
+    }
+
+    private fun newPendingFrame(fragment: Fragment): PendingFrame {
+      check(pending.size < maxPendingFrames) { "Too many pending GATT frames" }
+      val pendingBytes = pending.values.sumOf { it.totalLength }
+      check(pendingBytes + fragment.totalLength <= maxPendingBytes) { "Too many pending GATT frame bytes" }
+      return PendingFrame(
+        totalLength = fragment.totalLength,
+        payload = ByteArray(fragment.totalLength),
+        received = BooleanArray(fragment.totalLength),
+        createdAtMs = clockMs(),
+      )
+    }
+
+    private fun evictExpiredFrames() {
+      val now = clockMs()
+      pending.entries.removeIf { (_, frame) -> now - frame.createdAtMs > pendingFrameTtlMs }
     }
 
     private fun decodeFragment(fragmentBytes: ByteArray): Fragment {
@@ -130,6 +157,11 @@ object GattFrameCodec {
     val totalLength: Int,
     val payload: ByteArray,
     val received: BooleanArray,
+    val createdAtMs: Long,
     var receivedBytes: Int = 0,
   )
+
+  private const val DEFAULT_MAX_PENDING_FRAMES = 8
+  private const val DEFAULT_MAX_PENDING_BYTES = 2 * 1024 * 1024
+  private const val DEFAULT_PENDING_FRAME_TTL_MS = 30_000L
 }

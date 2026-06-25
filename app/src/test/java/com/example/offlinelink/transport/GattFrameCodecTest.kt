@@ -48,6 +48,46 @@ class GattFrameCodecTest {
   }
 
   @Test
+  fun rejectsFramesAboveGattLimit() {
+    assertThrows(IllegalArgumentException::class.java) {
+      GattFrameCodec.fragment(
+        payload = ByteArray(GattFrameCodec.MAX_FRAME_BYTES + 1),
+        maxValueBytes = GattFrameCodec.HEADER_BYTES + 128,
+        messageId = 42,
+      )
+    }
+  }
+
+  @Test
+  fun rejectsTooManyPendingFrames() {
+    val reassembler = GattFrameCodec.Reassembler(maxPendingFrames = 1)
+    val first = GattFrameCodec.fragment(ByteArray(20), maxValueBytes = GattFrameCodec.HEADER_BYTES + 10, messageId = 1)
+    val second = GattFrameCodec.fragment(ByteArray(20), maxValueBytes = GattFrameCodec.HEADER_BYTES + 10, messageId = 2)
+
+    assertNull(reassembler.accept(first.first()))
+    assertThrows(IllegalStateException::class.java) {
+      reassembler.accept(second.first())
+    }
+  }
+
+  @Test
+  fun evictsExpiredPendingFramesBeforeAcceptingNewOnes() {
+    var now = 1_000L
+    val reassembler =
+      GattFrameCodec.Reassembler(
+        maxPendingFrames = 1,
+        pendingFrameTtlMs = 100,
+        clockMs = { now },
+      )
+    val first = GattFrameCodec.fragment(ByteArray(20), maxValueBytes = GattFrameCodec.HEADER_BYTES + 10, messageId = 1)
+    val second = GattFrameCodec.fragment(ByteArray(20), maxValueBytes = GattFrameCodec.HEADER_BYTES + 10, messageId = 2)
+
+    assertNull(reassembler.accept(first.first()))
+    now += 101
+    assertNull(reassembler.accept(second.first()))
+  }
+
+  @Test
   fun rejectsMalformedFragments() {
     val goodFragment =
       GattFrameCodec.fragment(

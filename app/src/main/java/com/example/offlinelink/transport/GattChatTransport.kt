@@ -46,7 +46,7 @@ class GattChatTransport(context: Context) : ChatTransport {
   private val discoveredEndpoints = mutableMapOf<String, GattDiscoveredEndpoint>()
   private val pendingServerSessions = mutableMapOf<String, GattServerSession>()
   private val connections = mutableMapOf<String, GattConnection>()
-  private val verifiedOfflineLinkEndpoints = mutableSetOf<String>()
+  private val emittedEndpointIds = mutableSetOf<String>()
   private val lastSignalUpdateAtMs = mutableMapOf<String, Long>()
 
   private var gattServer: BluetoothGattServer? = null
@@ -111,7 +111,7 @@ class GattChatTransport(context: Context) : ChatTransport {
         requireScanPermission = true,
         requireAdvertisePermission = true,
       ) ?: return
-    ensureGattServer()
+    if (!ensureGattServer()) return
     startBleAdvertising(adapter, deviceId = deviceId, mode = BleBeaconMode.SignalMonitoring)
     val scanStarted = startBleScan(adapter, signalMonitoring = true)
     logDebug("Bluetooth GATT signal monitoring requested for $displayName/$deviceId started=$scanStarted")
@@ -218,7 +218,7 @@ class GattChatTransport(context: Context) : ChatTransport {
         connections.clear()
         pendingServerSessions.clear()
         discoveredEndpoints.clear()
-        verifiedOfflineLinkEndpoints.clear()
+        emittedEndpointIds.clear()
         lastSignalUpdateAtMs.clear()
         Pair(activeConnections, pendingSessions)
       }
@@ -561,16 +561,18 @@ class GattChatTransport(context: Context) : ChatTransport {
         }
         if (status != BluetoothGatt.GATT_SUCCESS || endpoint == null) return
 
+        var initiatedEvent: TransportEvent? = null
         val shouldActivate =
           synchronized(lock) {
             val session = pendingServerSessions.getOrPut(endpoint.id) { GattServerSession(device = device, endpoint = endpoint) }
             session.notificationsEnabled = true
             if (!session.initiatedEmitted && !connections.containsKey(endpoint.id)) {
               session.initiatedEmitted = true
-              emitConnectionInitiatedLocked(session)
+              initiatedEvent = connectionInitiatedEvent(session)
             }
             session.accepted
           }
+        initiatedEvent?.let(::emit)
         logDebug("Bluetooth GATT notifications enabled endpoint=${endpoint.id.takeLast(5)}")
         if (shouldActivate) {
           activateAcceptedServerSession(endpoint.id)
@@ -588,33 +590,34 @@ class GattChatTransport(context: Context) : ChatTransport {
         value: ByteArray,
       ) {
         val endpoint = endpointForDevice(device)
-        val status =
-          if (endpoint != null && characteristic.uuid == GATT_RX_CHARACTERISTIC_UUID && !preparedWrite && offset == 0) {
-            BluetoothGatt.GATT_SUCCESS
-          } else {
-            BluetoothGatt.GATT_FAILURE
+        if (endpoint == null || characteristic.uuid != GATT_RX_CHARACTERISTIC_UUID || preparedWrite || offset != 0) {
+          if (responseNeeded) {
+            gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_FAILURE, offset, ByteArray(0))
           }
-        if (responseNeeded) {
-          gattServer?.sendResponse(device, requestId, status, offset, ByteArray(0))
+          return
         }
-        if (status != BluetoothGatt.GATT_SUCCESS || endpoint == null) return
 
-        val completed =
+        val inboundTarget =
           synchronized(lock) {
             val connection = connections[endpoint.id]
             if (connection != null) {
-              connection.acceptInboundFragment(value)
-              null
+              ServerInboundTarget.Active(connection)
             } else {
               val session = pendingServerSessions.getOrPut(endpoint.id) { GattServerSession(device = device, endpoint = endpoint) }
-              val frame = session.reassembler.accept(value)
-              if (frame != null) {
-                session.pendingInbound.addLast(frame)
-              }
-              null
+              ServerInboundTarget.Pending(session)
             }
           }
-        completed?.let { emit(TransportEvent.BytesReceived(endpoint.id, it)) }
+        val writeSucceeded = acceptServerInboundFragment(endpoint.id, inboundTarget, value)
+        if (responseNeeded) {
+          val responseStatus = if (writeSucceeded) BluetoothGatt.GATT_SUCCESS else BluetoothGatt.GATT_FAILURE
+          gattServer?.sendResponse(device, requestId, responseStatus, offset, ByteArray(0))
+        }
+        if (!writeSucceeded) {
+          synchronized(lock) {
+            pendingServerSessions.remove(endpoint.id)
+          }
+          runCatching { gattServer?.cancelConnection(device) }
+        }
       }
 
       override fun onNotificationSent(
@@ -690,7 +693,13 @@ class GattChatTransport(context: Context) : ChatTransport {
         connection.start()
         pendingServerSessions.remove(endpointId)
         val previous = connections.put(endpointId, connection)
-        Activation(session, connection, previous, session.pendingInbound.toList())
+        val pendingInbound =
+          synchronized(session) {
+            session.pendingInbound.toList().also {
+              session.pendingInbound.clear()
+            }
+          }
+        Activation(session, connection, previous, pendingInbound)
       }
     activation.previousConnection?.close()
     logDebug("Bluetooth GATT server accepted endpoint=${endpointId.takeLast(5)} mtu=${activation.connection.currentMtu()}")
@@ -699,6 +708,25 @@ class GattChatTransport(context: Context) : ChatTransport {
       emit(TransportEvent.BytesReceived(endpointId, bytes))
     }
   }
+
+  private fun acceptServerInboundFragment(
+    endpointId: String,
+    target: ServerInboundTarget,
+    value: ByteArray,
+  ): Boolean =
+    when (target) {
+      is ServerInboundTarget.Active -> target.connection.acceptInboundFragment(value)
+      is ServerInboundTarget.Pending ->
+        runCatching {
+          synchronized(target.session) {
+            target.session.reassembler.accept(value)?.let { frame ->
+              target.session.pendingInbound.addLast(frame)
+            }
+          }
+        }.onFailure {
+          emitFailure("Bluetooth GATT frame decode failed endpoint=${endpointId.takeLast(5)}", it)
+        }.isSuccess
+    }
 
   @SuppressLint("MissingPermission")
   private fun requestCodedPhy(
@@ -976,6 +1004,11 @@ class GattChatTransport(context: Context) : ChatTransport {
           codedPhySupported = adapter.isLeCodedPhySupported,
           extendedAdvertisingSupported = adapter.isLeExtendedAdvertisingSupported,
         )
+    val requestExtendedAdvertisements =
+      BluetoothScanCompatibilityPolicy.shouldRequestExtendedAdvertisements(
+        useLongRangeScan = useLongRangeScan,
+        advertiserMayFallbackToLegacy = true,
+      )
 
     val callback =
       object : ScanCallback() {
@@ -1009,7 +1042,7 @@ class GattChatTransport(context: Context) : ChatTransport {
           }
           if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && adapter.isLeCodedPhySupported) {
             setPhy(ScanSettings.PHY_LE_ALL_SUPPORTED)
-            if (useLongRangeScan) {
+            if (requestExtendedAdvertisements) {
               setLegacy(false)
             }
           }
@@ -1019,6 +1052,7 @@ class GattChatTransport(context: Context) : ChatTransport {
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
       logDebug(
         "Bluetooth GATT scan settings longRange=$useLongRangeScan " +
+          "extended=$requestExtendedAdvertisements " +
           "codedPhySupported=${adapter.isLeCodedPhySupported} " +
           "extendedAdvertisingSupported=${adapter.isLeExtendedAdvertisingSupported}",
       )
@@ -1075,7 +1109,7 @@ class GattChatTransport(context: Context) : ChatTransport {
     val shouldEmit =
       synchronized(lock) {
         discoveredEndpoints[endpoint.id] = GattDiscoveredEndpoint(result.device, endpoint)
-        verifiedOfflineLinkEndpoints.add(endpoint.id)
+        emittedEndpointIds.add(endpoint.id)
       }
     if (!shouldEmit) return
     logDebug("OfflineLink GATT endpoint found ${endpoint.logLabel()} ${result.phyLogSuffix()}")
@@ -1174,18 +1208,15 @@ class GattChatTransport(context: Context) : ChatTransport {
     return NearbyEndpoint(id = endpointId, name = name, deviceId = address)
   }
 
-  private fun emitConnectionInitiatedLocked(session: GattServerSession) {
-    emit(
-      TransportEvent.ConnectionInitiated(
-        PendingConnection(
-          endpointId = session.endpoint.id,
-          endpointName = session.endpoint.name,
-          authenticationToken = bluetoothToken(session.endpoint.id),
-          deviceId = session.endpoint.deviceId,
-        ),
+  private fun connectionInitiatedEvent(session: GattServerSession): TransportEvent =
+    TransportEvent.ConnectionInitiated(
+      PendingConnection(
+        endpointId = session.endpoint.id,
+        endpointName = session.endpoint.name,
+        authenticationToken = bluetoothToken(session.endpoint.id),
+        deviceId = session.endpoint.deviceId,
       ),
     )
-  }
 
   private fun handleGattDisconnected(
     endpointId: String,
@@ -1208,7 +1239,7 @@ class GattChatTransport(context: Context) : ChatTransport {
   private fun clearServiceChecks() {
     synchronized(lock) {
       discoveredEndpoints.clear()
-      verifiedOfflineLinkEndpoints.clear()
+      emittedEndpointIds.clear()
     }
   }
 
@@ -1271,10 +1302,9 @@ class GattChatTransport(context: Context) : ChatTransport {
     private val writeQueue = ArrayDeque<OutboundWrite>()
     private val reassembler = GattFrameCodec.Reassembler()
     private val linkMetrics = BluetoothLinkMetrics()
+    private val writeTracker = GattWriteOperationTracker()
     private var senderThread: Thread? = null
     private var nextMessageId = 1
-    private var pendingWriteResult: Result<Unit>? = null
-    private var waitingForWrite = false
     @Volatile private var mtu = initialMtu
 
     fun start() {
@@ -1313,28 +1343,30 @@ class GattChatTransport(context: Context) : ChatTransport {
 
     fun currentMtu(): Int = mtu
 
-    fun acceptInboundFragment(fragment: ByteArray) {
+    fun acceptInboundFragment(fragment: ByteArray): Boolean {
       val frame =
         runCatching { reassembler.accept(fragment) }
           .getOrElse {
             onFailure("Bluetooth GATT frame decode failed", it)
             close()
-            return
-          } ?: return
+            return false
+          } ?: return true
       onBytes(frame)
+      return true
     }
 
     fun completeOutgoing(status: Int) {
       synchronized(sendLock) {
-        if (!waitingForWrite) return
-        pendingWriteResult =
+        val token = writeTracker.activeToken() ?: return
+        val result =
           if (status == BluetoothGatt.GATT_SUCCESS) {
             Result.success(Unit)
           } else {
             Result.failure(IllegalStateException("Bluetooth GATT write status=$status"))
           }
-        waitingForWrite = false
-        sendLock.notifyAll()
+        if (writeTracker.complete(token, result)) {
+          sendLock.notifyAll()
+        }
       }
     }
 
@@ -1344,8 +1376,7 @@ class GattChatTransport(context: Context) : ChatTransport {
           synchronized(sendLock) {
             val queued = writeQueue.toList()
             writeQueue.clear()
-            waitingForWrite = false
-            pendingWriteResult = Result.failure(IllegalStateException("Bluetooth GATT endpoint is closed"))
+            writeTracker.failActive(IllegalStateException("Bluetooth GATT endpoint is closed"))
             sendLock.notifyAll()
             queued
           }
@@ -1407,39 +1438,44 @@ class GattChatTransport(context: Context) : ChatTransport {
     }
 
     private fun writeFragmentAndWait(fragment: ByteArray): Result<Unit> {
+      val token =
+        synchronized(sendLock) {
+          if (closed.get()) return Result.failure(IllegalStateException("Bluetooth GATT endpoint is closed"))
+          writeTracker.begin()
+        }
       synchronized(sendLock) {
-        if (closed.get()) return Result.failure(IllegalStateException("Bluetooth GATT endpoint is closed"))
-        pendingWriteResult = null
-        waitingForWrite = true
+        if (closed.get()) {
+          writeTracker.cancel(token)
+          return Result.failure(IllegalStateException("Bluetooth GATT endpoint is closed"))
+        }
       }
       val accepted =
         runCatching { writeFragment(fragment) }
           .getOrElse { exception ->
             synchronized(sendLock) {
-              waitingForWrite = false
-              pendingWriteResult = null
+              writeTracker.cancel(token)
             }
             return Result.failure(exception)
           }
       if (!accepted) {
         synchronized(sendLock) {
-          waitingForWrite = false
-          pendingWriteResult = null
+          writeTracker.cancel(token)
         }
         return Result.failure(IllegalStateException("Bluetooth GATT stack rejected write to ${device.address}"))
       }
 
       val deadline = System.currentTimeMillis() + GATT_OPERATION_TIMEOUT_MS
       synchronized(sendLock) {
-        while (!closed.get() && pendingWriteResult == null) {
+        while (!closed.get() && writeTracker.result() == null) {
           val remaining = deadline - System.currentTimeMillis()
           if (remaining <= 0L) {
-            waitingForWrite = false
-            return Result.failure(IllegalStateException("Bluetooth GATT write timed out"))
+            val timeout = IllegalStateException("Bluetooth GATT write timed out")
+            writeTracker.timeout(token, timeout)
+            return Result.failure(timeout)
           }
           sendLock.wait(remaining)
         }
-        return pendingWriteResult ?: Result.failure(IllegalStateException("Bluetooth GATT endpoint is closed"))
+        return writeTracker.result() ?: Result.failure(IllegalStateException("Bluetooth GATT endpoint is closed"))
       }
     }
 
@@ -1476,6 +1512,12 @@ class GattChatTransport(context: Context) : ChatTransport {
     val device: BluetoothDevice,
     val endpoint: NearbyEndpoint,
   )
+
+  private sealed interface ServerInboundTarget {
+    data class Active(val connection: GattConnection) : ServerInboundTarget
+
+    data class Pending(val session: GattServerSession) : ServerInboundTarget
+  }
 
   private data class GattServerSession(
     val device: BluetoothDevice,
