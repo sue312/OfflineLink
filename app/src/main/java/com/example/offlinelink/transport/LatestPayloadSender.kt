@@ -6,6 +6,7 @@ class LatestPayloadSender(
 ) {
   private val lock = Any()
   private val endpoints = mutableMapOf<String, EndpointState>()
+  private val endpointMetrics = mutableMapOf<String, EndpointMetrics>()
 
   init {
     require(maxPendingPerEndpoint > 0) { "maxPendingPerEndpoint must be greater than 0" }
@@ -22,9 +23,11 @@ class LatestPayloadSender(
 
     synchronized(lock) {
       val state = endpoints.getOrPut(endpointId) { EndpointState() }
+      val metrics = endpointMetrics.getOrPut(endpointId) { EndpointMetrics() }
       if (state.inFlight) {
         if (state.pending.size >= maxPendingPerEndpoint) {
           dropped = state.pending.removeFirst()
+          metrics.droppedStalePayloads++
         }
         state.pending.addLast(item)
       } else {
@@ -40,12 +43,24 @@ class LatestPayloadSender(
   fun clearEndpoint(endpointId: String) {
     val dropped =
       synchronized(lock) {
+        endpointMetrics.remove(endpointId)
         endpoints.remove(endpointId)?.pending?.toList().orEmpty()
       }
     dropped.forEach {
       it.onResult(Result.failure(EndpointClearedException("Live payload queue cleared for $endpointId")))
     }
   }
+
+  fun stats(endpointId: String): EndpointStats =
+    synchronized(lock) {
+      val state = endpoints[endpointId]
+      val metrics = endpointMetrics[endpointId]
+      EndpointStats(
+        pendingCount = state?.pending?.size ?: 0,
+        inFlight = state?.inFlight == true,
+        droppedStalePayloads = metrics?.droppedStalePayloads ?: 0L,
+      )
+    }
 
   private fun dispatch(item: PendingPayload, state: EndpointState) {
     transport.send(item.endpointId, item.bytes) { result ->
@@ -86,6 +101,16 @@ class LatestPayloadSender(
   class StalePayloadDroppedException(message: String) : IllegalStateException(message)
 
   class EndpointClearedException(message: String) : IllegalStateException(message)
+
+  data class EndpointStats(
+    val pendingCount: Int = 0,
+    val inFlight: Boolean = false,
+    val droppedStalePayloads: Long = 0,
+  )
+
+  private class EndpointMetrics(
+    var droppedStalePayloads: Long = 0,
+  )
 
   private companion object {
     const val DEFAULT_MAX_PENDING_PER_ENDPOINT = 12

@@ -137,6 +137,7 @@ import com.example.offlinelink.audio.CallAudioFrame
 import com.example.offlinelink.audio.CallAudioLinkStats
 import com.example.offlinelink.audio.CallAudioProcessingMode
 import com.example.offlinelink.audio.CallAudioStream
+import com.example.offlinelink.audio.CallAudioTransmitStats
 import com.example.offlinelink.audio.CallTonePlayer
 import com.example.offlinelink.audio.RecordedVoiceClip
 import com.example.offlinelink.audio.VoicePlayer
@@ -249,6 +250,7 @@ fun MainScreen(
   val callAudioDiagnosticsPath = remember(callAudioStream) { callAudioStream.diagnosticsDirectoryPath() }
   val callAudioLinkStats = callAudioStream.linkStats()
   val state by viewModel.uiState.collectAsStateWithLifecycle()
+  val callAudioTransmitStats = viewModel.callAudioTransmitStats()
   val requiredPermissions = remember { requiredBluetoothRuntimePermissions() }
   var hasPermissions by remember {
     mutableStateOf(requiredPermissions.all { ContextCompat.checkSelfPermission(context, it) == PackageManager.PERMISSION_GRANTED })
@@ -271,6 +273,9 @@ fun MainScreen(
   }
   LaunchedEffect(callAudioProcessingMode, callAudioStream) {
     callAudioStream.setProcessingMode(callAudioProcessingMode)
+  }
+  LaunchedEffect(callAudioStream, viewModel) {
+    callAudioStream.setTransmitStatsProvider { viewModel.callAudioTransmitStats() }
   }
   LaunchedEffect(callAudioDiagnosticsEnabled, callAudioStream) {
     callAudioStream.setDiagnosticsEnabled(callAudioDiagnosticsEnabled)
@@ -342,6 +347,7 @@ fun MainScreen(
         callAudioDiagnosticsEnabled = callAudioDiagnosticsEnabled,
         callAudioDiagnosticsPath = callAudioDiagnosticsPath,
         callAudioLinkStats = callAudioLinkStats,
+        callAudioTransmitStats = callAudioTransmitStats,
       ),
     callAudioProcessingMode = callAudioProcessingMode,
     onCallAudioProcessingModeChange = { mode ->

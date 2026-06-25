@@ -17,7 +17,7 @@ class BluetoothServiceFilterTest {
   }
 
   @Test
-  fun createsEndpointOnlyForOfflineLinkBleAdvertisement() {
+  fun ignoresBleAdvertisementWithoutL2capServiceData() {
     val endpoint =
       OfflineLinkBluetoothService.endpointFromBleAdvertisement(
         address = "00:11:22:33:44:55",
@@ -25,9 +25,7 @@ class BluetoothServiceFilterTest {
         serviceUuids = listOf(OfflineLinkBluetoothService.UUID),
       )
 
-    assertEquals("00:11:22:33:44:55", endpoint?.id)
-    assertEquals("Test phone", endpoint?.name)
-    assertEquals("00:11:22:33:44:55", endpoint?.deviceId)
+    assertNull(endpoint)
     assertNull(
       OfflineLinkBluetoothService.endpointFromBleAdvertisement(
         address = "00:11:22:33:44:55",
@@ -77,5 +75,65 @@ class BluetoothServiceFilterTest {
 
     assertEquals(OfflineLinkBluetoothService.signalIdForDeviceId("device-b"), endpoint?.signalId)
     assertEquals(-63, endpoint?.rssi)
+  }
+
+  @Test
+  fun recognizesOnlyConnectableBleL2capAdvertisements() {
+    val connectableServiceData = OfflineLinkBluetoothService.encodeBleL2capServiceData(0x1234)
+
+    assertTrue(OfflineLinkBluetoothService.isConnectableBleL2capAdvertisement(connectableServiceData))
+    assertFalse(OfflineLinkBluetoothService.isConnectableBleL2capAdvertisement(null))
+    assertFalse(OfflineLinkBluetoothService.isConnectableBleL2capAdvertisement(byteArrayOf(2, 1)))
+    assertFalse(OfflineLinkBluetoothService.isConnectableBleL2capAdvertisement(byteArrayOf(2, 2, 0x12, 0x34)))
+  }
+
+  @Test
+  fun bleGattAdvertisementEndpointCarriesStableSignalIdFromServiceData() {
+    val serviceData = OfflineLinkBluetoothService.encodeBleGattServiceData(deviceId = "device-b")
+    val endpoint =
+      OfflineLinkBluetoothService.endpointFromBleGattAdvertisement(
+        address = "11:22:33:44:DC:D2",
+        name = null,
+        serviceUuids = emptyList(),
+        serviceData = serviceData,
+        rssi = -70,
+      )
+
+    assertTrue(OfflineLinkBluetoothService.isConnectableBleGattAdvertisement(serviceData))
+    assertEquals("ble-gatt:11:22:33:44:DC:D2", endpoint?.id)
+    assertEquals("Bluetooth DC:D2", endpoint?.name)
+    assertEquals("11:22:33:44:DC:D2", endpoint?.deviceId)
+    assertEquals(-70, endpoint?.rssi)
+    assertEquals(OfflineLinkBluetoothService.signalIdForDeviceId("device-b"), endpoint?.signalId)
+    assertEquals(
+      OfflineLinkBluetoothService.BleGattEndpointId(address = "11:22:33:44:DC:D2"),
+      OfflineLinkBluetoothService.parseBleGattEndpointId(endpoint?.id.orEmpty()),
+    )
+  }
+
+  @Test
+  fun recognizesOnlyConnectableBleGattAdvertisements() {
+    val connectableServiceData = OfflineLinkBluetoothService.encodeBleGattServiceData()
+
+    assertTrue(OfflineLinkBluetoothService.isConnectableBleGattAdvertisement(connectableServiceData))
+    assertFalse(OfflineLinkBluetoothService.isConnectableBleGattAdvertisement(null))
+    assertFalse(OfflineLinkBluetoothService.isConnectableBleGattAdvertisement(byteArrayOf(2)))
+    assertFalse(OfflineLinkBluetoothService.isConnectableBleGattAdvertisement(byteArrayOf(2, 1, 0x12, 0x34)))
+  }
+
+  @Test
+  fun codedAdvertisingIsUsedByDefaultWhenLongRangeIsSupported() {
+    assertTrue(
+      OfflineLinkBluetoothService.shouldUseCodedAdvertising(
+        codedPhySupported = true,
+        extendedAdvertisingSupported = true,
+      ),
+    )
+    assertFalse(
+      OfflineLinkBluetoothService.shouldUseCodedAdvertising(
+        codedPhySupported = true,
+        extendedAdvertisingSupported = false,
+      ),
+    )
   }
 }

@@ -1,6 +1,7 @@
 package com.example.offlinelink.audio
 
 import org.junit.Assert.assertTrue
+import org.junit.Assert.assertFalse
 import org.junit.Test
 import kotlin.math.PI
 import kotlin.math.sin
@@ -126,6 +127,23 @@ class CallAudioInputProcessorTest {
     val strongResidual = mixedSpeechResidual(CallAudioInputProcessorProfiles.Strong)
 
     assertTrue("naturalResidual=$naturalResidual strongResidual=$strongResidual", strongResidual < naturalResidual)
+  }
+
+  @Test
+  fun processReportsSpeechForVoiceFramesButNotHighAmplitudeNonSpeechNoise() {
+    val processor = CallAudioInputProcessor(sampleRateHz = 16_000)
+    repeat(8) {
+      val quietNoise = tonePcmFrame(frequencyHz = 2_600, amplitude = 90, sampleRateHz = 16_000, sampleCount = 320)
+      processor.process(quietNoise, quietNoise.size)
+    }
+    val windLikeNoise = alternatingPcmFrame(sample = 900, sampleCount = 320)
+    val speech = tonePcmFrame(frequencyHz = 700, amplitude = 1_000, sampleRateHz = 16_000, sampleCount = 320)
+
+    val noiseDetectedAsSpeech = processor.process(windLikeNoise, windLikeNoise.size)
+    val speechDetected = processor.process(speech, speech.size)
+
+    assertFalse(noiseDetectedAsSpeech)
+    assertTrue(speechDetected)
   }
 
   private fun repeatedPcmFrame(sample: Short, sampleCount: Int): ByteArray =

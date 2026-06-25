@@ -3,8 +3,8 @@ package com.example.offlinelink
 import android.app.Application
 import android.content.Context
 import com.example.offlinelink.crypto.EncryptedChatTransport
-import com.example.offlinelink.transport.BluetoothChatTransport
 import com.example.offlinelink.transport.ChatTransport
+import com.example.offlinelink.transport.GattChatTransport
 
 class OfflineLinkApplication : Application() {
   val offlineLinkSession: OfflineLinkSession by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
@@ -14,7 +14,7 @@ class OfflineLinkApplication : Application() {
 
 class OfflineLinkSession(context: Context) {
   val transport: ChatTransport by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
-    EncryptedChatTransport(BluetoothChatTransport(context.applicationContext))
+    EncryptedChatTransport(GattChatTransport(context.applicationContext))
   }
 }
 

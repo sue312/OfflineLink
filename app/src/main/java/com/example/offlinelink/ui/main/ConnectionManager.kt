@@ -357,7 +357,10 @@ internal fun TransportEvent.OperationFailed.isAlreadyRunningNearbyOperation(): B
 }
 
 internal fun TransportEvent.OperationFailed.isConnectionAttemptFailure(): Boolean =
-  message.startsWith("Could not request connection") || message.startsWith("Connection failed")
+  message.startsWith("Could not request connection") ||
+    message.startsWith("Connection failed") ||
+    message.startsWith("Could not connect over Bluetooth GATT") ||
+    message.startsWith("Bluetooth GATT connection failed")
 
 internal fun MainScreenViewModel.stopAdvertisingAndDiscovery() {
   transport.stopAdvertising()

@@ -76,6 +76,54 @@ class CallAudioAdaptiveEncodingTest {
   }
 
   @Test
+  fun policyUsesReliableSpeechWhenRemoteRssiIsWeak() {
+    val stats =
+      CallAudioLinkStats(
+        receivedFrames = 120,
+        lostFrames = 0,
+        lateFrames = 0,
+        averageInterArrivalMs = 20,
+        maxInterArrivalMs = 34,
+        transmitStats = CallAudioTransmitStats(remoteRssi = -94),
+      )
+
+    assertEquals(CallAudioEncodingProfile.ReliableSpeech, CallAudioEncodingPolicy.recommend(stats))
+  }
+
+  @Test
+  fun policyUsesReliableSpeechWhenTransmitPathIsCongested() {
+    val stats =
+      CallAudioLinkStats(
+        receivedFrames = 120,
+        lostFrames = 0,
+        lateFrames = 0,
+        averageInterArrivalMs = 20,
+        maxInterArrivalMs = 34,
+        transmitStats =
+          CallAudioTransmitStats(
+            socketCongested = true,
+            liveAudioPendingFrames = 3,
+            writeQueueLength = 4,
+            maxWriteBlockedMs = 190,
+          ),
+      )
+
+    assertEquals(CallAudioEncodingProfile.ReliableSpeech, CallAudioEncodingPolicy.recommend(stats))
+  }
+
+  @Test
+  fun longRangeTransmitPolicyReducesCaptureFrameRate() {
+    assertEquals(2, CallAudioTransmitPolicy.captureFrameInterval(CallAudioProcessingMode.LongRange, CallAudioTransmitStats()))
+    assertEquals(
+      3,
+      CallAudioTransmitPolicy.captureFrameInterval(
+        CallAudioProcessingMode.LongRange,
+        CallAudioTransmitStats(socketCongested = true),
+      ),
+    )
+  }
+
+  @Test
   fun policyUsesRecentWindowSoOldJitterDoesNotKeepQualityLowForever() {
     val stats =
       CallAudioLinkStats(

@@ -49,6 +49,7 @@ class CallAudioStream(context: Context) {
   @Volatile private var speakerEnabled = true
   @Volatile private var processingMode = CallAudioProcessingMode.Default
   @Volatile private var diagnosticsEnabled = false
+  @Volatile private var transmitStatsProvider: () -> CallAudioTransmitStats = { CallAudioTransmitStats() }
 
   fun setProcessingMode(mode: CallAudioProcessingMode) {
     processingMode = mode
@@ -56,6 +57,10 @@ class CallAudioStream(context: Context) {
 
   fun setDiagnosticsEnabled(enabled: Boolean) {
     diagnosticsEnabled = enabled
+  }
+
+  fun setTransmitStatsProvider(provider: () -> CallAudioTransmitStats) {
+    transmitStatsProvider = provider
   }
 
   fun diagnosticsDirectoryPath(): String = diagnosticsDirectory().absolutePath
@@ -80,8 +85,8 @@ class CallAudioStream(context: Context) {
         "Microphone permission is required"
       }
 
-      val encoder = CallAudioCodecFactory.createEncoder(appContext) { linkMonitor.snapshot() }
       val mode = processingMode
+      val encoder = CallAudioCodecFactory.createEncoder(appContext) { linkStatsForEncoding(mode) }
       val record = createRecorder(encoder.inputSampleRateHz, encoder.inputFrameBytes)
       val track = createPlayer(encoder.inputSampleRateHz)
       val diagnostics = createDiagnosticRecorder(encoder.inputSampleRateHz, mode)
@@ -238,6 +243,7 @@ class CallAudioStream(context: Context) {
     var encoder = initialEncoder
     val inputProcessor = mode.inputProcessorProfile?.let { CallAudioInputProcessor(encoder.inputSampleRateHz, it) }
     val buffer = ByteArray(encoder.inputFrameBytes)
+    var transmittableFrameIndex = 0L
     while (running.get()) {
       val read = record.read(buffer, 0, buffer.size, AudioRecord.READ_BLOCKING)
       if (read > 0) {
@@ -247,9 +253,13 @@ class CallAudioStream(context: Context) {
             noiseGate.reset()
             inputProcessor?.reset()
           } else {
-            inputProcessor?.process(buffer, read)
+            val speechHint = inputProcessor?.process(buffer, read)
             diagnostics?.writeCaptureProcessed(buffer, read)
-            if (!noiseGate.shouldTransmit(buffer, read)) return@runCatching
+            if (!noiseGate.shouldTransmit(buffer, read, speechHint)) return@runCatching
+            val frameIndex = transmittableFrameIndex++
+            if (!CallAudioTransmitPolicy.shouldTransmitCapturedFrame(mode, transmitStatsFor(mode), frameIndex)) {
+              return@runCatching
+            }
             val encodedFrame =
               encoder.encode(buffer, read).getOrElse {
                 val fallback =
@@ -272,6 +282,18 @@ class CallAudioStream(context: Context) {
           }
         }
       }
+    }
+  }
+
+  private fun linkStatsForEncoding(mode: CallAudioProcessingMode): CallAudioLinkStats =
+    linkMonitor.snapshot().copy(transmitStats = transmitStatsFor(mode))
+
+  private fun transmitStatsFor(mode: CallAudioProcessingMode): CallAudioTransmitStats {
+    val stats = transmitStatsProvider()
+    return if (mode.forceReliableEncoding && !stats.forceReliableEncoding) {
+      stats.copy(forceReliableEncoding = true)
+    } else {
+      stats
     }
   }
 

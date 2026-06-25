@@ -60,6 +60,28 @@ class LatestPayloadSenderTest {
   }
 
   @Test
+  fun statsTrackPendingAndDroppedLivePayloads() {
+    val transport = RecordingChatTransport()
+    val sender = LatestPayloadSender(transport, maxPendingPerEndpoint = 2)
+
+    sender.send(endpointId = ENDPOINT_A, bytes = bytes("one"))
+    sender.send(endpointId = ENDPOINT_A, bytes = bytes("two"))
+    sender.send(endpointId = ENDPOINT_A, bytes = bytes("three"))
+    sender.send(endpointId = ENDPOINT_A, bytes = bytes("four"))
+
+    val congestedStats = sender.stats(ENDPOINT_A)
+    assertEquals(2, congestedStats.pendingCount)
+    assertEquals(1, congestedStats.droppedStalePayloads)
+    assertTrue(congestedStats.inFlight)
+
+    transport.completeNextSuccess()
+
+    val afterOneSendStats = sender.stats(ENDPOINT_A)
+    assertEquals(1, afterOneSendStats.pendingCount)
+    assertEquals(1, afterOneSendStats.droppedStalePayloads)
+  }
+
+  @Test
   fun sendsDifferentEndpointsConcurrently() {
     val transport = RecordingChatTransport()
     val sender = LatestPayloadSender(transport)

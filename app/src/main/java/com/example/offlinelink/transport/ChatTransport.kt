@@ -43,10 +43,21 @@ interface ChatTransport {
 
   fun send(endpointId: String, bytes: ByteArray, onResult: (Result<Unit>) -> Unit)
 
+  fun linkStats(endpointId: String): TransportLinkStats = TransportLinkStats()
+
   fun disconnectEndpoint(endpointId: String)
 
   fun stopAll()
 }
+
+data class TransportLinkStats(
+  val sentBytesPerSecond: Long = 0,
+  val averageWriteBlockedMs: Long = 0,
+  val maxWriteBlockedMs: Long = 0,
+  val writeQueueLength: Int = 0,
+  val maxWriteQueueLength: Int = 0,
+  val socketCongested: Boolean = false,
+)
 
 sealed interface TransportEvent {
   data class EndpointFound(val endpoint: NearbyEndpoint) : TransportEvent

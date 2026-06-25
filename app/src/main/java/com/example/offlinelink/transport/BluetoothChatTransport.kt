@@ -4,20 +4,24 @@ import android.Manifest
 import android.annotation.SuppressLint
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
+import android.bluetooth.BluetoothGatt
+import android.bluetooth.BluetoothGattCallback
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothServerSocket
 import android.bluetooth.BluetoothSocket
+import android.bluetooth.BluetoothProfile
 import android.bluetooth.le.AdvertiseCallback
 import android.bluetooth.le.AdvertiseData
 import android.bluetooth.le.AdvertiseSettings
+import android.bluetooth.le.AdvertisingSet
+import android.bluetooth.le.AdvertisingSetCallback
+import android.bluetooth.le.AdvertisingSetParameters
+import android.bluetooth.le.BluetoothLeAdvertiser
 import android.bluetooth.le.ScanCallback
 import android.bluetooth.le.ScanFilter
 import android.bluetooth.le.ScanResult
 import android.bluetooth.le.ScanSettings
-import android.content.BroadcastReceiver
 import android.content.Context
-import android.content.Intent
-import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.ParcelUuid
@@ -38,18 +42,16 @@ class BluetoothChatTransport(context: Context) : ChatTransport {
   private val lock = Any()
   private val pendingSockets = mutableMapOf<String, BluetoothSocket>()
   private val connections = mutableMapOf<String, BluetoothConnection>()
-  private val pendingServiceChecks = mutableMapOf<String, BluetoothDevice>()
   private val bleL2capEndpoints = mutableMapOf<String, BleL2capEndpoint>()
   private val verifiedOfflineLinkEndpoints = mutableSetOf<String>()
   private val lastSignalUpdateAtMs = mutableMapOf<String, Long>()
 
-  private var serverSocket: BluetoothServerSocket? = null
-  private var serverThread: Thread? = null
   private var l2capServerSocket: BluetoothServerSocket? = null
   private var l2capServerThread: Thread? = null
   private var l2capPsm: Int? = null
-  private var discoveryReceiverRegistered = false
   private var bleAdvertiseCallback: AdvertiseCallback? = null
+  private var bleAdvertisingSet: AdvertisingSet? = null
+  private var bleAdvertisingSetCallback: AdvertisingSetCallback? = null
   private var bleScanCallback: ScanCallback? = null
 
   override val events: Flow<TransportEvent> = mutableEvents.asSharedFlow()
@@ -71,46 +73,36 @@ class BluetoothChatTransport(context: Context) : ChatTransport {
       return
     }
 
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-      val psm = startL2capListener(adapter) ?: return
-      startBleAdvertising(adapter, psm, deviceId = deviceId)
-      logDebug("Bluetooth L2CAP listener started for $displayName psm=$psm")
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+      emitFailure("Bluetooth LE L2CAP requires Android 10 or later")
       return
     }
 
-    if (!startRfcommListener(adapter)) return
-    logDebug("Bluetooth listener started for $displayName")
+    val psm = startL2capListener(adapter) ?: return
+    startBleAdvertising(adapter, psm, deviceId = deviceId)
+    logDebug("Bluetooth LE L2CAP listener started for $displayName psm=$psm")
   }
 
   @SuppressLint("MissingPermission")
   override fun startDiscovery() {
     val adapter = readyAdapter(requireConnectPermission = true, requireScanPermission = true) ?: return
     clearServiceChecks()
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+      emitFailure("Bluetooth LE L2CAP requires Android 10 or later")
+      return
+    }
     val bleScanStarted = startBleScan(adapter)
     if (bleScanStarted) {
       logDebug("Bluetooth app beacon scan requested")
       return
     }
-
-    val bondedCount = checkBondedDevices(adapter)
-    registerDiscoveryReceiver()
-    runCatching {
-      if (adapter.isDiscovering) adapter.cancelDiscovery()
-      adapter.startDiscovery()
-    }.onFailure {
-      emitFailure("Could not start Bluetooth discovery", it)
-    }.onSuccess { started ->
-      logDebug("Bluetooth discovery requested started=$started bonded=$bondedCount")
-      if (!started) emitFailure("Could not start Bluetooth discovery")
-    }
+    emitFailure("Bluetooth LE scan is required for OfflineLink BLE mode")
   }
 
   override fun stopAdvertising() {
     val sockets =
       synchronized(lock) {
-        val currentSockets = listOfNotNull(serverSocket, l2capServerSocket)
-        serverSocket = null
-        serverThread = null
+        val currentSockets = listOfNotNull(l2capServerSocket)
         l2capServerSocket = null
         l2capServerThread = null
         l2capPsm = null
@@ -128,7 +120,6 @@ class BluetoothChatTransport(context: Context) : ChatTransport {
         if (hasScanPermission() && adapter.isDiscovering) adapter.cancelDiscovery()
       }
     }
-    unregisterDiscoveryReceiver()
   }
 
   @SuppressLint("MissingPermission")
@@ -223,6 +214,11 @@ class BluetoothChatTransport(context: Context) : ChatTransport {
     connection.send(bytes, onResult)
   }
 
+  override fun linkStats(endpointId: String): TransportLinkStats =
+    synchronized(lock) {
+      connections[endpointId]?.linkStats() ?: TransportLinkStats()
+    }
+
   override fun disconnectEndpoint(endpointId: String) {
     val disconnected =
       synchronized(lock) {
@@ -245,7 +241,6 @@ class BluetoothChatTransport(context: Context) : ChatTransport {
         val pending = pendingSockets.values.toList()
         connections.clear()
         pendingSockets.clear()
-        pendingServiceChecks.clear()
         bleL2capEndpoints.clear()
         verifiedOfflineLinkEndpoints.clear()
         lastSignalUpdateAtMs.clear()
@@ -259,31 +254,8 @@ class BluetoothChatTransport(context: Context) : ChatTransport {
 
   private fun isServerRunning(): Boolean =
     synchronized(lock) {
-      serverSocket != null || l2capServerSocket != null
+      l2capServerSocket != null
     }
-
-  @SuppressLint("MissingPermission")
-  private fun startRfcommListener(adapter: BluetoothAdapter): Boolean {
-    if (synchronized(lock) { serverSocket != null }) return true
-    val socket =
-      runCatching {
-        adapter.listenUsingRfcommWithServiceRecord(OfflineLinkBluetoothService.NAME, OfflineLinkBluetoothService.UUID)
-      }.getOrElse {
-        emitFailure("Could not start Bluetooth listener", it)
-        return false
-      }
-
-    val thread =
-      Thread({ acceptLoop(socket) }, "OfflineLinkBluetoothRfcommAccept").apply {
-        isDaemon = true
-      }
-    synchronized(lock) {
-      serverSocket = socket
-      serverThread = thread
-    }
-    thread.start()
-    return true
-  }
 
   @SuppressLint("MissingPermission")
   private fun startL2capListener(adapter: BluetoothAdapter): Int? {
@@ -333,7 +305,7 @@ class BluetoothChatTransport(context: Context) : ChatTransport {
 
   private fun isCurrentServer(socket: BluetoothServerSocket): Boolean =
     synchronized(lock) {
-      serverSocket === socket || l2capServerSocket === socket
+      l2capServerSocket === socket
     }
 
   private fun handleAcceptedSocket(socket: BluetoothSocket) {
@@ -384,6 +356,7 @@ class BluetoothChatTransport(context: Context) : ChatTransport {
         deviceId = endpoint.deviceId,
         signalId = endpoint.signalId,
         socket = socket,
+        codedPhyGatt = requestCodedPhy(socket.remoteDevice, endpoint.id),
         onBytes = { bytes -> emit(TransportEvent.BytesReceived(endpoint.id, bytes)) },
         onDisconnected = { handleSocketDisconnected(endpoint.id) },
         onFailure = { message, throwable -> emitFailure(message, throwable) },
@@ -413,7 +386,6 @@ class BluetoothChatTransport(context: Context) : ChatTransport {
   @SuppressLint("MissingPermission")
   private fun clearServiceChecks() {
     synchronized(lock) {
-      pendingServiceChecks.clear()
       bleL2capEndpoints.clear()
       verifiedOfflineLinkEndpoints.clear()
     }
@@ -434,7 +406,7 @@ class BluetoothChatTransport(context: Context) : ChatTransport {
           return
         }
     synchronized(lock) {
-      if (bleAdvertiseCallback != null) return
+      if (isBleAdvertisingLocked()) return
     }
 
     val serviceUuid = ParcelUuid(OfflineLinkBluetoothService.UUID)
@@ -444,12 +416,122 @@ class BluetoothChatTransport(context: Context) : ChatTransport {
           emitFailure("Could not encode Bluetooth app beacon")
           return
         }
+    if (startCodedBleAdvertisingSet(adapter, advertiser, serviceUuid, serviceData, mode)) {
+      return
+    }
+    startLegacyBleAdvertising(advertiser, serviceUuid, serviceData, mode)
+  }
+
+  private fun startCodedBleAdvertisingSet(
+    adapter: BluetoothAdapter,
+    advertiser: BluetoothLeAdvertiser,
+    serviceUuid: ParcelUuid,
+    serviceData: ByteArray,
+    mode: BleBeaconMode,
+  ): Boolean {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return false
+    val codedPhySupported = adapter.isLeCodedPhySupported
+    val extendedAdvertisingSupported = adapter.isLeExtendedAdvertisingSupported
+    if (!OfflineLinkBluetoothService.shouldUseCodedAdvertising(codedPhySupported, extendedAdvertisingSupported)) {
+      logDebug(
+        "Bluetooth coded app beacon not used codedPhySupported=$codedPhySupported " +
+          "extendedAdvertisingSupported=$extendedAdvertisingSupported",
+      )
+      return false
+    }
+    synchronized(lock) {
+      if (isBleAdvertisingLocked()) return true
+    }
+
+    val parameters =
+      AdvertisingSetParameters.Builder()
+        .setLegacyMode(false)
+        .setConnectable(true)
+        .setScannable(false)
+        .setPrimaryPhy(BluetoothDevice.PHY_LE_CODED)
+        .setSecondaryPhy(BluetoothDevice.PHY_LE_CODED)
+        .setInterval(
+          when (mode) {
+            BleBeaconMode.Discovery -> AdvertisingSetParameters.INTERVAL_LOW
+            BleBeaconMode.SignalMonitoring -> AdvertisingSetParameters.INTERVAL_LOW
+          },
+        )
+        .setTxPowerLevel(AdvertisingSetParameters.TX_POWER_HIGH)
+        .build()
+    val data =
+      AdvertiseData.Builder()
+        .addServiceData(serviceUuid, serviceData)
+        .setIncludeDeviceName(false)
+        .build()
+    val callback =
+      object : AdvertisingSetCallback() {
+        override fun onAdvertisingSetStarted(
+          advertisingSet: AdvertisingSet?,
+          txPower: Int,
+          status: Int,
+        ) {
+          if (status == ADVERTISE_SUCCESS && advertisingSet != null) {
+            synchronized(lock) {
+              if (bleAdvertisingSetCallback === this) {
+                bleAdvertisingSet = advertisingSet
+              }
+            }
+            logDebug(
+              "Bluetooth coded app beacon started txPower=$txPower primaryPhy=LE_CODED secondaryPhy=LE_CODED",
+            )
+            return
+          }
+          val shouldFallback =
+            synchronized(lock) {
+              if (bleAdvertisingSetCallback === this) {
+                bleAdvertisingSet = null
+                bleAdvertisingSetCallback = null
+                true
+              } else {
+                false
+              }
+            }
+          if (shouldFallback) {
+            logDebug("Bluetooth coded app beacon failed status=$status; using legacy BLE advertising")
+            startLegacyBleAdvertising(advertiser, serviceUuid, serviceData, mode)
+          }
+        }
+      }
+
+    synchronized(lock) {
+      if (isBleAdvertisingLocked()) return true
+      bleAdvertisingSetCallback = callback
+    }
+    runCatching {
+      advertiser.startAdvertisingSet(parameters, data, null, null, null, callback)
+    }.onFailure {
+      synchronized(lock) {
+        if (bleAdvertisingSetCallback === callback) {
+          bleAdvertisingSet = null
+          bleAdvertisingSetCallback = null
+        }
+      }
+      logDebug("Could not start Bluetooth coded app beacon; using legacy BLE advertising")
+      startLegacyBleAdvertising(advertiser, serviceUuid, serviceData, mode)
+    }
+    return true
+  }
+
+  private fun startLegacyBleAdvertising(
+    advertiser: BluetoothLeAdvertiser,
+    serviceUuid: ParcelUuid,
+    serviceData: ByteArray,
+    mode: BleBeaconMode,
+  ) {
+    synchronized(lock) {
+      if (isBleAdvertisingLocked()) return
+    }
     val settings =
       AdvertiseSettings.Builder()
         .setAdvertiseMode(
           when (mode) {
             BleBeaconMode.Discovery -> AdvertiseSettings.ADVERTISE_MODE_LOW_LATENCY
-            BleBeaconMode.SignalMonitoring -> AdvertiseSettings.ADVERTISE_MODE_BALANCED
+            BleBeaconMode.SignalMonitoring -> AdvertiseSettings.ADVERTISE_MODE_LOW_LATENCY
           },
         )
         .setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_HIGH)
@@ -489,16 +571,27 @@ class BluetoothChatTransport(context: Context) : ChatTransport {
 
   @SuppressLint("MissingPermission")
   private fun stopBleAdvertising() {
-    val callback =
+    val callbacks =
       synchronized(lock) {
-        val current = bleAdvertiseCallback
+        val legacy = bleAdvertiseCallback
+        val advertisingSetCallback = bleAdvertisingSetCallback
         bleAdvertiseCallback = null
-        current
-      } ?: return
+        bleAdvertisingSet = null
+        bleAdvertisingSetCallback = null
+        Pair(legacy, advertisingSetCallback)
+      }
     runCatching {
-      if (hasAdvertisePermission()) adapterOrNull()?.bluetoothLeAdvertiser?.stopAdvertising(callback)
+      val advertiser = adapterOrNull()?.bluetoothLeAdvertiser ?: return@runCatching
+      if (hasAdvertisePermission()) {
+        callbacks.first?.let { advertiser.stopAdvertising(it) }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+          callbacks.second?.let { advertiser.stopAdvertisingSet(it) }
+        }
+      }
     }
-    logDebug("Bluetooth app beacon stopped")
+    if (callbacks.first != null || callbacks.second != null) {
+      logDebug("Bluetooth app beacon stopped")
+    }
   }
 
   @SuppressLint("MissingPermission")
@@ -514,8 +607,13 @@ class BluetoothChatTransport(context: Context) : ChatTransport {
           return false
         }
     stopBleScan()
+    val useLongRangeScan =
+      Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+        OfflineLinkBluetoothService.shouldUseCodedAdvertising(
+          codedPhySupported = adapter.isLeCodedPhySupported,
+          extendedAdvertisingSupported = adapter.isLeExtendedAdvertisingSupported,
+        )
 
-    val serviceUuid = ParcelUuid(OfflineLinkBluetoothService.UUID)
     val callback =
       object : ScanCallback() {
         override fun onScanResult(
@@ -536,19 +634,10 @@ class BluetoothChatTransport(context: Context) : ChatTransport {
           emitFailure("Could not scan Bluetooth app beacon", IllegalStateException("Scan error $errorCode"))
         }
       }
-    val filters =
-      listOf(
-        ScanFilter.Builder()
-          .setServiceData(
-            serviceUuid,
-            OfflineLinkBluetoothService.BLE_SERVICE_DATA_FILTER,
-            OfflineLinkBluetoothService.BLE_SERVICE_DATA_FILTER_MASK,
-          )
-          .build(),
-      )
+    val filters = emptyList<ScanFilter>()
     val settings =
       ScanSettings.Builder()
-        .setScanMode(if (signalMonitoring) ScanSettings.SCAN_MODE_BALANCED else ScanSettings.SCAN_MODE_LOW_LATENCY)
+        .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
         .setCallbackType(ScanSettings.CALLBACK_TYPE_ALL_MATCHES)
         .apply {
           if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && signalMonitoring) {
@@ -557,9 +646,20 @@ class BluetoothChatTransport(context: Context) : ChatTransport {
           }
           if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && adapter.isLeCodedPhySupported) {
             setPhy(ScanSettings.PHY_LE_ALL_SUPPORTED)
+            if (useLongRangeScan) {
+              setLegacy(false)
+            }
           }
         }
         .build()
+
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+      logDebug(
+        "Bluetooth BLE scan settings longRange=$useLongRangeScan " +
+          "codedPhySupported=${adapter.isLeCodedPhySupported} " +
+          "extendedAdvertisingSupported=${adapter.isLeExtendedAdvertisingSupported}",
+      )
+    }
 
     synchronized(lock) {
       bleScanCallback = callback
@@ -596,6 +696,7 @@ class BluetoothChatTransport(context: Context) : ChatTransport {
   ) {
     val serviceUuids = result.scanRecord?.serviceUuids?.map { it.uuid }.orEmpty()
     val serviceData = result.scanRecord?.getServiceData(ParcelUuid(OfflineLinkBluetoothService.UUID))
+    if (!OfflineLinkBluetoothService.isConnectableBleL2capAdvertisement(serviceData)) return
     val psm = OfflineLinkBluetoothService.l2capPsmFromBleServiceData(serviceData) ?: return
     val endpoint =
       OfflineLinkBluetoothService.endpointFromBleAdvertisement(
@@ -615,7 +716,7 @@ class BluetoothChatTransport(context: Context) : ChatTransport {
         verifiedOfflineLinkEndpoints.add(endpoint.id)
       }
     if (!shouldEmit) return
-    logDebug("OfflineLink endpoint found ${endpoint.logLabel()} source=ble")
+    logDebug("OfflineLink endpoint found ${endpoint.logLabel()} source=ble ${result.phyLogSuffix()}")
     emit(TransportEvent.EndpointFound(endpoint))
   }
 
@@ -640,128 +741,6 @@ class BluetoothChatTransport(context: Context) : ChatTransport {
     }
   }
 
-  @SuppressLint("MissingPermission")
-  private fun checkBondedDevices(adapter: BluetoothAdapter): Int =
-    runCatching {
-      var checkedCount = 0
-      adapter.bondedDevices.orEmpty().forEach { device ->
-        requestOfflineLinkServiceCheck(device, source = "paired")
-        checkedCount += 1
-      }
-      logDebug("Queued $checkedCount paired Bluetooth devices for OfflineLink service check")
-      checkedCount
-    }.onFailure {
-      emitFailure("Could not read paired Bluetooth devices", it)
-    }.getOrDefault(0)
-
-  @SuppressLint("MissingPermission")
-  private fun requestOfflineLinkServiceCheck(
-    device: BluetoothDevice,
-    source: String,
-  ) {
-    val address = deviceAddress(device) ?: return
-    if (OfflineLinkBluetoothService.matches(device.serviceUuids())) {
-      emitOfflineLinkDevice(device, source = "$source cached")
-      return
-    }
-
-    val shouldRequest =
-      synchronized(lock) {
-        if (verifiedOfflineLinkEndpoints.contains(address) || pendingServiceChecks.containsKey(address)) {
-          false
-        } else {
-          pendingServiceChecks[address] = device
-          true
-        }
-      }
-    if (!shouldRequest) return
-
-    runCatching { device.fetchUuidsWithSdp() }
-      .onSuccess { requested ->
-        logDebug("OfflineLink service check requested=$requested source=$source device=${address.takeLast(5)}")
-        if (!requested) {
-          synchronized(lock) { pendingServiceChecks.remove(address) }
-        }
-      }
-      .onFailure { throwable ->
-        synchronized(lock) { pendingServiceChecks.remove(address) }
-        emitFailure("Could not check Bluetooth service UUID", throwable)
-      }
-  }
-
-  private fun handleServiceUuidResult(
-    device: BluetoothDevice,
-    serviceUuids: Collection<java.util.UUID>?,
-  ) {
-    val address = deviceAddress(device) ?: return
-    synchronized(lock) { pendingServiceChecks.remove(address) }
-    if (OfflineLinkBluetoothService.matches(serviceUuids)) {
-      emitOfflineLinkDevice(device, source = "sdp")
-    } else {
-      logDebug("Ignoring Bluetooth device without OfflineLink service ${address.takeLast(5)}")
-    }
-  }
-
-  private fun emitOfflineLinkDevice(
-    device: BluetoothDevice,
-    source: String,
-  ) {
-    val endpoint = endpointForDevice(device) ?: return
-    val shouldEmit =
-      synchronized(lock) {
-        verifiedOfflineLinkEndpoints.add(endpoint.id)
-      }
-    if (!shouldEmit) return
-    logDebug("OfflineLink endpoint found ${endpoint.logLabel()} source=$source")
-    emit(TransportEvent.EndpointFound(endpoint))
-  }
-
-  private fun registerDiscoveryReceiver() {
-    synchronized(lock) {
-      if (discoveryReceiverRegistered) return
-      val filter =
-        IntentFilter().apply {
-          addAction(BluetoothDevice.ACTION_FOUND)
-          addAction(BluetoothDevice.ACTION_UUID)
-          addAction(BluetoothAdapter.ACTION_DISCOVERY_FINISHED)
-        }
-      if (Build.VERSION.SDK_INT >= 33) {
-        appContext.registerReceiver(discoveryReceiver, filter, Context.RECEIVER_EXPORTED)
-      } else {
-        @Suppress("DEPRECATION")
-        appContext.registerReceiver(discoveryReceiver, filter)
-      }
-      discoveryReceiverRegistered = true
-      logDebug("Bluetooth discovery receiver registered")
-    }
-  }
-
-  private fun unregisterDiscoveryReceiver() {
-    synchronized(lock) {
-      if (!discoveryReceiverRegistered) return
-      runCatching { appContext.unregisterReceiver(discoveryReceiver) }
-      discoveryReceiverRegistered = false
-      logDebug("Bluetooth discovery receiver unregistered")
-    }
-  }
-
-  private val discoveryReceiver =
-    object : BroadcastReceiver() {
-      override fun onReceive(context: Context?, intent: Intent?) {
-        when (intent?.action) {
-          BluetoothDevice.ACTION_FOUND -> {
-            val device = intent.bluetoothDeviceExtra() ?: return
-            requestOfflineLinkServiceCheck(device, source = "discovery")
-          }
-          BluetoothDevice.ACTION_UUID -> {
-            val device = intent.bluetoothDeviceExtra() ?: return
-            handleServiceUuidResult(device, intent.bluetoothUuidExtras())
-          }
-          BluetoothAdapter.ACTION_DISCOVERY_FINISHED -> logDebug("Bluetooth discovery finished")
-        }
-      }
-    }
-
   private fun readyAdapter(
     requireConnectPermission: Boolean,
     requireScanPermission: Boolean,
@@ -785,7 +764,7 @@ class BluetoothChatTransport(context: Context) : ChatTransport {
       return null
     }
     if (Build.VERSION.SDK_INT < 31 && requireScanPermission && !hasLocationPermission()) {
-      emitFailure("Location permission is required for Bluetooth discovery")
+      emitFailure("Location permission is required for Bluetooth LE scan")
       return null
     }
     if (!adapter.isEnabled) {
@@ -822,27 +801,105 @@ class BluetoothChatTransport(context: Context) : ChatTransport {
     runCatching { device.name }.getOrNull()
 
   @SuppressLint("MissingPermission")
-  private fun BluetoothDevice.serviceUuids(): List<java.util.UUID> =
-    runCatching { uuids?.map { it.uuid }.orEmpty() }.getOrDefault(emptyList())
-
-  @SuppressLint("MissingPermission")
   private fun createSocketForEndpoint(
     adapter: BluetoothAdapter,
     endpoint: NearbyEndpoint,
   ): BluetoothSocket {
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-      val bleEndpoint =
-        synchronized(lock) { bleL2capEndpoints[endpoint.id] }
-          ?: OfflineLinkBluetoothService.parseBleL2capEndpointId(endpoint.id)?.let {
-            BleL2capEndpoint(adapter.getRemoteDevice(it.address), it.psm)
-          }
-      if (bleEndpoint != null) {
-        return bleEndpoint.device.createInsecureL2capChannel(bleEndpoint.psm)
-      }
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+      throw IllegalStateException("Bluetooth LE L2CAP requires Android 10 or later")
+    }
+    val bleEndpoint =
+      synchronized(lock) { bleL2capEndpoints[endpoint.id] }
+        ?: OfflineLinkBluetoothService.parseBleL2capEndpointId(endpoint.id)?.let {
+          BleL2capEndpoint(adapter.getRemoteDevice(it.address), it.psm)
+        }
+        ?: throw IllegalArgumentException("OfflineLink BLE mode requires a BLE L2CAP endpoint")
+    return bleEndpoint.device.createInsecureL2capChannel(bleEndpoint.psm)
+  }
+
+  @SuppressLint("MissingPermission")
+  private fun requestCodedPhy(
+    device: BluetoothDevice,
+    endpointId: String,
+  ): BluetoothGatt? {
+    val adapter = adapterOrNull()
+    val codedPhySupported = adapter?.isLeCodedPhySupported == true
+    val hasConnectPermission = hasConnectPermission()
+    if (
+      !BluetoothCodedPhyPreference.shouldRequest(
+        sdkInt = Build.VERSION.SDK_INT,
+        codedPhySupported = codedPhySupported,
+        hasConnectPermission = hasConnectPermission,
+      )
+    ) {
+      logDebug(
+        "Bluetooth coded PHY request skipped endpoint=${endpointId.takeLast(5)} " +
+          "sdk=${Build.VERSION.SDK_INT} codedPhySupported=$codedPhySupported " +
+          "hasConnectPermission=$hasConnectPermission",
+      )
+      return null
     }
 
-    val device = adapter.getRemoteDevice(endpoint.id)
-    return device.createRfcommSocketToServiceRecord(OfflineLinkBluetoothService.UUID)
+    val callback =
+      object : BluetoothGattCallback() {
+        override fun onConnectionStateChange(
+          gatt: BluetoothGatt,
+          status: Int,
+          newState: Int,
+        ) {
+          if (status == BluetoothGatt.GATT_SUCCESS && newState == BluetoothProfile.STATE_CONNECTED) {
+            logDebug("Bluetooth coded PHY GATT connected endpoint=${endpointId.takeLast(5)}; requesting LE_CODED/S8")
+            gatt.setPreferredPhy(
+              BluetoothDevice.PHY_LE_CODED_MASK,
+              BluetoothDevice.PHY_LE_CODED_MASK,
+              BluetoothDevice.PHY_OPTION_S8,
+            )
+            gatt.readPhy()
+            return
+          }
+          if (newState == BluetoothProfile.STATE_DISCONNECTED) {
+            logDebug("Bluetooth coded PHY GATT disconnected endpoint=${endpointId.takeLast(5)} status=$status")
+          }
+        }
+
+        override fun onPhyUpdate(
+          gatt: BluetoothGatt,
+          txPhy: Int,
+          rxPhy: Int,
+          status: Int,
+        ) {
+          logDebug(
+            "Bluetooth coded PHY update endpoint=${endpointId.takeLast(5)} " +
+              "txPhy=${blePhyName(txPhy)} rxPhy=${blePhyName(rxPhy)} status=$status",
+          )
+        }
+
+        override fun onPhyRead(
+          gatt: BluetoothGatt,
+          txPhy: Int,
+          rxPhy: Int,
+          status: Int,
+        ) {
+          logDebug(
+            "Bluetooth coded PHY read endpoint=${endpointId.takeLast(5)} " +
+              "txPhy=${blePhyName(txPhy)} rxPhy=${blePhyName(rxPhy)} status=$status",
+          )
+        }
+      }
+
+    return runCatching {
+      device.connectGatt(
+        appContext,
+        false,
+        callback,
+        BluetoothDevice.TRANSPORT_LE,
+        BluetoothDevice.PHY_LE_CODED_MASK,
+      )
+    }.onSuccess {
+      logDebug("Bluetooth coded PHY GATT connect requested endpoint=${endpointId.takeLast(5)}")
+    }.onFailure {
+      emitFailure("Could not request Bluetooth coded PHY", it)
+    }.getOrNull()
   }
 
   @SuppressLint("MissingPermission")
@@ -891,8 +948,25 @@ class BluetoothChatTransport(context: Context) : ChatTransport {
     Log.d(TAG, message)
   }
 
+  private fun isBleAdvertisingLocked(): Boolean =
+    bleAdvertiseCallback != null || bleAdvertisingSetCallback != null
+
   private fun NearbyEndpoint.logLabel(): String =
     "$name/${id.takeLast(5)}"
+
+  private fun ScanResult.phyLogSuffix(): String {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return "primaryPhy=legacy"
+    return "primaryPhy=${blePhyName(primaryPhy)} secondaryPhy=${blePhyName(secondaryPhy)} txPower=$txPower"
+  }
+
+  private fun blePhyName(phy: Int): String =
+    when (phy) {
+      BluetoothDevice.PHY_LE_1M -> "LE_1M"
+      BluetoothDevice.PHY_LE_2M -> "LE_2M"
+      BluetoothDevice.PHY_LE_CODED -> "LE_CODED"
+      0 -> "UNUSED"
+      else -> "UNKNOWN_$phy"
+    }
 
   private fun BluetoothSocket.closeQuietly() {
     runCatching { close() }
@@ -902,31 +976,12 @@ class BluetoothChatTransport(context: Context) : ChatTransport {
     runCatching { close() }
   }
 
-  private fun Intent.bluetoothDeviceExtra(): BluetoothDevice? =
-    if (Build.VERSION.SDK_INT >= 33) {
-      getParcelableExtra(BluetoothDevice.EXTRA_DEVICE, BluetoothDevice::class.java)
-    } else {
-      @Suppress("DEPRECATION")
-      getParcelableExtra(BluetoothDevice.EXTRA_DEVICE)
-    }
-
-  private fun Intent.bluetoothUuidExtras(): List<java.util.UUID> =
-    if (Build.VERSION.SDK_INT >= 33) {
-      getParcelableArrayExtra(BluetoothDevice.EXTRA_UUID, ParcelUuid::class.java)
-        ?.map { it.uuid }
-        .orEmpty()
-    } else {
-      @Suppress("DEPRECATION")
-      getParcelableArrayExtra(BluetoothDevice.EXTRA_UUID)
-        ?.mapNotNull { (it as? ParcelUuid)?.uuid }
-        .orEmpty()
-    }
-
   private class BluetoothConnection(
     private val endpointId: String,
     val deviceId: String?,
     val signalId: String?,
     private val socket: BluetoothSocket,
+    private val codedPhyGatt: BluetoothGatt?,
     private val onBytes: (ByteArray) -> Unit,
     private val onDisconnected: () -> Unit,
     private val onFailure: (String, Throwable) -> Unit,
@@ -935,6 +990,7 @@ class BluetoothChatTransport(context: Context) : ChatTransport {
     @Suppress("PLATFORM_CLASS_MAPPED_TO_KOTLIN")
     private val writeQueueLock = Object()
     private val writeQueue = ArrayDeque<OutboundWrite>()
+    private val linkMetrics = BluetoothLinkMetrics()
     private var readThread: Thread? = null
     private var writeThread: Thread? = null
 
@@ -952,18 +1008,23 @@ class BluetoothChatTransport(context: Context) : ChatTransport {
     }
 
     fun send(bytes: ByteArray, onResult: (Result<Unit>) -> Unit) {
+      var statsReport: TransportLinkStats? = null
       val failure =
         synchronized(writeQueueLock) {
           if (closed.get()) {
             Result.failure<Unit>(IllegalStateException("Bluetooth endpoint is closed"))
           } else {
             writeQueue.addLast(OutboundWrite(bytes = bytes, onResult = onResult))
+            statsReport = linkMetrics.recordEnqueued(writeQueue.size)
             writeQueueLock.notifyAll()
             null
           }
         }
+      statsReport?.let(::logStats)
       failure?.let(onResult)
     }
+
+    fun linkStats(): TransportLinkStats = linkMetrics.snapshot()
 
     private fun writeLoop() {
       while (true) {
@@ -972,7 +1033,15 @@ class BluetoothChatTransport(context: Context) : ChatTransport {
           item.onResult(Result.failure(IllegalStateException("Bluetooth endpoint is closed")))
           continue
         }
+        val startedAtNs = System.nanoTime()
         val result = runCatching { BluetoothFrameCodec.writeFrame(socket.outputStream, item.bytes) }
+        val writeBlockedMs = (System.nanoTime() - startedAtNs).coerceAtLeast(0L) / 1_000_000L
+        linkMetrics
+          .recordWrite(
+            payloadBytes = item.bytes.size,
+            writeBlockedMs = writeBlockedMs,
+            queueLength = currentQueueLength(),
+          )?.let(::logStats)
         item.onResult(result)
         result.exceptionOrNull()?.let { exception ->
           if (!closed.get()) {
@@ -989,7 +1058,18 @@ class BluetoothChatTransport(context: Context) : ChatTransport {
         while (!closed.get() && writeQueue.isEmpty()) {
           writeQueueLock.wait()
         }
-        if (writeQueue.isEmpty()) null else writeQueue.removeFirst()
+        if (writeQueue.isEmpty()) {
+          null
+        } else {
+          writeQueue.removeFirst().also {
+            linkMetrics.recordQueueLength(writeQueue.size)
+          }
+        }
+      }
+
+    private fun currentQueueLength(): Int =
+      synchronized(writeQueueLock) {
+        writeQueue.size
       }
 
     fun close() {
@@ -1002,10 +1082,24 @@ class BluetoothChatTransport(context: Context) : ChatTransport {
             queued
           }
         runCatching { socket.close() }
+        runCatching { codedPhyGatt?.close() }
         pending.forEach {
           it.onResult(Result.failure(IllegalStateException("Bluetooth endpoint is closed")))
         }
       }
+    }
+
+    private fun logStats(stats: TransportLinkStats) {
+      Log.d(
+        TAG,
+        "Bluetooth link stats endpoint=${endpointId.takeLast(5)} " +
+          "txBytesPerSec=${stats.sentBytesPerSecond} " +
+          "avgWriteMs=${stats.averageWriteBlockedMs} " +
+          "maxWriteMs=${stats.maxWriteBlockedMs} " +
+          "queue=${stats.writeQueueLength} " +
+          "maxQueue=${stats.maxWriteQueueLength} " +
+          "congested=${stats.socketCongested}",
+      )
     }
 
     private fun readLoop() {

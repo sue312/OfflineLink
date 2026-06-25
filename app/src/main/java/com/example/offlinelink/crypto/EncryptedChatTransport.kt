@@ -69,6 +69,8 @@ class EncryptedChatTransport(
     delegate.send(endpointId, encrypted, onResult)
   }
 
+  override fun linkStats(endpointId: String) = delegate.linkStats(endpointId)
+
   override fun disconnectEndpoint(endpointId: String) {
     synchronized(lock) {
       sessions.remove(endpointId)

@@ -9,6 +9,9 @@ enum class CallAudioEncodingProfile {
 
 object CallAudioEncodingPolicy {
   fun recommend(stats: CallAudioLinkStats): CallAudioEncodingProfile {
+    if (CallAudioTransmitPolicy.shouldPreferReliableEncoding(stats.transmitStats)) {
+      return CallAudioEncodingProfile.ReliableSpeech
+    }
     val qualityStats = stats.qualityWindow()
     val totalFrames = qualityStats.receivedFrames + qualityStats.lostFrames
     if (totalFrames < MIN_HIGH_QUALITY_SAMPLE_FRAMES) return CallAudioEncodingProfile.ReliableSpeech

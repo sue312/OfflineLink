@@ -21,6 +21,20 @@ data class CallAudioLinkStats(
   val recentMaxGapFrames: Int = 0,
   val recentAverageInterArrivalMs: Long = 0,
   val recentMaxInterArrivalMs: Long = 0,
+  val transmitStats: CallAudioTransmitStats = CallAudioTransmitStats(),
+)
+
+data class CallAudioTransmitStats(
+  val remoteRssi: Int? = null,
+  val sentBytesPerSecond: Long = 0,
+  val averageWriteBlockedMs: Long = 0,
+  val maxWriteBlockedMs: Long = 0,
+  val writeQueueLength: Int = 0,
+  val maxWriteQueueLength: Int = 0,
+  val socketCongested: Boolean = false,
+  val liveAudioPendingFrames: Int = 0,
+  val liveAudioDroppedFrames: Long = 0,
+  val forceReliableEncoding: Boolean = false,
 )
 
 class CallAudioLinkMonitor(

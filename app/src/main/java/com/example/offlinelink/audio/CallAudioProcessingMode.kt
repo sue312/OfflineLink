@@ -5,6 +5,8 @@ enum class CallAudioProcessingMode(
   val description: String,
   val useSystemEffects: Boolean,
   val inputProcessorProfile: CallAudioInputProcessorProfile?,
+  val forceReliableEncoding: Boolean = false,
+  val baseTransmitFrameInterval: Int = 1,
 ) {
   Raw(
     displayName = "Raw",
@@ -36,10 +38,18 @@ enum class CallAudioProcessingMode(
     useSystemEffects = true,
     inputProcessorProfile = CallAudioInputProcessorProfiles.Strong,
   ),
+  LongRange(
+    displayName = "Long range",
+    description = "Lowest bitrate, fewer live frames",
+    useSystemEffects = true,
+    inputProcessorProfile = CallAudioInputProcessorProfiles.Strong,
+    forceReliableEncoding = true,
+    baseTransmitFrameInterval = 2,
+  ),
   ;
 
   companion object {
-    val Default = Balanced
+    val Default = LongRange
   }
 }
 

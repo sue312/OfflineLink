@@ -137,6 +137,7 @@ import com.example.offlinelink.audio.CallAudioFrame
 import com.example.offlinelink.audio.CallAudioLinkStats
 import com.example.offlinelink.audio.CallAudioProcessingMode
 import com.example.offlinelink.audio.CallAudioStream
+import com.example.offlinelink.audio.CallAudioTransmitStats
 import com.example.offlinelink.audio.CallTonePlayer
 import com.example.offlinelink.audio.RecordedVoiceClip
 import com.example.offlinelink.audio.VoicePlayer
@@ -454,6 +455,7 @@ internal fun diagnosticsFor(
   callAudioDiagnosticsEnabled: Boolean,
   callAudioDiagnosticsPath: String,
   callAudioLinkStats: CallAudioLinkStats,
+  callAudioTransmitStats: CallAudioTransmitStats,
 ): List<DiagnosticItem> =
   listOf(
     DiagnosticItem("Permissions", if (hasPermissions) "Granted" else "Missing"),
@@ -465,6 +467,8 @@ internal fun diagnosticsFor(
     DiagnosticItem("Call RX", "${callAudioLinkStats.receivedFrames} rx / ${callAudioLinkStats.lostFrames} lost / ${callAudioLinkStats.lateFrames} late"),
     DiagnosticItem("Call buffer", "${callAudioLinkStats.bufferedDurationMs} ms / ${callAudioLinkStats.concealedFrames} concealed"),
     DiagnosticItem("Call jitter", "${callAudioLinkStats.averageInterArrivalMs} avg / ${callAudioLinkStats.maxInterArrivalMs} max ms"),
+    DiagnosticItem("Call TX", "${callAudioTransmitStats.sentBytesPerSecond} B/s / q ${callAudioTransmitStats.liveAudioPendingFrames}+${callAudioTransmitStats.writeQueueLength} / drop ${callAudioTransmitStats.liveAudioDroppedFrames}"),
+    DiagnosticItem("BT write", "${callAudioTransmitStats.averageWriteBlockedMs} avg / ${callAudioTransmitStats.maxWriteBlockedMs} max ms"),
     DiagnosticItem("Audio WAV", if (callAudioDiagnosticsEnabled) "On" else "Off"),
     DiagnosticItem("WAV folder", callAudioDiagnosticsPath),
   )

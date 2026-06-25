@@ -6,10 +6,6 @@ import java.security.MessageDigest
 internal object OfflineLinkBluetoothService {
   const val NAME = "OfflineLink"
   val UUID: java.util.UUID = java.util.UUID.fromString("8e3f4b1a-31c4-4b64-8f10-7c9f8c94c2d6")
-  val BLE_SERVICE_DATA_FILTER: ByteArray
-    get() = byteArrayOf(BLE_SERVICE_DATA_VERSION, BLE_TRANSPORT_L2CAP)
-  val BLE_SERVICE_DATA_FILTER_MASK: ByteArray
-    get() = byteArrayOf(0xff.toByte(), 0xff.toByte())
 
   fun matches(serviceUuids: Collection<java.util.UUID>?): Boolean =
     serviceUuids?.any { it == UUID } == true
@@ -30,12 +26,37 @@ internal object OfflineLinkBluetoothService {
     return base + signalBytes
   }
 
+  fun encodeBleGattServiceData(deviceId: String? = null): ByteArray {
+    val base =
+      byteArrayOf(
+        BLE_SERVICE_DATA_VERSION,
+        BLE_TRANSPORT_GATT,
+      )
+    val signalBytes = deviceId?.let(::signalIdBytesForDeviceId) ?: return base
+    return base + signalBytes
+  }
+
   fun l2capPsmFromBleServiceData(serviceData: ByteArray?): Int? {
     if (serviceData == null || serviceData.size < BLE_L2CAP_SERVICE_DATA_LENGTH) return null
     if (serviceData[0] != BLE_SERVICE_DATA_VERSION || serviceData[1] != BLE_TRANSPORT_L2CAP) return null
     val psm = ((serviceData[2].toInt() and 0xff) shl 8) or (serviceData[3].toInt() and 0xff)
     return psm.takeIf { it in MIN_L2CAP_PSM..MAX_L2CAP_PSM }
   }
+
+  fun isConnectableBleL2capAdvertisement(serviceData: ByteArray?): Boolean =
+    l2capPsmFromBleServiceData(serviceData) != null
+
+  fun isConnectableBleGattAdvertisement(serviceData: ByteArray?): Boolean =
+    serviceData != null &&
+      serviceData.size >= BLE_GATT_SERVICE_DATA_LENGTH &&
+      serviceData[0] == BLE_SERVICE_DATA_VERSION &&
+      serviceData[1] == BLE_TRANSPORT_GATT
+
+  fun shouldUseCodedAdvertising(
+    codedPhySupported: Boolean,
+    extendedAdvertisingSupported: Boolean,
+  ): Boolean =
+    USE_CODED_ADVERTISING_BY_DEFAULT && codedPhySupported && extendedAdvertisingSupported
 
   fun endpointFromBleAdvertisement(
     address: String?,
@@ -46,13 +67,27 @@ internal object OfflineLinkBluetoothService {
   ): NearbyEndpoint? {
     val endpointAddress = normalizedBluetoothAddress(address) ?: return null
     val signalId = signalIdFromBleServiceData(serviceData)
-    val endpointId =
-      l2capPsmFromBleServiceData(serviceData)?.let { psm ->
-        bleL2capEndpointId(endpointAddress, psm)
-      } ?: run {
-        if (!matches(serviceUuids)) return null
-        endpointAddress
-      }
+    val psm = l2capPsmFromBleServiceData(serviceData) ?: return null
+    val endpointId = bleL2capEndpointId(endpointAddress, psm) ?: return null
+    val endpointName =
+      name
+        ?.trim()
+        ?.takeIf { it.isNotEmpty() }
+        ?: "Bluetooth ${endpointAddress.takeLast(5)}"
+    return NearbyEndpoint(id = endpointId, name = endpointName, deviceId = endpointAddress, rssi = rssi, signalId = signalId)
+  }
+
+  fun endpointFromBleGattAdvertisement(
+    address: String?,
+    name: String?,
+    serviceUuids: Collection<java.util.UUID>?,
+    serviceData: ByteArray? = null,
+    rssi: Int? = null,
+  ): NearbyEndpoint? {
+    val endpointAddress = normalizedBluetoothAddress(address) ?: return null
+    if (!isConnectableBleGattAdvertisement(serviceData)) return null
+    val endpointId = bleGattEndpointId(endpointAddress) ?: return null
+    val signalId = signalIdFromBleServiceData(serviceData)
     val endpointName =
       name
         ?.trim()
@@ -84,9 +119,24 @@ internal object OfflineLinkBluetoothService {
     return BleL2capEndpointId(address = address, psm = psm)
   }
 
+  fun bleGattEndpointId(address: String): String? {
+    val endpointAddress = normalizedBluetoothAddress(address) ?: return null
+    return "$BLE_GATT_ENDPOINT_PREFIX$endpointAddress"
+  }
+
+  fun parseBleGattEndpointId(endpointId: String): BleGattEndpointId? {
+    if (!endpointId.startsWith(BLE_GATT_ENDPOINT_PREFIX)) return null
+    val address = normalizedBluetoothAddress(endpointId.removePrefix(BLE_GATT_ENDPOINT_PREFIX)) ?: return null
+    return BleGattEndpointId(address = address)
+  }
+
   data class BleL2capEndpointId(
     val address: String,
     val psm: Int,
+  )
+
+  data class BleGattEndpointId(
+    val address: String,
   )
 
   private fun normalizedBluetoothAddress(address: String?): String? =
@@ -108,8 +158,14 @@ internal object OfflineLinkBluetoothService {
   }
 
   private fun signalIdFromBleServiceData(serviceData: ByteArray?): String? {
-    if (serviceData == null || serviceData.size < BLE_SIGNAL_SERVICE_DATA_LENGTH) return null
-    val bytes = serviceData.copyOfRange(BLE_L2CAP_SERVICE_DATA_LENGTH, BLE_SIGNAL_SERVICE_DATA_LENGTH)
+    val baseLength =
+      when {
+        isConnectableBleL2capAdvertisement(serviceData) -> BLE_L2CAP_SERVICE_DATA_LENGTH
+        isConnectableBleGattAdvertisement(serviceData) -> BLE_GATT_SERVICE_DATA_LENGTH
+        else -> return null
+      }
+    if (serviceData == null || serviceData.size < baseLength + BLE_SIGNAL_ID_BYTES) return null
+    val bytes = serviceData.copyOfRange(baseLength, baseLength + BLE_SIGNAL_ID_BYTES)
     return bytes.joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }
   }
 
@@ -120,11 +176,14 @@ internal object OfflineLinkBluetoothService {
 
   private const val BLE_SERVICE_DATA_VERSION: Byte = 2
   private const val BLE_TRANSPORT_L2CAP: Byte = 1
+  private const val BLE_TRANSPORT_GATT: Byte = 2
   private const val BLE_L2CAP_ENDPOINT_PREFIX = "ble-l2cap:"
+  private const val BLE_GATT_ENDPOINT_PREFIX = "ble-gatt:"
   private const val MIN_L2CAP_PSM = 1
   private const val MAX_L2CAP_PSM = 0xffff
   private const val BLUETOOTH_ADDRESS_BYTES = 6
   private const val BLE_L2CAP_SERVICE_DATA_LENGTH = 4
+  private const val BLE_GATT_SERVICE_DATA_LENGTH = 2
   private const val BLE_SIGNAL_ID_BYTES = 4
-  private const val BLE_SIGNAL_SERVICE_DATA_LENGTH = BLE_L2CAP_SERVICE_DATA_LENGTH + BLE_SIGNAL_ID_BYTES
+  private const val USE_CODED_ADVERTISING_BY_DEFAULT = true
 }
