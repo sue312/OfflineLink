@@ -1,6 +1,7 @@
 package com.example.offlinelink.crypto
 
 import com.example.offlinelink.model.NearbyEndpoint
+import com.example.offlinelink.protocol.CallAudioPacketCodec
 import com.example.offlinelink.transport.ChatTransport
 import com.example.offlinelink.transport.TransportEvent
 import kotlinx.coroutines.CoroutineScope
@@ -58,15 +59,19 @@ class EncryptedChatTransport(
     bytes: ByteArray,
     onResult: (Result<Unit>) -> Unit,
   ) {
-    val encrypted =
+    val secureBytes =
       synchronized(lock) {
-        sessions[endpointId]?.cipher?.encrypt(bytes)
+        if (CallAudioPacketCodec.isCallAudioPacket(bytes)) {
+          SecureWireFrame.raw(bytes)
+        } else {
+          sessions[endpointId]?.cipher?.encrypt(bytes)
+            ?: run {
+              onResult(Result.failure(IllegalStateException("Secure session is not established for $endpointId")))
+              return
+            }
+        }
       }
-    if (encrypted == null) {
-      onResult(Result.failure(IllegalStateException("Secure session is not established for $endpointId")))
-      return
-    }
-    delegate.send(endpointId, encrypted, onResult)
+    delegate.send(endpointId, secureBytes, onResult)
   }
 
   override fun linkStats(endpointId: String) = delegate.linkStats(endpointId)
@@ -123,6 +128,7 @@ class EncryptedChatTransport(
     when (frame) {
       is SecureWireFrame.KeyExchange -> handleKeyExchange(endpointId, frame.publicKeyBytes)
       is SecureWireFrame.Encrypted -> handleEncryptedPayload(endpointId, bytes)
+      is SecureWireFrame.Raw -> emit(TransportEvent.BytesReceived(endpointId, frame.payload))
     }
   }
 

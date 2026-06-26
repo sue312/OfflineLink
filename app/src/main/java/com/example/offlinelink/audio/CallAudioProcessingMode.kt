@@ -40,11 +40,11 @@ enum class CallAudioProcessingMode(
   ),
   LongRange(
     displayName = "Long range",
-    description = "Lowest bitrate, fewer live frames",
+    description = "Reliable voice, adaptive rate",
     useSystemEffects = true,
-    inputProcessorProfile = CallAudioInputProcessorProfiles.Strong,
+    inputProcessorProfile = CallAudioInputProcessorProfiles.Balanced,
     forceReliableEncoding = true,
-    baseTransmitFrameInterval = 2,
+    baseTransmitFrameInterval = 1,
   ),
   ;
 
@@ -53,8 +53,16 @@ enum class CallAudioProcessingMode(
   }
 }
 
-fun callAudioProcessingModeFromName(name: String?): CallAudioProcessingMode =
-  CallAudioProcessingMode.entries.firstOrNull { it.name == name } ?: CallAudioProcessingMode.Default
+val selectableCallAudioProcessingModes =
+  listOf(
+    CallAudioProcessingMode.System,
+    CallAudioProcessingMode.LongRange,
+  )
+
+fun callAudioProcessingModeFromName(name: String?): CallAudioProcessingMode {
+  val mode = CallAudioProcessingMode.entries.firstOrNull { it.name == name } ?: return CallAudioProcessingMode.Default
+  return if (mode in selectableCallAudioProcessingModes) mode else CallAudioProcessingMode.System
+}
 
 fun initialCallAudioProcessingMode(
   savedName: String?,

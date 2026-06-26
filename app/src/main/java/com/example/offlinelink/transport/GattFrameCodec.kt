@@ -6,7 +6,9 @@ object GattFrameCodec {
   const val HEADER_BYTES = 14
   const val MAX_FRAME_BYTES = 1024 * 1024
 
-  private const val MAGIC: Byte = 0x47
+  const val MAGIC: Byte = 0x47
+
+  fun isFrame(firstByte: Byte): Boolean = firstByte == MAGIC
   private const val VERSION: Byte = 1
 
   fun fragment(

@@ -134,6 +134,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation3.runtime.NavKey
 import com.example.offlinelink.audio.CallAudioFrame
+import com.example.offlinelink.audio.CallAudioEncodingMode
 import com.example.offlinelink.audio.CallAudioLinkStats
 import com.example.offlinelink.audio.CallAudioProcessingMode
 import com.example.offlinelink.audio.CallAudioStream
@@ -142,6 +143,7 @@ import com.example.offlinelink.audio.CallTonePlayer
 import com.example.offlinelink.audio.RecordedVoiceClip
 import com.example.offlinelink.audio.VoicePlayer
 import com.example.offlinelink.audio.VoiceRecorder
+import com.example.offlinelink.audio.callAudioEncodingModeFromName
 import com.example.offlinelink.audio.initialCallAudioProcessingMode
 import com.example.offlinelink.data.JsonChatHistoryRepository
 import com.example.offlinelink.data.PayloadCache
@@ -244,6 +246,9 @@ fun MainScreen(
       ),
     )
   }
+  var callAudioEncodingMode by rememberSaveable {
+    mutableStateOf(callAudioEncodingModeFromName(preferences.getString(KEY_CALL_AUDIO_ENCODING_MODE, null)))
+  }
   var callAudioDiagnosticsEnabled by rememberSaveable {
     mutableStateOf(preferences.getBoolean(KEY_CALL_AUDIO_DIAGNOSTICS_ENABLED, false))
   }
@@ -273,6 +278,9 @@ fun MainScreen(
   }
   LaunchedEffect(callAudioProcessingMode, callAudioStream) {
     callAudioStream.setProcessingMode(callAudioProcessingMode)
+  }
+  LaunchedEffect(callAudioEncodingMode, callAudioStream) {
+    callAudioStream.setEncodingMode(callAudioEncodingMode)
   }
   LaunchedEffect(callAudioStream, viewModel) {
     callAudioStream.setTransmitStatsProvider { viewModel.callAudioTransmitStats() }
@@ -344,6 +352,7 @@ fun MainScreen(
         hasPermissions = hasPermissions,
         state = state,
         callAudioProcessingMode = callAudioProcessingMode,
+        callAudioEncodingMode = callAudioEncodingMode,
         callAudioDiagnosticsEnabled = callAudioDiagnosticsEnabled,
         callAudioDiagnosticsPath = callAudioDiagnosticsPath,
         callAudioLinkStats = callAudioLinkStats,
@@ -357,6 +366,14 @@ fun MainScreen(
         .putBoolean(KEY_CALL_AUDIO_PROCESSING_MODE_USER_SELECTED, true)
         .apply()
       callAudioStream.setProcessingMode(mode)
+    },
+    callAudioEncodingMode = callAudioEncodingMode,
+    onCallAudioEncodingModeChange = { mode ->
+      callAudioEncodingMode = mode
+      preferences.edit()
+        .putString(KEY_CALL_AUDIO_ENCODING_MODE, mode.name)
+        .apply()
+      callAudioStream.setEncodingMode(mode)
     },
     callAudioDiagnosticsEnabled = callAudioDiagnosticsEnabled,
     onCallAudioDiagnosticsEnabledChange = { enabled ->
@@ -408,6 +425,8 @@ private fun OfflineChatContent(
   diagnostics: List<DiagnosticItem>,
   callAudioProcessingMode: CallAudioProcessingMode,
   onCallAudioProcessingModeChange: (CallAudioProcessingMode) -> Unit,
+  callAudioEncodingMode: CallAudioEncodingMode,
+  onCallAudioEncodingModeChange: (CallAudioEncodingMode) -> Unit,
   callAudioDiagnosticsEnabled: Boolean,
   onCallAudioDiagnosticsEnabledChange: (Boolean) -> Unit,
   callAudioDiagnosticsPath: String,
@@ -657,6 +676,8 @@ private fun OfflineChatContent(
         diagnostics = diagnostics,
         callAudioProcessingMode = callAudioProcessingMode,
         onCallAudioProcessingModeChange = onCallAudioProcessingModeChange,
+        callAudioEncodingMode = callAudioEncodingMode,
+        onCallAudioEncodingModeChange = onCallAudioEncodingModeChange,
         callAudioDiagnosticsEnabled = callAudioDiagnosticsEnabled,
         onCallAudioDiagnosticsEnabledChange = onCallAudioDiagnosticsEnabledChange,
         callAudioDiagnosticsPath = callAudioDiagnosticsPath,
@@ -682,6 +703,7 @@ private const val KEY_DISPLAY_NAME = "display_name"
 private const val KEY_AVATAR_NAME = "avatar_name"
 private const val KEY_CALL_AUDIO_PROCESSING_MODE = "call_audio_processing_mode"
 private const val KEY_CALL_AUDIO_PROCESSING_MODE_USER_SELECTED = "call_audio_processing_mode_user_selected"
+private const val KEY_CALL_AUDIO_ENCODING_MODE = "call_audio_encoding_mode"
 private const val KEY_CALL_AUDIO_DIAGNOSTICS_ENABLED = "call_audio_diagnostics_enabled"
 private const val KEY_TRUSTED_DEVICE_IDS = "trusted_device_ids"
 private const val KEY_LOCAL_DEVICE_ID = "local_device_id"
@@ -741,6 +763,8 @@ private fun OfflineChatContentPreview() {
       diagnostics = listOf(DiagnosticItem("Permissions", "Granted"), DiagnosticItem("Bluetooth", "On")),
       callAudioProcessingMode = CallAudioProcessingMode.Default,
       onCallAudioProcessingModeChange = {},
+      callAudioEncodingMode = CallAudioEncodingMode.Default,
+      onCallAudioEncodingModeChange = {},
       callAudioDiagnosticsEnabled = false,
       onCallAudioDiagnosticsEnabledChange = {},
       callAudioDiagnosticsPath = "/tmp/offline-link",

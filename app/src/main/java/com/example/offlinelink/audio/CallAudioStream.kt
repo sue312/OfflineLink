@@ -48,11 +48,16 @@ class CallAudioStream(context: Context) {
   @Volatile private var muted = false
   @Volatile private var speakerEnabled = true
   @Volatile private var processingMode = CallAudioProcessingMode.Default
+  @Volatile private var encodingMode = CallAudioEncodingMode.Default
   @Volatile private var diagnosticsEnabled = false
   @Volatile private var transmitStatsProvider: () -> CallAudioTransmitStats = { CallAudioTransmitStats() }
 
   fun setProcessingMode(mode: CallAudioProcessingMode) {
     processingMode = mode
+  }
+
+  fun setEncodingMode(mode: CallAudioEncodingMode) {
+    encodingMode = mode
   }
 
   fun setDiagnosticsEnabled(enabled: Boolean) {
@@ -86,7 +91,7 @@ class CallAudioStream(context: Context) {
       }
 
       val mode = processingMode
-      val encoder = CallAudioCodecFactory.createEncoder(appContext) { linkStatsForEncoding(mode) }
+      val encoder = CallAudioCodecFactory.createEncoder(appContext, encodingMode)
       val record = createRecorder(encoder.inputSampleRateHz, encoder.inputFrameBytes)
       val track = createPlayer(encoder.inputSampleRateHz)
       val diagnostics = createDiagnosticRecorder(encoder.inputSampleRateHz, mode)
@@ -284,9 +289,6 @@ class CallAudioStream(context: Context) {
       }
     }
   }
-
-  private fun linkStatsForEncoding(mode: CallAudioProcessingMode): CallAudioLinkStats =
-    linkMonitor.snapshot().copy(transmitStats = transmitStatsFor(mode))
 
   private fun transmitStatsFor(mode: CallAudioProcessingMode): CallAudioTransmitStats {
     val stats = transmitStatsProvider()

@@ -1,6 +1,7 @@
 package com.example.offlinelink.audio
 
 import android.content.Context
+import android.util.Log
 
 enum class CallAudioEncodingProfile {
   HighQuality,
@@ -88,6 +89,7 @@ class AdaptiveCallAudioEncoder(
   private val encoderFactory: (CallAudioEncodingProfile) -> CallAudioEncoder? = { profile ->
     createProfileEncoder(context, profile)
   },
+  private val codecLogger: (String) -> Unit = ::logCallAudioCodec,
 ) : CallAudioEncoder {
   override val inputSampleRateHz: Int = CALL_AUDIO_AMR_WB_SAMPLE_RATE_HZ
   override val inputFrameBytes: Int = callAudioPcmFrameBytes(inputSampleRateHz)
@@ -95,6 +97,7 @@ class AdaptiveCallAudioEncoder(
   private val profilePolicy = StableCallAudioEncodingPolicy()
   private var activeProfile: CallAudioEncodingProfile? = null
   private var activeEncoder: CallAudioEncoder? = null
+  private var activeCodecLogKey: CodecLogKey? = null
 
   override fun encode(
     pcmBytes: ByteArray,
@@ -103,13 +106,16 @@ class AdaptiveCallAudioEncoder(
     runCatching {
       val profile = profilePolicy.recommend(linkStatsProvider())
       val encoder = encoderFor(profile)
-      encoder.encode(pcmBytes, length).getOrThrow()
+      encoder.encode(pcmBytes, length).getOrThrow().also { frame ->
+        if (frame != null) logActiveOutputCodec(profile, encoder, frame)
+      }
     }
 
   override fun close() {
     activeEncoder?.close()
     activeEncoder = null
     activeProfile = null
+    activeCodecLogKey = null
   }
 
   private fun encoderFor(profile: CallAudioEncodingProfile): CallAudioEncoder {
@@ -121,6 +127,22 @@ class AdaptiveCallAudioEncoder(
       activeProfile = profile
       activeEncoder = encoder
     }
+  }
+
+  private fun logActiveOutputCodec(
+    profile: CallAudioEncodingProfile,
+    encoder: CallAudioEncoder,
+    frame: CallAudioFrame,
+  ) {
+    val implementation = encoder.javaClass.simpleName.ifBlank { encoder.javaClass.name }
+    val key = CodecLogKey(profile = profile, mimeType = frame.mimeType, implementation = implementation)
+    if (activeCodecLogKey == key) return
+    activeCodecLogKey = key
+    codecLogger(
+      "Call audio encoder active profile=$profile mime=${frame.mimeType} " +
+        "bitrateBps=${bitrateHintBps(profile, frame.mimeType)?.toString() ?: "unknown"} " +
+        "implementation=$implementation",
+    )
   }
 
   private companion object {
@@ -135,9 +157,9 @@ class AdaptiveCallAudioEncoder(
             ?: LyraCallAudioEncoder.createOrNull(context)
             ?: reliablePcmFallback()
         CallAudioEncodingProfile.ReliableSpeech ->
-          LyraCallAudioEncoder.createOrNull(context)
-            ?: MediaCodecOpusCallAudioEncoder.createOrNull(CALL_AUDIO_OPUS_RELIABLE_SPEECH_BITRATE_BPS)
+          MediaCodecOpusCallAudioEncoder.createOrNull(CALL_AUDIO_OPUS_RELIABLE_SPEECH_BITRATE_BPS)
             ?: MediaCodecAmrWbCallAudioEncoder.createOrNull()
+            ?: LyraCallAudioEncoder.createOrNull(context)
             ?: reliablePcmFallback()
       }
 
@@ -147,10 +169,50 @@ class AdaptiveCallAudioEncoder(
         outputSampleRateHz = CALL_AUDIO_SAMPLE_RATE_HZ,
       )
 
-    const val CALL_AUDIO_OPUS_HIGH_QUALITY_BITRATE_BPS = 32_000
-    const val CALL_AUDIO_OPUS_RELIABLE_SPEECH_BITRATE_BPS = 9_200
+  }
+
+  private data class CodecLogKey(
+    val profile: CallAudioEncodingProfile,
+    val mimeType: String,
+    val implementation: String,
+  )
+}
+
+private fun bitrateHintBps(
+  profile: CallAudioEncodingProfile,
+  mimeType: String,
+): Int? {
+  mimeTypeParameter(mimeType, "bitrate")?.toIntOrNull()?.let { return it }
+  return when {
+    mimeType.startsWith("audio/opus", ignoreCase = true) ->
+      when (profile) {
+        CallAudioEncodingProfile.HighQuality -> CALL_AUDIO_OPUS_HIGH_QUALITY_BITRATE_BPS
+        CallAudioEncodingProfile.ReliableSpeech -> CALL_AUDIO_OPUS_RELIABLE_SPEECH_BITRATE_BPS
+      }
+    mimeType.startsWith("audio/pcm", ignoreCase = true) ->
+      callAudioSampleRateFromMimeType(mimeType)?.let { it * CALL_AUDIO_BYTES_PER_SAMPLE * Byte.SIZE_BITS }
+    else -> null
   }
 }
+
+private fun mimeTypeParameter(
+  mimeType: String,
+  key: String,
+): String? =
+  mimeType
+    .split(';')
+    .asSequence()
+    .map { it.trim() }
+    .firstOrNull { it.startsWith("$key=", ignoreCase = true) }
+    ?.substringAfter('=')
+
+private fun logCallAudioCodec(message: String) {
+  runCatching { Log.d(CALL_AUDIO_ENCODER_TAG, message) }
+}
+
+private const val CALL_AUDIO_ENCODER_TAG = "CallAudioEncoder"
+private const val CALL_AUDIO_OPUS_HIGH_QUALITY_BITRATE_BPS = 32_000
+private const val CALL_AUDIO_OPUS_RELIABLE_SPEECH_BITRATE_BPS = 9_200
 
 private class StableCallAudioEncodingPolicy(
   private val goodSamplesBeforeUpgrade: Int = GOOD_SAMPLES_BEFORE_UPGRADE,

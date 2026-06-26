@@ -134,6 +134,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation3.runtime.NavKey
 import com.example.offlinelink.audio.CallAudioFrame
+import com.example.offlinelink.audio.CallAudioEncodingMode
 import com.example.offlinelink.audio.CallAudioLinkStats
 import com.example.offlinelink.audio.CallAudioProcessingMode
 import com.example.offlinelink.audio.CallAudioStream
@@ -143,6 +144,8 @@ import com.example.offlinelink.audio.RecordedVoiceClip
 import com.example.offlinelink.audio.VoicePlayer
 import com.example.offlinelink.audio.VoiceRecorder
 import com.example.offlinelink.audio.initialCallAudioProcessingMode
+import com.example.offlinelink.audio.selectableCallAudioEncodingModes
+import com.example.offlinelink.audio.selectableCallAudioProcessingModes
 import com.example.offlinelink.crypto.EncryptedChatTransport
 import com.example.offlinelink.data.JsonChatHistoryRepository
 import com.example.offlinelink.data.PayloadCache
@@ -182,6 +185,8 @@ internal fun SettingsDialog(
   diagnostics: List<DiagnosticItem>,
   callAudioProcessingMode: CallAudioProcessingMode,
   onCallAudioProcessingModeChange: (CallAudioProcessingMode) -> Unit,
+  callAudioEncodingMode: CallAudioEncodingMode,
+  onCallAudioEncodingModeChange: (CallAudioEncodingMode) -> Unit,
   callAudioDiagnosticsEnabled: Boolean,
   onCallAudioDiagnosticsEnabledChange: (Boolean) -> Unit,
   callAudioDiagnosticsPath: String,
@@ -230,6 +235,11 @@ internal fun SettingsDialog(
           CallAudioModePicker(
             selectedMode = callAudioProcessingMode,
             onModeSelected = onCallAudioProcessingModeChange,
+          )
+          Text("Encoding", style = MaterialTheme.typography.titleSmall)
+          CallAudioEncodingPicker(
+            selectedMode = callAudioEncodingMode,
+            onModeSelected = onCallAudioEncodingModeChange,
           )
           Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
@@ -280,12 +290,52 @@ internal fun SettingsDialog(
 }
 
 @Composable
+internal fun CallAudioEncodingPicker(
+  selectedMode: CallAudioEncodingMode,
+  onModeSelected: (CallAudioEncodingMode) -> Unit,
+) {
+  var expanded by remember { mutableStateOf(false) }
+  Box {
+    OutlinedButton(
+      onClick = { expanded = true },
+      shape = RoundedCornerShape(8.dp),
+      modifier = Modifier.fillMaxWidth(),
+    ) {
+      CallAudioEncodingModeContent(mode = selectedMode, modifier = Modifier.weight(1f))
+      Icon(Icons.Rounded.ExpandMore, contentDescription = null, modifier = Modifier.size(18.dp))
+    }
+    DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+      selectableCallAudioEncodingModes.forEach { mode ->
+        DropdownMenuItem(
+          text = { CallAudioEncodingModeContent(mode = mode) },
+          onClick = {
+            expanded = false
+            onModeSelected(mode)
+          },
+        )
+      }
+    }
+  }
+}
+
+@Composable
+internal fun CallAudioEncodingModeContent(
+  mode: CallAudioEncodingMode,
+  modifier: Modifier = Modifier,
+) {
+  Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(2.dp)) {
+    Text(mode.displayName, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
+    Text(mode.description, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+  }
+}
+
+@Composable
 internal fun CallAudioModePicker(
   selectedMode: CallAudioProcessingMode,
   onModeSelected: (CallAudioProcessingMode) -> Unit,
 ) {
   Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-    CallAudioProcessingMode.entries.forEach { mode ->
+    selectableCallAudioProcessingModes.forEach { mode ->
       val selected = mode == selectedMode
       if (selected) {
         Button(
@@ -452,6 +502,7 @@ internal fun diagnosticsFor(
   hasPermissions: Boolean,
   state: ChatUiState,
   callAudioProcessingMode: CallAudioProcessingMode,
+  callAudioEncodingMode: CallAudioEncodingMode,
   callAudioDiagnosticsEnabled: Boolean,
   callAudioDiagnosticsPath: String,
   callAudioLinkStats: CallAudioLinkStats,
@@ -464,6 +515,7 @@ internal fun diagnosticsFor(
     DiagnosticItem("Peer", state.connectedEndpoints.firstOrNull()?.name ?: "None"),
     DiagnosticItem("Messages", state.messages.size.toString()),
     DiagnosticItem("Call audio", callAudioProcessingMode.displayName),
+    DiagnosticItem("Call codec", callAudioEncodingMode.displayName),
     DiagnosticItem("Call RX", "${callAudioLinkStats.receivedFrames} rx / ${callAudioLinkStats.lostFrames} lost / ${callAudioLinkStats.lateFrames} late"),
     DiagnosticItem("Call buffer", "${callAudioLinkStats.bufferedDurationMs} ms / ${callAudioLinkStats.concealedFrames} concealed"),
     DiagnosticItem("Call jitter", "${callAudioLinkStats.averageInterArrivalMs} avg / ${callAudioLinkStats.maxInterArrivalMs} max ms"),

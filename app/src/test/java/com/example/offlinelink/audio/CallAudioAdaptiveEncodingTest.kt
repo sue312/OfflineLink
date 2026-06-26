@@ -112,8 +112,22 @@ class CallAudioAdaptiveEncodingTest {
   }
 
   @Test
-  fun longRangeTransmitPolicyReducesCaptureFrameRate() {
-    assertEquals(2, CallAudioTransmitPolicy.captureFrameInterval(CallAudioProcessingMode.LongRange, CallAudioTransmitStats()))
+  fun longRangeTransmitPolicyKeepsContinuousFramesUntilLinkPressure() {
+    assertEquals(1, CallAudioTransmitPolicy.captureFrameInterval(CallAudioProcessingMode.LongRange, CallAudioTransmitStats()))
+    assertEquals(
+      2,
+      CallAudioTransmitPolicy.captureFrameInterval(
+        CallAudioProcessingMode.LongRange,
+        CallAudioTransmitStats(remoteRssi = -92),
+      ),
+    )
+    assertEquals(
+      2,
+      CallAudioTransmitPolicy.captureFrameInterval(
+        CallAudioProcessingMode.LongRange,
+        CallAudioTransmitStats(writeQueueLength = 3),
+      ),
+    )
     assertEquals(
       3,
       CallAudioTransmitPolicy.captureFrameInterval(
@@ -190,6 +204,74 @@ class CallAudioAdaptiveEncodingTest {
   }
 
   @Test
+  fun adaptiveEncoderLogsActiveOutputCodecWhenFrameIsProduced() {
+    val logs = mutableListOf<String>()
+    val encoder =
+      AdaptiveCallAudioEncoder(
+        linkStatsProvider = {
+          CallAudioLinkStats(
+            receivedFrames = 120,
+            lostFrames = 0,
+            averageInterArrivalMs = 20,
+            maxInterArrivalMs = 34,
+          )
+        },
+        encoderFactory = { profile -> TaggedEncoder(profile) },
+        codecLogger = logs::add,
+      )
+
+    encoder.encode(ByteArray(encoder.inputFrameBytes)).getOrThrow()
+    encoder.encode(ByteArray(encoder.inputFrameBytes)).getOrThrow()
+
+    assertEquals(1, logs.size)
+    assertEquals(
+      "Call audio encoder active profile=HighQuality mime=test/highquality bitrateBps=unknown implementation=TaggedEncoder",
+      logs.single(),
+    )
+  }
+
+  @Test
+  fun fixedEncoderKeepsSelectedEncodingModeAcrossFrames() {
+    val createdModes = mutableListOf<CallAudioEncodingMode>()
+    val encoder =
+      FixedCallAudioEncoder(
+        mode = CallAudioEncodingMode.Opus,
+        encoderFactory = { mode ->
+          createdModes += mode
+          TaggedEncodingModeEncoder(mode)
+        },
+        codecLogger = {},
+      )
+
+    val first = encoder.encode(ByteArray(encoder.inputFrameBytes)).getOrThrow()!!
+    val second = encoder.encode(ByteArray(encoder.inputFrameBytes)).getOrThrow()!!
+
+    assertEquals(listOf(CallAudioEncodingMode.Opus), createdModes)
+    assertEquals("test/opus", first.mimeType)
+    assertEquals("test/opus", second.mimeType)
+  }
+
+  @Test
+  fun fixedEncoderLogsSelectedOutputCodecWhenFrameIsProduced() {
+    val logs = mutableListOf<String>()
+    val encoder =
+      FixedCallAudioEncoder(
+        mode = CallAudioEncodingMode.Lyra,
+        encoderFactory = { mode -> TaggedEncodingModeEncoder(mode) },
+        codecLogger = logs::add,
+      )
+
+    encoder.encode(ByteArray(encoder.inputFrameBytes)).getOrThrow()
+    encoder.encode(ByteArray(encoder.inputFrameBytes)).getOrThrow()
+
+    assertEquals(1, logs.size)
+    assertEquals(
+      "Call audio encoder active mode=Lyra mime=test/lyra bitrateBps=3200 implementation=TaggedEncodingModeEncoder",
+      logs.single(),
+    )
+  }
+
+  @Test
   fun adaptiveEncoderRequiresSustainedGoodLinkBeforeReturningToHighQuality() {
     var stats =
       CallAudioLinkStats(
@@ -239,6 +321,21 @@ class CallAudioAdaptiveEncodingTest {
         CallAudioFrame(
           bytes = byteArrayOf(profile.ordinal.toByte()),
           mimeType = "test/${profile.name.lowercase()}",
+        ),
+      )
+  }
+
+  private class TaggedEncodingModeEncoder(
+    private val mode: CallAudioEncodingMode,
+  ) : CallAudioEncoder {
+    override val inputSampleRateHz: Int = CALL_AUDIO_AMR_WB_SAMPLE_RATE_HZ
+    override val inputFrameBytes: Int = callAudioPcmFrameBytes(inputSampleRateHz)
+
+    override fun encode(pcmBytes: ByteArray, length: Int): Result<CallAudioFrame?> =
+      Result.success(
+        CallAudioFrame(
+          bytes = byteArrayOf(mode.ordinal.toByte()),
+          mimeType = "test/${mode.name.lowercase()}",
         ),
       )
   }

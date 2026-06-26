@@ -100,10 +100,10 @@ class DefaultCallAudioDecoder(
 object CallAudioCodecFactory {
   fun createEncoder(
     context: Context? = null,
-    linkStatsProvider: () -> CallAudioLinkStats = { CallAudioLinkStats() },
+    encodingMode: CallAudioEncodingMode = CallAudioEncodingMode.Default,
   ): CallAudioEncoder =
-    AdaptiveCallAudioEncoder(
-      linkStatsProvider = linkStatsProvider,
+    FixedCallAudioEncoder(
+      mode = encodingMode,
       context = context,
     )
 

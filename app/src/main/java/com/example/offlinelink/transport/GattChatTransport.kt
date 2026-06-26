@@ -335,6 +335,7 @@ class GattChatTransport(context: Context) : ChatTransport {
       if (status == BluetoothGatt.GATT_SUCCESS && newState == BluetoothProfile.STATE_CONNECTED) {
         logDebug("Bluetooth GATT client connected endpoint=${endpoint.id.takeLast(5)}; requesting LE_CODED/S8")
         requestCodedPhy(gatt, endpoint.id)
+        requestClientHighPriority(gatt, endpoint.id)
         if (!gatt.requestMtu(PREFERRED_ATT_MTU)) {
           logDebug("Bluetooth GATT MTU request not accepted endpoint=${endpoint.id.takeLast(5)}; discovering services")
           gatt.discoverServices()
@@ -424,10 +425,11 @@ class GattChatTransport(context: Context) : ChatTransport {
           device = gatt.device,
           mtuProvider = { mtu },
           writeFragment = { fragment ->
-            rx.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+            rx.writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
             rx.value = fragment
             gatt.writeCharacteristic(rx)
           },
+          writeResponseExpected = false,
           closeAction = {
             runCatching { gatt.disconnect() }
             runCatching { gatt.close() }
@@ -716,7 +718,13 @@ class GattChatTransport(context: Context) : ChatTransport {
   ): Boolean =
     when (target) {
       is ServerInboundTarget.Active -> target.connection.acceptInboundFragment(value)
-      is ServerInboundTarget.Pending ->
+      is ServerInboundTarget.Pending -> {
+        if (!GattFrameCodec.isFrame(value.firstOrNull() ?: 0)) {
+          synchronized(target.session) {
+            target.session.pendingInbound.addLast(value)
+          }
+          return true
+        }
         runCatching {
           synchronized(target.session) {
             target.session.reassembler.accept(value)?.let { frame ->
@@ -726,7 +734,25 @@ class GattChatTransport(context: Context) : ChatTransport {
         }.onFailure {
           emitFailure("Bluetooth GATT frame decode failed endpoint=${endpointId.takeLast(5)}", it)
         }.isSuccess
+      }
     }
+
+  @SuppressLint("MissingPermission")
+  private fun requestClientHighPriority(
+    gatt: BluetoothGatt,
+    endpointId: String,
+  ) {
+    if (!hasConnectPermission()) {
+      logDebug("Bluetooth GATT client high-priority request skipped endpoint=${endpointId.takeLast(5)} no permission")
+      return
+    }
+    runCatching {
+      gatt.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_BALANCED)
+      logDebug("Bluetooth GATT client connection priority requested endpoint=${endpointId.takeLast(5)} priority=BALANCED")
+    }.onFailure {
+      logDebug("Bluetooth GATT client connection priority failed endpoint=${endpointId.takeLast(5)} ${it.message}")
+    }
+  }
 
   @SuppressLint("MissingPermission")
   private fun requestCodedPhy(
@@ -1295,6 +1321,7 @@ class GattChatTransport(context: Context) : ChatTransport {
     private val closeAction: () -> Unit,
     private val onBytes: (ByteArray) -> Unit,
     private val onFailure: (String, Throwable) -> Unit,
+    private val writeResponseExpected: Boolean = true,
   ) {
     private val closed = AtomicBoolean(false)
     @Suppress("PLATFORM_CLASS_MAPPED_TO_KOTLIN")
@@ -1344,6 +1371,10 @@ class GattChatTransport(context: Context) : ChatTransport {
     fun currentMtu(): Int = mtu
 
     fun acceptInboundFragment(fragment: ByteArray): Boolean {
+      if (!GattFrameCodec.isFrame(fragment.firstOrNull() ?: 0)) {
+        onBytes(fragment)
+        return true
+      }
       val frame =
         runCatching { reassembler.accept(fragment) }
           .getOrElse {
@@ -1391,6 +1422,15 @@ class GattChatTransport(context: Context) : ChatTransport {
       while (!closed.get()) {
         val item = nextWrite() ?: return
         val result = sendItem(item)
+        if (result.isFailure && result.exceptionOrNull() is BackpressureException) {
+          synchronized(sendLock) {
+            if (closed.get()) return
+            writeQueue.addFirst(item)
+            sendLock.notifyAll()
+          }
+          Thread.sleep(BACKPRESSURE_RETRY_DELAY_MS)
+          continue
+        }
         item.onResult(result)
         result.exceptionOrNull()?.let { exception ->
           if (!closed.get()) {
@@ -1417,11 +1457,24 @@ class GattChatTransport(context: Context) : ChatTransport {
       }
 
     private fun sendItem(item: OutboundWrite): Result<Unit> {
+      val maxValue = maxGattValueBytes()
+      if (item.bytes.size <= maxValue) {
+        val startedAtNs = System.nanoTime()
+        val result = writeFragmentAndWait(item.bytes)
+        val writeBlockedMs = (System.nanoTime() - startedAtNs).coerceAtLeast(0L) / 1_000_000L
+        linkMetrics
+          .recordWrite(
+            payloadBytes = item.bytes.size,
+            writeBlockedMs = writeBlockedMs,
+            queueLength = currentQueueLength(),
+          )?.let(::logStats)
+        return result
+      }
       val messageId =
         synchronized(sendLock) {
           nextMessageId++
         }
-      val fragments = GattFrameCodec.fragment(item.bytes, maxGattValueBytes(), messageId)
+      val fragments = GattFrameCodec.fragment(item.bytes, maxValue, messageId)
       fragments.forEach { fragment ->
         val startedAtNs = System.nanoTime()
         val result = writeFragmentAndWait(fragment)
@@ -1461,7 +1514,20 @@ class GattChatTransport(context: Context) : ChatTransport {
         synchronized(sendLock) {
           writeTracker.cancel(token)
         }
-        return Result.failure(IllegalStateException("Bluetooth GATT stack rejected write to ${device.address}"))
+        return Result.failure(
+          if (writeResponseExpected) {
+            IllegalStateException("Bluetooth GATT stack rejected write to ${device.address}")
+          } else {
+            BackpressureException()
+          }
+        )
+      }
+
+      if (!writeResponseExpected) {
+        synchronized(sendLock) {
+          writeTracker.complete(token, Result.success(Unit))
+        }
+        return Result.success(Unit)
       }
 
       val deadline = System.currentTimeMillis() + GATT_OPERATION_TIMEOUT_MS
@@ -1506,6 +1572,8 @@ class GattChatTransport(context: Context) : ChatTransport {
       val bytes: ByteArray,
       val onResult: (Result<Unit>) -> Unit,
     )
+
+    class BackpressureException : IllegalStateException("BLE write buffer full — backing off")
   }
 
   private data class GattDiscoveredEndpoint(
@@ -1549,6 +1617,7 @@ class GattChatTransport(context: Context) : ChatTransport {
     const val ATT_PROTOCOL_OVERHEAD_BYTES = 3
     const val SIGNAL_UPDATE_MIN_INTERVAL_MS = 1_500L
     const val GATT_OPERATION_TIMEOUT_MS = 10_000L
+    const val BACKPRESSURE_RETRY_DELAY_MS = 15L
     val GATT_RX_CHARACTERISTIC_UUID: UUID = UUID.fromString("8e3f4b1b-31c4-4b64-8f10-7c9f8c94c2d6")
     val GATT_TX_CHARACTERISTIC_UUID: UUID = UUID.fromString("8e3f4b1c-31c4-4b64-8f10-7c9f8c94c2d6")
     val CLIENT_CHARACTERISTIC_CONFIG_UUID: UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")

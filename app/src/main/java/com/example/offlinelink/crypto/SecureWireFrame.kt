@@ -10,10 +10,13 @@ sealed interface SecureWireFrame {
     val ciphertext: ByteArray,
   ) : SecureWireFrame
 
+  data class Raw(val payload: ByteArray) : SecureWireFrame
+
   companion object {
     private val MAGIC = byteArrayOf('O'.code.toByte(), 'L'.code.toByte(), 'S'.code.toByte(), '1'.code.toByte())
     private const val KIND_KEY_EXCHANGE: Byte = 1
     private const val KIND_ENCRYPTED: Byte = 2
+    private const val KIND_RAW: Byte = 3
 
     fun keyExchange(publicKeyBytes: ByteArray): ByteArray =
       ByteBuffer
@@ -39,6 +42,14 @@ sealed interface SecureWireFrame {
         .array()
     }
 
+    fun raw(payload: ByteArray): ByteArray =
+      ByteBuffer
+        .allocate(MAGIC.size + 1 + payload.size)
+        .put(MAGIC)
+        .put(KIND_RAW)
+        .put(payload)
+        .array()
+
     fun decode(bytes: ByteArray): SecureWireFrame? {
       if (bytes.size < MAGIC.size + 1) return null
       if (!bytes.copyOfRange(0, MAGIC.size).contentEquals(MAGIC)) return null
@@ -62,6 +73,11 @@ sealed interface SecureWireFrame {
           val ciphertext = ByteArray(buffer.remaining())
           buffer.get(ciphertext)
           Encrypted(nonce, ciphertext)
+        }
+        KIND_RAW -> {
+          val payload = ByteArray(buffer.remaining())
+          buffer.get(payload)
+          Raw(payload)
         }
         else -> error("Unknown secure frame kind $kind")
       }
