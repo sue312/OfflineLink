@@ -102,12 +102,15 @@ class ChatProtocolTest {
   }
 
   @Test
-  fun encodeAndDecodeMessagePayloadPreservesTextAndIds() {
+  fun encodeAndDecodeMessagePayloadUsesCompactWireIds() {
+    val messageId = "44444444-4444-4444-4444-444444444444"
+    val conversationId = "55555555-5555-5555-5555-555555555555"
+    val senderId = "11111111-1111-1111-1111-111111111111"
     val bytes =
       ChatProtocol.encodeMessage(
-        messageId = "msg-1",
-        conversationId = "conversation-a",
-        senderId = "device-a",
+        messageId = messageId,
+        conversationId = conversationId,
+        senderId = senderId,
         text = "hello nearby",
         createdAt = 1234L,
         sentAt = 5678L,
@@ -117,9 +120,11 @@ class ChatProtocolTest {
 
     assertTrue(decoded is DecodedWireMessage.Message)
     val message = decoded as DecodedWireMessage.Message
-    assertEquals("msg-1", message.messageId)
-    assertEquals("conversation-a", message.conversationId)
-    assertEquals("device-a", message.senderId)
+    assertTrue(bytes.size < 45)
+    assertFalse(bytes.decodeToString().contains("\"type\""))
+    assertEquals(ChatProtocol.compactWireId(messageId), message.messageId)
+    assertEquals(ChatProtocol.compactWireId(conversationId), message.conversationId)
+    assertEquals(ChatProtocol.compactWireId(senderId), message.senderId)
     assertEquals("hello nearby", message.text)
     assertEquals(1234L, message.createdAt)
     assertEquals(5678L, message.sentAt)
@@ -180,15 +185,60 @@ class ChatProtocolTest {
   }
 
   @Test
-  fun encodeAndDecodeAckPayloadPreservesAcknowledgedMessageId() {
-    val bytes = ChatProtocol.encodeAck(messageId = "msg-2", sentAt = 8765L)
+  fun encodeAndDecodeAckPayloadUsesCompactWireId() {
+    val messageId = "44444444-4444-4444-4444-444444444444"
+    val bytes = ChatProtocol.encodeAck(messageId = messageId, sentAt = 8765L)
 
     val decoded = ChatProtocol.decode(bytes)
 
     assertTrue(decoded is DecodedWireMessage.Ack)
     val ack = decoded as DecodedWireMessage.Ack
-    assertEquals("msg-2", ack.messageId)
+    assertTrue(bytes.size <= 11)
+    assertEquals(ChatProtocol.compactWireId(messageId), ack.messageId)
+    assertTrue(ChatProtocol.matchesWireId(messageId, ack.messageId))
     assertEquals(8765L, ack.sentAt)
+  }
+
+  @Test
+  fun encodeAndDecodeLocationUsesCompactWireIds() {
+    val messageId = "44444444-4444-4444-4444-444444444444"
+    val conversationId = "55555555-5555-5555-5555-555555555555"
+    val senderId = "11111111-1111-1111-1111-111111111111"
+    val bytes =
+      ChatProtocol.encodeLocation(
+        messageId = messageId,
+        conversationId = conversationId,
+        senderId = senderId,
+        latitude = 31.230416,
+        longitude = 121.473701,
+        accuracy = 5.5f,
+        createdAt = 1234L,
+        sentAt = 5678L,
+      )
+
+    val decoded = ChatProtocol.decode(bytes)
+
+    assertTrue(bytes.size <= 36)
+    assertFalse(bytes.decodeToString().contains("\"latitude\""))
+    assertTrue(decoded is DecodedWireMessage.LocationMessage)
+    val location = decoded as DecodedWireMessage.LocationMessage
+    assertEquals(ChatProtocol.compactWireId(messageId), location.messageId)
+    assertEquals(ChatProtocol.compactWireId(conversationId), location.conversationId)
+    assertEquals(ChatProtocol.compactWireId(senderId), location.senderId)
+    assertEquals(31.230416, location.latitude, 0.0000001)
+    assertEquals(121.473701, location.longitude, 0.0000001)
+    assertEquals(5.5f, location.accuracy ?: -1f, 0.01f)
+    assertEquals(1234L, location.createdAt)
+    assertEquals(5678L, location.sentAt)
+  }
+
+  @Test
+  fun compactAckEncryptedFrameFitsSingleLongRangeGattValue() {
+    val messageId = "44444444-4444-4444-4444-444444444444"
+    val bytes = ChatProtocol.encodeAck(messageId = messageId, sentAt = 8765L)
+
+    assertTrue(bytes.size <= 11)
+    assertTrue(bytes.size + 34 <= 45)
   }
 
   @Test
@@ -207,6 +257,33 @@ class ChatProtocolTest {
     val request = decoded as DecodedWireMessage.CallRequest
     assertEquals("call-1", request.callId)
     assertEquals("device-a", request.senderId)
+    assertEquals(1234L, request.createdAt)
+    assertEquals(5678L, request.sentAt)
+  }
+
+  @Test
+  fun compactCallRequestUsesWireIdsForUuidMetadata() {
+    val callId = "33333333-3333-3333-3333-333333333333"
+    val senderId = "11111111-1111-1111-1111-111111111111"
+    val targetId = "22222222-2222-2222-2222-222222222222"
+    val bytes =
+      ChatProtocol.encodeCallRequest(
+        callId = callId,
+        senderId = senderId,
+        targetId = targetId,
+        createdAt = 1234L,
+        sentAt = 5678L,
+      )
+
+    val decoded = ChatProtocol.decode(bytes)
+
+    assertTrue(bytes.size <= 26)
+    assertFalse(bytes.decodeToString().contains("\"callId\""))
+    assertTrue(decoded is DecodedWireMessage.CallRequest)
+    val request = decoded as DecodedWireMessage.CallRequest
+    assertEquals(ChatProtocol.compactWireId(callId), request.callId)
+    assertEquals(ChatProtocol.compactWireId(senderId), request.senderId)
+    assertEquals(ChatProtocol.compactWireId(targetId), request.targetId)
     assertEquals(1234L, request.createdAt)
     assertEquals(5678L, request.sentAt)
   }

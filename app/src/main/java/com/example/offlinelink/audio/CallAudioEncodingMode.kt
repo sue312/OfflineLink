@@ -6,7 +6,7 @@ enum class CallAudioEncodingMode(
 ) {
   Opus(
     displayName = "Opus",
-    description = "9.2 kbps, recommended",
+    description = "6.4 kbps, long range",
   ),
   Lyra(
     displayName = "Lyra",
@@ -33,4 +33,4 @@ val selectableCallAudioEncodingModes =
 fun callAudioEncodingModeFromName(name: String?): CallAudioEncodingMode =
   CallAudioEncodingMode.entries.firstOrNull { it.name == name } ?: CallAudioEncodingMode.Default
 
-internal const val CALL_AUDIO_OPUS_FIXED_BITRATE_BPS = 9_200
+internal const val CALL_AUDIO_OPUS_FIXED_BITRATE_BPS = 6_400

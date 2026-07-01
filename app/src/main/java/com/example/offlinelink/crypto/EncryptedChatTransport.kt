@@ -2,6 +2,8 @@ package com.example.offlinelink.crypto
 
 import com.example.offlinelink.model.NearbyEndpoint
 import com.example.offlinelink.protocol.CallAudioPacketCodec
+import com.example.offlinelink.protocol.CompactCallAudioWireFrame
+import com.example.offlinelink.protocol.CompactWireCodec
 import com.example.offlinelink.transport.ChatTransport
 import com.example.offlinelink.transport.TransportEvent
 import kotlinx.coroutines.CoroutineScope
@@ -62,13 +64,17 @@ class EncryptedChatTransport(
     val secureBytes =
       synchronized(lock) {
         if (CallAudioPacketCodec.isCallAudioPacket(bytes)) {
-          SecureWireFrame.raw(bytes)
+          encodeCallAudioFrame(bytes)
         } else {
-          sessions[endpointId]?.cipher?.encrypt(bytes)
+          val cipher =
+            sessions[endpointId]?.cipher
             ?: run {
               onResult(Result.failure(IllegalStateException("Secure session is not established for $endpointId")))
               return
             }
+          CompactWireCodec.rawShortTextPayloadOrNull(bytes)
+            ?.let { SecureWireFrame.shortText(it) }
+            ?: cipher.encrypt(bytes)
         }
       }
     delegate.send(endpointId, secureBytes, onResult)
@@ -129,6 +135,56 @@ class EncryptedChatTransport(
       is SecureWireFrame.KeyExchange -> handleKeyExchange(endpointId, frame.publicKeyBytes)
       is SecureWireFrame.Encrypted -> handleEncryptedPayload(endpointId, bytes)
       is SecureWireFrame.Raw -> emit(TransportEvent.BytesReceived(endpointId, frame.payload))
+      is SecureWireFrame.ShortText -> handleShortTextPayload(endpointId, frame.payload)
+      is SecureWireFrame.CallAudio ->
+        emit(
+          TransportEvent.BytesReceived(
+            endpointId,
+            CallAudioPacketCodec.encodeCompactSingleFrame(
+              CompactCallAudioWireFrame(
+                codecId = frame.codecId,
+                sequenceNumber = frame.sequenceNumber,
+                durationMs = frame.durationMs,
+                audioBytes = frame.audioBytes,
+              ),
+            ),
+          ),
+        )
+    }
+  }
+
+  private fun handleShortTextPayload(
+    endpointId: String,
+    payload: ByteArray,
+  ) {
+    val hasSecureSession =
+      synchronized(lock) {
+        sessions[endpointId]?.cipher != null
+      }
+    if (!hasSecureSession) {
+      emit(TransportEvent.OperationFailed("Received short text before secure session was established"))
+      return
+    }
+    val shortTextPayload =
+      CompactWireCodec.rawShortTextPayloadOrNull(payload)
+        ?: run {
+          emit(TransportEvent.OperationFailed("Received invalid short text payload"))
+          return
+        }
+    emit(TransportEvent.BytesReceived(endpointId, shortTextPayload))
+  }
+
+  private fun encodeCallAudioFrame(bytes: ByteArray): ByteArray {
+    val frame = CallAudioPacketCodec.compactSingleFrameOrNull(bytes) ?: return SecureWireFrame.raw(bytes)
+    return runCatching {
+      SecureWireFrame.callAudio(
+        codecId = frame.codecId,
+        sequenceNumber = frame.sequenceNumber,
+        durationMs = frame.durationMs,
+        audioBytes = frame.audioBytes,
+      )
+    }.getOrElse {
+      SecureWireFrame.raw(bytes)
     }
   }
 

@@ -1,6 +1,7 @@
 ﻿package com.example.offlinelink.ui.main
 
 import android.net.Uri
+import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.offlinelink.audio.isStreamingCallAudioMimeType
@@ -26,7 +27,9 @@ import com.example.offlinelink.protocol.CallAudioFrameRedundancy
 import com.example.offlinelink.protocol.DecodedWireMessage
 import com.example.offlinelink.protocol.WireMember
 import com.example.offlinelink.transport.ChatTransport
+import com.example.offlinelink.transport.GattFrameCodec
 import com.example.offlinelink.transport.LatestPayloadSender
+import com.example.offlinelink.transport.LONG_RANGE_GATT_VALUE_BYTES
 import com.example.offlinelink.transport.PriorityPayloadSender
 import com.example.offlinelink.transport.PriorityPayloadSender.PayloadPriority
 import com.example.offlinelink.transport.TransportEvent
@@ -144,8 +147,18 @@ internal fun MainScreenViewModel.sendPayloadWithBinaryAttachment(
   onResult: (Result<Unit>) -> Unit = {},
 ) {
   val binaryBytes = ChatProtocol.encodeBinaryPayload(payloadRef = payloadRef, bytes = attachmentBytes)
+  logMessageManagerDebug(
+    "Sending binary attachment endpoint=${endpointId.takeLast(5)} priority=$priority " +
+      "payloadRef=$payloadRef attachmentBytes=${attachmentBytes.size} " +
+      "binaryBytes=${binaryBytes.size} envelopeBytes=${envelopeBytes.size} " +
+      "estimatedGattFragments=${estimatedLongRangeGattFragments(binaryBytes.size)}",
+  )
   sendPayload(endpointId, binaryBytes, priority) { binaryResult ->
     if (binaryResult.isFailure) {
+      logMessageManagerWarning(
+        "Binary attachment failed endpoint=${endpointId.takeLast(5)} priority=$priority",
+        binaryResult.exceptionOrNull(),
+      )
       onResult(binaryResult)
       return@sendPayload
     }
@@ -267,6 +280,25 @@ internal fun MainScreenViewModel.sendExistingMessageTo(
       }
     }
   }
+}
+
+private fun estimatedLongRangeGattFragments(bytes: Int): Int {
+  if (bytes <= LONG_RANGE_GATT_VALUE_BYTES) return 1
+  val chunkBytes = LONG_RANGE_GATT_VALUE_BYTES - GattFrameCodec.HEADER_BYTES
+  return (bytes + chunkBytes - 1) / chunkBytes
+}
+
+private const val MESSAGE_MANAGER_TAG = "MessageManager"
+
+private fun logMessageManagerDebug(message: String) {
+  runCatching { Log.d(MESSAGE_MANAGER_TAG, message) }
+}
+
+private fun logMessageManagerWarning(
+  message: String,
+  throwable: Throwable?,
+) {
+  runCatching { Log.w(MESSAGE_MANAGER_TAG, message, throwable) }
 }
 
 internal fun MainScreenViewModel.sendExistingWirePayload(

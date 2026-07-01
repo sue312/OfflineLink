@@ -4,6 +4,7 @@ import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.offlinelink.audio.CallAudioTransmitStats
+import com.example.offlinelink.audio.VOICE_MESSAGE_MIME_TYPE
 import com.example.offlinelink.audio.isStreamingCallAudioMimeType
 import com.example.offlinelink.chat.ChatSessionStore
 import com.example.offlinelink.data.ChatHistoryRepository
@@ -650,12 +651,12 @@ class MainScreenViewModel(
 
   internal companion object {
     const val DEFAULT_GROUP_NAME = "Offline group"
-    const val VOICE_MIME_TYPE = "audio/3gpp"
+    const val VOICE_MIME_TYPE = VOICE_MESSAGE_MIME_TYPE
     const val LOCATION_REQUEST_TIMEOUT_MS = 15_000L
     const val LOCATION_TIMEOUT_MESSAGE = "Location timed out. Check Location is enabled and try again."
     const val LIVE_AUDIO_MAX_PENDING_FRAMES = 2
     const val MAX_BLUETOOTH_REDUNDANT_CALL_AUDIO_FRAME_BYTES = 48
-    const val MAX_BLUETOOTH_REDUNDANT_CALL_AUDIO_FRAMES = 1
+    const val MAX_BLUETOOTH_REDUNDANT_CALL_AUDIO_FRAMES = 0
     const val MAX_REDUNDANT_CALL_AUDIO_FRAME_HISTORY = 2
   }
 

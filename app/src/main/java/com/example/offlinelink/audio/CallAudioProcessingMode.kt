@@ -38,25 +38,16 @@ enum class CallAudioProcessingMode(
     useSystemEffects = true,
     inputProcessorProfile = CallAudioInputProcessorProfiles.Strong,
   ),
-  LongRange(
-    displayName = "Long range",
-    description = "Reliable voice, adaptive rate",
-    useSystemEffects = true,
-    inputProcessorProfile = CallAudioInputProcessorProfiles.Balanced,
-    forceReliableEncoding = true,
-    baseTransmitFrameInterval = 1,
-  ),
   ;
 
   companion object {
-    val Default = LongRange
+    val Default = System
   }
 }
 
 val selectableCallAudioProcessingModes =
   listOf(
     CallAudioProcessingMode.System,
-    CallAudioProcessingMode.LongRange,
   )
 
 fun callAudioProcessingModeFromName(name: String?): CallAudioProcessingMode {

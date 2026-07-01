@@ -1,5 +1,6 @@
 package com.example.offlinelink.ui.main
 
+import com.example.offlinelink.audio.CALL_AUDIO_OPUS_MIME_TYPE
 import com.example.offlinelink.model.ConnectionStatus
 import com.example.offlinelink.model.CallStatus
 import com.example.offlinelink.model.ChatMessage
@@ -1761,7 +1762,7 @@ class MainScreenViewModelTest {
     advanceUntilIdle()
 
     val retried = ChatProtocol.decode(transport.sentPayloads.single().bytes) as DecodedWireMessage.Message
-    assertEquals(messageId, retried.messageId)
+    assertTrue(ChatProtocol.matchesWireId(messageId, retried.messageId))
     assertEquals(MessageStatus.Sent, viewModel.uiState.value.messages.single().status)
   }
 
@@ -1867,6 +1868,22 @@ class MainScreenViewModelTest {
   }
 
   @Test
+  fun sendVoiceMessageDefaultsToOpusSmallFrameMimeType() = runTest {
+    val transport = FakeChatTransport()
+    val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) }, payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads")), localDeviceId = "local")
+
+    advanceUntilIdle()
+    transport.emit(TransportEvent.Connected(NearbyEndpoint("endpoint-b", "Phone B")))
+    advanceUntilIdle()
+    transport.clearSentPayloads()
+
+    viewModel.sendVoiceMessage(byteArrayOf(1, 2, 3, 4), durationMs = 40L)
+
+    val voiceMessage = ChatProtocol.decode(transport.sentPayloads[1].bytes) as DecodedWireMessage.VoiceMessage
+    assertEquals(CALL_AUDIO_OPUS_MIME_TYPE, voiceMessage.mimeType)
+  }
+
+  @Test
   fun formatCallDurationUsesMinuteSecondClock() {
     assertEquals("0:00", formatCallDuration(0L))
     assertEquals("0:09", formatCallDuration(9_400L))
@@ -1915,8 +1932,8 @@ class MainScreenViewModelTest {
     assertEquals("endpoint-b", viewModel.uiState.value.callState.peerEndpointId)
     assertEquals("endpoint-b", transport.sentPayloads.single().endpointId)
     val request = ChatProtocol.decode(transport.sentPayloads.single().bytes) as DecodedWireMessage.CallRequest
-    assertEquals("local", request.senderId)
-    assertEquals(viewModel.uiState.value.callState.callId, request.callId)
+    assertTrue(ChatProtocol.matchesWireId("local", request.senderId))
+    assertTrue(ChatProtocol.matchesWireId(viewModel.uiState.value.callState.callId ?: "", request.callId))
   }
 
   @Test
@@ -2169,7 +2186,7 @@ class MainScreenViewModelTest {
   }
 
   @Test
-  fun sendSmallStreamingCallAudioFrameAddsPreviousFrameRedundancy() = runTest {
+  fun sendSmallStreamingCallAudioFrameDoesNotAddPreviousFrameRedundancy() = runTest {
     val transport = FakeChatTransport()
     val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) }, payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads")), localDeviceId = "local")
 
@@ -2198,14 +2215,13 @@ class MainScreenViewModelTest {
     )
 
     val decodedFrames = ChatProtocol.decodeAll(transport.sentPayloads.last().bytes).filterIsInstance<DecodedWireMessage.CallAudioFrame>()
-    assertEquals(70, transport.sentPayloads.last().bytes.size)
-    assertEquals(listOf(0, 1), decodedFrames.map { it.sequenceNumber })
-    assertEquals((0 until 23).toList(), decodedFrames[0].audioBytes.map { it.toInt() })
-    assertEquals((30 until 53).toList(), decodedFrames[1].audioBytes.map { it.toInt() })
+    assertEquals(35, transport.sentPayloads.last().bytes.size)
+    assertEquals(listOf(1), decodedFrames.map { it.sequenceNumber })
+    assertEquals((30 until 53).toList(), decodedFrames.single().audioBytes.map { it.toInt() })
   }
 
   @Test
-  fun bluetoothStreamingCallAudioKeepsOnlyOnePreviousFrameRedundancy() = runTest {
+  fun bluetoothStreamingCallAudioSendsOnlyCurrentFrameWithoutRedundancy() = runTest {
     val transport = FakeChatTransport()
     val viewModel = MainScreenViewModel(transport, requestLocation = { Result.success(com.example.offlinelink.location.DeviceLocation(1.0, 2.0, null)) }, compressImage = { Result.success(com.example.offlinelink.image.CompressedImage(byteArrayOf(), "image/jpeg", 1, 1)) }, payloadCache = com.example.offlinelink.data.PayloadCache(java.io.File(System.getProperty("java.io.tmpdir"), "test-payloads")), localDeviceId = "local")
 
@@ -2227,8 +2243,8 @@ class MainScreenViewModelTest {
     viewModel.sendCallVoiceMessage(byteArrayOf(3), durationMs = 20L, mimeType = "audio/opus;rate=16000")
 
     val decodedFrames = ChatProtocol.decodeAll(transport.sentPayloads.last().bytes).filterIsInstance<DecodedWireMessage.CallAudioFrame>()
-    assertEquals(2, decodedFrames.size)
-    assertEquals(listOf(1, 2), decodedFrames.map { it.sequenceNumber })
+    assertEquals(1, decodedFrames.size)
+    assertEquals(listOf(2), decodedFrames.map { it.sequenceNumber })
   }
 
   @Test

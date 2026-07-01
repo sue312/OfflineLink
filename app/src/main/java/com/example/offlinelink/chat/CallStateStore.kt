@@ -4,6 +4,7 @@ import com.example.offlinelink.model.CallState
 import com.example.offlinelink.model.CallStatus
 import com.example.offlinelink.model.CallVoicePlayback
 import com.example.offlinelink.model.NearbyEndpoint
+import com.example.offlinelink.protocol.ChatProtocol
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -60,7 +61,7 @@ class CallStateStore {
     startedAt: Long = System.currentTimeMillis(),
   ): Boolean {
     val current = state.value
-    if (current.callState.callId != callId) return false
+    if (!sameCallId(current.callState.callId, callId)) return false
     if (current.callState.status != CallStatus.Incoming && current.callState.status != CallStatus.Outgoing) return false
     update { it.copy(callState = it.callState.copy(status = CallStatus.Active, startedAt = startedAt)) }
     return true
@@ -69,7 +70,7 @@ class CallStateStore {
   fun endCall(callId: String? = null): Boolean {
     val current = state.value
     if (current.callState.status == CallStatus.Idle) return false
-    if (callId != null && current.callState.callId != callId) return false
+    if (callId != null && !sameCallId(current.callState.callId, callId)) return false
     clear()
     return true
   }
@@ -86,7 +87,7 @@ class CallStateStore {
     activityLabel: String,
   ) {
     val current = state.value
-    if (current.callState.status != CallStatus.Active || current.callState.callId != playback.callId) return
+    if (current.callState.status != CallStatus.Active || !sameCallId(current.callState.callId, playback.callId)) return
     update { it.copy(callState = it.callState.copy(activityLabel = activityLabel), callPlayback = playback) }
   }
 
@@ -102,4 +103,10 @@ class CallStateStore {
   private fun update(reducer: (CallSessionState) -> CallSessionState) {
     mutableState.value = reducer(mutableState.value)
   }
+
+  private fun sameCallId(
+    currentCallId: String?,
+    incomingCallId: String,
+  ): Boolean =
+    currentCallId != null && ChatProtocol.matchesWireId(currentCallId, incomingCallId)
 }

@@ -1,7 +1,9 @@
 package com.example.offlinelink.crypto
 
 import org.junit.Assert.assertArrayEquals
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class EcdhAesGcmTest {
@@ -18,5 +20,14 @@ class EcdhAesGcmTest {
 
     assertFalse(encrypted.decodeToString().contains("hello over bluetooth"))
     assertArrayEquals(plaintext, bobCipher.decrypt(encrypted))
+  }
+
+  @Test
+  fun keyExchangeFrameFitsSingleLongRangeGattValue() {
+    val alice = EcdhKeyExchange()
+    val keyExchangeFrame = SecureWireFrame.keyExchange(alice.publicKeyBytes)
+
+    assertEquals(33, alice.publicKeyBytes.size)
+    assertTrue(keyExchangeFrame.size <= 45)
   }
 }

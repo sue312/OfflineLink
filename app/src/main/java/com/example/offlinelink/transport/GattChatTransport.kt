@@ -32,11 +32,23 @@ import android.util.Log
 import androidx.core.content.ContextCompat
 import com.example.offlinelink.model.NearbyEndpoint
 import com.example.offlinelink.model.PendingConnection
+import java.lang.reflect.InvocationTargetException
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
+
+internal const val LONG_RANGE_GATT_VALUE_BYTES = 45
+internal const val ATT_PROTOCOL_OVERHEAD_BYTES = 3
+
+internal fun boundedGattValueBytes(
+  currentMtu: Int,
+  providerMtu: Int,
+): Int {
+  val negotiatedValueBytes = maxOf(currentMtu, providerMtu) - ATT_PROTOCOL_OVERHEAD_BYTES
+  return maxOf(GattFrameCodec.HEADER_BYTES + 1, minOf(LONG_RANGE_GATT_VALUE_BYTES, negotiatedValueBytes))
+}
 
 class GattChatTransport(context: Context) : ChatTransport {
   private val appContext = context.applicationContext
@@ -335,7 +347,7 @@ class GattChatTransport(context: Context) : ChatTransport {
       if (status == BluetoothGatt.GATT_SUCCESS && newState == BluetoothProfile.STATE_CONNECTED) {
         logDebug("Bluetooth GATT client connected endpoint=${endpoint.id.takeLast(5)}; requesting LE_CODED/S8")
         requestCodedPhy(gatt, endpoint.id)
-        requestClientHighPriority(gatt, endpoint.id)
+        requestClientLongRangeConnectionParams(gatt, endpoint.id)
         if (!gatt.requestMtu(PREFERRED_ATT_MTU)) {
           logDebug("Bluetooth GATT MTU request not accepted endpoint=${endpoint.id.takeLast(5)}; discovering services")
           gatt.discoverServices()
@@ -738,19 +750,80 @@ class GattChatTransport(context: Context) : ChatTransport {
     }
 
   @SuppressLint("MissingPermission")
-  private fun requestClientHighPriority(
+  private fun requestClientLongRangeConnectionParams(
     gatt: BluetoothGatt,
     endpointId: String,
   ) {
     if (!hasConnectPermission()) {
-      logDebug("Bluetooth GATT client high-priority request skipped endpoint=${endpointId.takeLast(5)} no permission")
+      logDebug("Bluetooth GATT client long-range connection params skipped endpoint=${endpointId.takeLast(5)} no permission")
       return
     }
+    if (requestClientLeConnectionUpdate(gatt, endpointId)) return
     runCatching {
-      gatt.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_BALANCED)
-      logDebug("Bluetooth GATT client connection priority requested endpoint=${endpointId.takeLast(5)} priority=BALANCED")
+      val accepted = gatt.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_LOW_POWER)
+      logDebug(
+        "Bluetooth GATT client connection priority fallback requested endpoint=${endpointId.takeLast(5)} " +
+          "priority=LOW_POWER accepted=$accepted exactSupervisionTimeout=false",
+      )
     }.onFailure {
-      logDebug("Bluetooth GATT client connection priority failed endpoint=${endpointId.takeLast(5)} ${it.message}")
+      logDebug("Bluetooth GATT client connection priority fallback failed endpoint=${endpointId.takeLast(5)} ${it.message}")
+    }
+  }
+
+  @Suppress("PrivateApi")
+  private fun requestClientLeConnectionUpdate(
+    gatt: BluetoothGatt,
+    endpointId: String,
+  ): Boolean {
+    val params = BleLongRangeConnectionParams
+    return runCatching {
+      val method =
+        runCatching {
+          gatt.javaClass.getMethod(
+            "requestLeConnectionUpdate",
+            Integer.TYPE,
+            Integer.TYPE,
+            Integer.TYPE,
+            Integer.TYPE,
+            Integer.TYPE,
+            Integer.TYPE,
+          )
+        }.getOrElse {
+          gatt.javaClass.getDeclaredMethod(
+            "requestLeConnectionUpdate",
+            Integer.TYPE,
+            Integer.TYPE,
+            Integer.TYPE,
+            Integer.TYPE,
+            Integer.TYPE,
+            Integer.TYPE,
+          ).also { hiddenMethod ->
+            hiddenMethod.isAccessible = true
+          }
+        }
+      val accepted =
+        method.invoke(
+          gatt,
+          params.MIN_INTERVAL_UNITS,
+          params.MAX_INTERVAL_UNITS,
+          params.PERIPHERAL_LATENCY,
+          params.SUPERVISION_TIMEOUT_UNITS,
+          params.MIN_CONNECTION_EVENT_LENGTH_UNITS,
+          params.MAX_CONNECTION_EVENT_LENGTH_UNITS,
+        ) as? Boolean ?: false
+      logDebug(
+        "Bluetooth GATT client LE connection update requested endpoint=${endpointId.takeLast(5)} " +
+          "intervalMs=${params.intervalMs(params.MIN_INTERVAL_UNITS)}-${params.intervalMs(params.MAX_INTERVAL_UNITS)} " +
+          "latency=${params.PERIPHERAL_LATENCY} supervisionTimeoutMs=${params.supervisionTimeoutMs} " +
+          "accepted=$accepted",
+      )
+      accepted
+    }.getOrElse {
+      logDebug(
+        "Bluetooth GATT client LE connection update unavailable endpoint=${endpointId.takeLast(5)} " +
+          it.connectionParamErrorMessage(),
+      )
+      false
     }
   }
 
@@ -1312,6 +1385,16 @@ class GattChatTransport(context: Context) : ChatTransport {
       else -> "UNKNOWN_$phy"
     }
 
+  private fun Throwable.connectionParamErrorMessage(): String {
+    val root =
+      if (this is InvocationTargetException) {
+        targetException ?: this
+      } else {
+        this
+      }
+    return "${root.javaClass.simpleName}: ${root.message ?: "no message"}"
+  }
+
   private class GattConnection(
     private val endpointId: String,
     private val device: BluetoothDevice,
@@ -1475,7 +1558,15 @@ class GattChatTransport(context: Context) : ChatTransport {
           nextMessageId++
         }
       val fragments = GattFrameCodec.fragment(item.bytes, maxValue, messageId)
-      fragments.forEach { fragment ->
+      Log.d(
+        TAG,
+        "Bluetooth GATT outbound fragmented payload endpoint=${endpointId.takeLast(5)} " +
+          "bytes=${item.bytes.size} valueBytes=$maxValue " +
+          "chunkBytes=${maxValue - GattFrameCodec.HEADER_BYTES} " +
+          "fragments=${fragments.size} writeNoResponse=${!writeResponseExpected} " +
+          "paceMs=${if (writeResponseExpected) 0 else FRAGMENTED_WRITE_WITHOUT_RESPONSE_PACING_MS}",
+      )
+      fragments.forEachIndexed { index, fragment ->
         val startedAtNs = System.nanoTime()
         val result = writeFragmentAndWait(fragment)
         val writeBlockedMs = (System.nanoTime() - startedAtNs).coerceAtLeast(0L) / 1_000_000L
@@ -1486,8 +1577,21 @@ class GattChatTransport(context: Context) : ChatTransport {
             queueLength = currentQueueLength(),
           )?.let(::logStats)
         if (result.isFailure) return result
+        paceFragmentedNoResponseWrite(index, fragments.lastIndex)
       }
       return Result.success(Unit)
+    }
+
+    private fun paceFragmentedNoResponseWrite(
+      index: Int,
+      lastIndex: Int,
+    ) {
+      if (writeResponseExpected || index >= lastIndex) return
+      runCatching {
+        Thread.sleep(FRAGMENTED_WRITE_WITHOUT_RESPONSE_PACING_MS)
+      }.onFailure {
+        Thread.currentThread().interrupt()
+      }
     }
 
     private fun writeFragmentAndWait(fragment: ByteArray): Result<Unit> {
@@ -1546,8 +1650,7 @@ class GattChatTransport(context: Context) : ChatTransport {
     }
 
     private fun maxGattValueBytes(): Int {
-      val currentMtu = maxOf(mtu, mtuProvider())
-      return maxOf(GattFrameCodec.HEADER_BYTES + 1, currentMtu - ATT_PROTOCOL_OVERHEAD_BYTES)
+      return boundedGattValueBytes(currentMtu = mtu, providerMtu = mtuProvider())
     }
 
     private fun currentQueueLength(): Int =
@@ -1614,10 +1717,10 @@ class GattChatTransport(context: Context) : ChatTransport {
     const val TAG = "GattChatTransport"
     const val PREFERRED_ATT_MTU = 517
     const val DEFAULT_ATT_MTU = 23
-    const val ATT_PROTOCOL_OVERHEAD_BYTES = 3
     const val SIGNAL_UPDATE_MIN_INTERVAL_MS = 1_500L
     const val GATT_OPERATION_TIMEOUT_MS = 10_000L
     const val BACKPRESSURE_RETRY_DELAY_MS = 15L
+    const val FRAGMENTED_WRITE_WITHOUT_RESPONSE_PACING_MS = 20L
     val GATT_RX_CHARACTERISTIC_UUID: UUID = UUID.fromString("8e3f4b1b-31c4-4b64-8f10-7c9f8c94c2d6")
     val GATT_TX_CHARACTERISTIC_UUID: UUID = UUID.fromString("8e3f4b1c-31c4-4b64-8f10-7c9f8c94c2d6")
     val CLIENT_CHARACTERISTIC_CONFIG_UUID: UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")

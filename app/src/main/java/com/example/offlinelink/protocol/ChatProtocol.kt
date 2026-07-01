@@ -176,6 +176,15 @@ object ChatProtocol {
   fun supportsBinaryPayload(capabilities: Collection<String>): Boolean =
     CAPABILITY_BINARY_PAYLOAD in capabilities
 
+  fun compactWireId(id: String): String =
+    CompactWireCodec.compactWireId(id)
+
+  fun matchesWireId(
+    candidateId: String,
+    wireId: String,
+  ): Boolean =
+    CompactWireCodec.matchesWireId(candidateId, wireId)
+
   fun encodeHello(
     senderId: String,
     displayName: String,
@@ -193,7 +202,11 @@ object ChatProtocol {
     createdAt: Long,
     sentAt: Long = System.currentTimeMillis(),
   ): ByteArray =
-    encodeEnvelope(TYPE_MESSAGE, MessagePayload(messageId, conversationId, senderId, text, createdAt), sentAt)
+    if (CompactWireCodec.shouldUseCompactIds(listOf(messageId, conversationId, senderId))) {
+      CompactWireCodec.encodeMessage(messageId, conversationId, senderId, text, createdAt, sentAt)
+    } else {
+      encodeEnvelope(TYPE_MESSAGE, MessagePayload(messageId, conversationId, senderId, text, createdAt), sentAt)
+    }
 
   fun encodeVoiceMessage(
     messageId: String,
@@ -209,7 +222,11 @@ object ChatProtocol {
     encodeEnvelope(TYPE_VOICE_MESSAGE, VoiceMessagePayload(messageId, conversationId, senderId, audioBase64, payloadRef, durationMs, mimeType, createdAt), sentAt)
 
   fun encodeAck(messageId: String, sentAt: Long = System.currentTimeMillis()): ByteArray =
-    encodeEnvelope(TYPE_ACK, AckPayload(messageId), sentAt)
+    if (CompactWireCodec.shouldUseCompactIds(listOf(messageId))) {
+      CompactWireCodec.encodeAck(messageId, sentAt)
+    } else {
+      encodeEnvelope(TYPE_ACK, AckPayload(messageId), sentAt)
+    }
 
   fun encodeDisconnect(reason: String, sentAt: Long = System.currentTimeMillis()): ByteArray =
     encodeEnvelope(TYPE_DISCONNECT, DisconnectPayload(reason), sentAt)
@@ -255,7 +272,11 @@ object ChatProtocol {
     createdAt: Long,
     sentAt: Long = System.currentTimeMillis(),
   ): ByteArray =
-    encodeEnvelope(TYPE_LOCATION, LocationPayload(messageId, conversationId, senderId, latitude, longitude, accuracy, createdAt), sentAt)
+    if (CompactWireCodec.shouldUseCompactIds(listOf(messageId, conversationId, senderId))) {
+      CompactWireCodec.encodeLocation(messageId, conversationId, senderId, latitude, longitude, accuracy, createdAt, sentAt)
+    } else {
+      encodeEnvelope(TYPE_LOCATION, LocationPayload(messageId, conversationId, senderId, latitude, longitude, accuracy, createdAt), sentAt)
+    }
 
   fun encodeCallRequest(
     callId: String,
@@ -264,7 +285,11 @@ object ChatProtocol {
     createdAt: Long,
     sentAt: Long = System.currentTimeMillis(),
   ): ByteArray =
-    encodeEnvelope(TYPE_CALL_REQUEST, CallPayload(callId = callId, senderId = senderId, createdAt = createdAt, targetId = targetId), sentAt)
+    if (CompactWireCodec.shouldUseCompactIds(listOf(callId, senderId, targetId))) {
+      CompactWireCodec.encodeCallRequest(callId, senderId, targetId, createdAt, sentAt)
+    } else {
+      encodeEnvelope(TYPE_CALL_REQUEST, CallPayload(callId = callId, senderId = senderId, createdAt = createdAt, targetId = targetId), sentAt)
+    }
 
   fun encodeCallAccept(
     callId: String,
@@ -273,7 +298,11 @@ object ChatProtocol {
     createdAt: Long,
     sentAt: Long = System.currentTimeMillis(),
   ): ByteArray =
-    encodeEnvelope(TYPE_CALL_ACCEPT, CallPayload(callId = callId, senderId = senderId, createdAt = createdAt, targetId = targetId), sentAt)
+    if (CompactWireCodec.shouldUseCompactIds(listOf(callId, senderId, targetId))) {
+      CompactWireCodec.encodeCallAccept(callId, senderId, targetId, createdAt, sentAt)
+    } else {
+      encodeEnvelope(TYPE_CALL_ACCEPT, CallPayload(callId = callId, senderId = senderId, createdAt = createdAt, targetId = targetId), sentAt)
+    }
 
   fun encodeCallReject(
     callId: String,
@@ -283,7 +312,11 @@ object ChatProtocol {
     createdAt: Long,
     sentAt: Long = System.currentTimeMillis(),
   ): ByteArray =
-    encodeEnvelope(TYPE_CALL_REJECT, CallRejectPayload(callId = callId, senderId = senderId, targetId = targetId, reason = reason, createdAt = createdAt), sentAt)
+    if (CompactWireCodec.shouldUseCompactIds(listOf(callId, senderId, targetId))) {
+      CompactWireCodec.encodeCallReject(callId, senderId, targetId, reason, createdAt, sentAt)
+    } else {
+      encodeEnvelope(TYPE_CALL_REJECT, CallRejectPayload(callId = callId, senderId = senderId, targetId = targetId, reason = reason, createdAt = createdAt), sentAt)
+    }
 
   fun encodeCallEnd(
     callId: String,
@@ -292,7 +325,11 @@ object ChatProtocol {
     createdAt: Long,
     sentAt: Long = System.currentTimeMillis(),
   ): ByteArray =
-    encodeEnvelope(TYPE_CALL_END, CallPayload(callId = callId, senderId = senderId, createdAt = createdAt, targetId = targetId), sentAt)
+    if (CompactWireCodec.shouldUseCompactIds(listOf(callId, senderId, targetId))) {
+      CompactWireCodec.encodeCallEnd(callId, senderId, targetId, createdAt, sentAt)
+    } else {
+      encodeEnvelope(TYPE_CALL_END, CallPayload(callId = callId, senderId = senderId, createdAt = createdAt, targetId = targetId), sentAt)
+    }
 
   fun encodeCallVoice(
     callId: String,
@@ -373,6 +410,7 @@ object ChatProtocol {
     )
 
   fun decodeAll(bytes: ByteArray): List<DecodedWireMessage> {
+    CompactWireCodec.decode(bytes)?.let { return listOf(it) }
     decodeBinaryPayload(bytes)?.let { return listOf(it) }
     CallAudioPacketCodec.decodeAll(bytes)?.let { packets ->
       return packets.map { it.toDecodedCallAudioFrame() }
@@ -381,6 +419,7 @@ object ChatProtocol {
   }
 
   fun decode(bytes: ByteArray): DecodedWireMessage {
+    CompactWireCodec.decode(bytes)?.let { return it }
     decodeBinaryPayload(bytes)?.let { return it }
     CallAudioPacketCodec.decode(bytes)?.let { packet ->
       return packet.toDecodedCallAudioFrame()

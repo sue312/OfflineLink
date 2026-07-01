@@ -24,6 +24,13 @@ data class CallAudioFrameRedundancy(
   val sequenceNumber: Int,
 )
 
+data class CompactCallAudioWireFrame(
+  val codecId: Int,
+  val sequenceNumber: Int,
+  val durationMs: Int,
+  val audioBytes: ByteArray,
+)
+
 object CallAudioPacketCodec {
   private const val MAGIC = 0x4f4c4341 // OLCA
   private const val COMPACT_MAGIC = 0x4f4c4353 // OLCS
@@ -53,6 +60,41 @@ object CallAudioPacketCodec {
       compact -> encodeCompact(packet)
       else -> encodeVerbose(packet)
     }
+
+  fun compactSingleFrameOrNull(bytes: ByteArray): CompactCallAudioWireFrame? =
+    runCatching {
+      if (bytes.size < COMPACT_SINGLE_FRAME_HEADER_BYTES) return@runCatching null
+      val buffer = ByteBuffer.wrap(bytes)
+      if (buffer.int != COMPACT_MAGIC) return@runCatching null
+      val version = buffer.get().toInt() and 0xff
+      require(version == VERSION) { "Unsupported compact call audio packet version $version" }
+      val codecId = buffer.get().toInt() and 0xff
+      mimeTypeForCodec(codecId)
+      val sequenceNumber = buffer.int
+      val durationMs = buffer.short.toInt() and 0xffff
+      val audioBytes = ByteArray(buffer.remaining())
+      buffer.get(audioBytes)
+      CompactCallAudioWireFrame(
+        codecId = codecId,
+        sequenceNumber = sequenceNumber,
+        durationMs = durationMs,
+        audioBytes = audioBytes,
+      )
+    }.getOrNull()
+
+  fun encodeCompactSingleFrame(frame: CompactCallAudioWireFrame): ByteArray {
+    require(frame.durationMs in 0..UShort.MAX_VALUE.toInt()) { "durationMs must fit in unsigned short" }
+    require(frame.codecId in 0..UByte.MAX_VALUE.toInt()) { "codec id must fit in unsigned byte" }
+    mimeTypeForCodec(frame.codecId)
+    return ByteBuffer.allocate(COMPACT_SINGLE_FRAME_HEADER_BYTES + frame.audioBytes.size)
+      .putInt(COMPACT_MAGIC)
+      .put(VERSION.toByte())
+      .put(frame.codecId.toByte())
+      .putInt(frame.sequenceNumber)
+      .putShort(frame.durationMs.toShort())
+      .put(frame.audioBytes)
+      .array()
+  }
 
   private fun encodeVerbose(packet: CallAudioPacket): ByteArray {
     require(packet.durationMs in 0..UShort.MAX_VALUE.toLong()) { "durationMs must fit in unsigned short" }
@@ -300,4 +342,5 @@ object CallAudioPacketCodec {
   }
 
   private const val COMPACT_BUNDLE_FRAME_HEADER_BYTES = 1 + Int.SIZE_BYTES + Short.SIZE_BYTES + Short.SIZE_BYTES
+  private const val COMPACT_SINGLE_FRAME_HEADER_BYTES = Int.SIZE_BYTES + 1 + 1 + Int.SIZE_BYTES + Short.SIZE_BYTES
 }

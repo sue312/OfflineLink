@@ -17,4 +17,10 @@ class CallAudioEncodingModeTest {
       selectableCallAudioEncodingModes,
     )
   }
+
+  @Test
+  fun usesLowBitrateOpusForFixedEncoding() {
+    assertEquals(6_400, CALL_AUDIO_OPUS_FIXED_BITRATE_BPS)
+    assertEquals("6.4 kbps, long range", CallAudioEncodingMode.Opus.description)
+  }
 }

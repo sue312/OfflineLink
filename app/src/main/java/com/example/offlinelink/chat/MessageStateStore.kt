@@ -6,6 +6,7 @@ import com.example.offlinelink.model.ImageAttachment
 import com.example.offlinelink.model.LocationAttachment
 import com.example.offlinelink.model.MessageKind
 import com.example.offlinelink.model.MessageStatus
+import com.example.offlinelink.protocol.ChatProtocol
 import com.example.offlinelink.model.VoiceAttachment
 import java.util.UUID
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -216,7 +217,14 @@ class MessageStateStore(
   private fun updateMessageStatus(
     messageId: String,
     status: MessageStatus,
-  ) = update { it.copy(messages = it.messages.map { message -> if (message.id == messageId) message.copy(status = status) else message }) }
+  ) = update {
+    it.copy(
+      messages =
+        it.messages.map { message ->
+          if (ChatProtocol.matchesWireId(message.id, messageId)) message.copy(status = status) else message
+        },
+    )
+  }
 
   private fun update(reducer: (MessageSessionState) -> MessageSessionState) {
     mutableState.value = reducer(mutableState.value)

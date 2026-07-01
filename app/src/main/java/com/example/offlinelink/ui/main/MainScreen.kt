@@ -334,7 +334,7 @@ fun MainScreen(
     onStopVoiceRecording = voiceRecorder::stop,
     onPlayVoice = { voice ->
       val bytes = payloadCache.get(voice.payloadKey)
-      if (bytes != null) voicePlayer.play(bytes)
+      if (bytes != null) voicePlayer.play(bytes, voice.mimeType)
       else Result.failure(IllegalStateException("Voice payload not found"))
     },
     onDisconnect = viewModel::disconnect,

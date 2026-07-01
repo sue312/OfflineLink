@@ -149,7 +149,10 @@ internal fun MainScreenViewModel.handleIncomingCallRequest(
 internal fun MainScreenViewModel.routeEndpointForCallTarget(targetId: String?): NearbyEndpoint? {
   val endpoints = uiState.value.connectedEndpoints
   if (targetId == null) return endpoints.firstOrNull()
-  return endpoints.firstOrNull { endpoint -> endpoint.id == targetId || endpointMemberIds[endpoint.id] == targetId }
+  return endpoints.firstOrNull { endpoint ->
+    ChatProtocol.matchesWireId(endpoint.id, targetId) ||
+      endpointMemberIds[endpoint.id]?.let { ChatProtocol.matchesWireId(it, targetId) } == true
+  }
     ?: endpoints.firstOrNull().takeIf { isKnownGroupMember(targetId) }
 }
 
@@ -163,14 +166,17 @@ internal fun MainScreenViewModel.callTargetName(
     ?: routeEndpoint.name
 
 internal fun MainScreenViewModel.memberName(memberId: String): String? =
-  uiState.value.groupMembers.firstOrNull { it.id == memberId }?.displayName
-    ?: uiState.value.connectedEndpoints.firstOrNull { endpointMemberIds[it.id] == memberId }?.name
+  uiState.value.groupMembers.firstOrNull { ChatProtocol.matchesWireId(it.id, memberId) }?.displayName
+    ?: uiState.value.connectedEndpoints.firstOrNull {
+      endpointMemberIds[it.id]?.let { endpointMemberId -> ChatProtocol.matchesWireId(endpointMemberId, memberId) } == true
+    }?.name
 
 internal fun MainScreenViewModel.isTargetedToLocalDevice(targetId: String?): Boolean =
-  targetId == null || targetId == uiState.value.localDeviceId
+  targetId == null || ChatProtocol.matchesWireId(uiState.value.localDeviceId, targetId)
 
 internal fun MainScreenViewModel.isKnownGroupMember(memberId: String): Boolean =
-  uiState.value.groupMembers.any { it.id == memberId } || endpointMemberIds.any { it.value == memberId }
+  uiState.value.groupMembers.any { ChatProtocol.matchesWireId(it.id, memberId) } ||
+    endpointMemberIds.any { ChatProtocol.matchesWireId(it.value, memberId) }
 
 internal fun MainScreenViewModel.forwardCallBytesIfNeeded(
   sourceEndpointId: String,

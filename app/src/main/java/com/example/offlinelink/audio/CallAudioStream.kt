@@ -32,6 +32,8 @@ class CallAudioStream(context: Context) {
   private val linkMonitor = CallAudioLinkMonitor()
   private var audioEncoder: CallAudioEncoder? = null
   private var audioDecoder: CallAudioDecoder = CallAudioCodecFactory.createDecoder(appContext)
+  private var playbackProcessor: CallAudioPlaybackProcessor? = null
+  private var playbackProcessorSampleRateHz: Int? = null
   private var audioRecord: AudioRecord? = null
   private var audioTrack: AudioTrack? = null
   private var audioTrackSampleRateHz: Int? = null
@@ -114,6 +116,8 @@ class CallAudioStream(context: Context) {
           diagnosticRecorder = diagnostics
           noiseGate.reset()
           linkMonitor.reset()
+          playbackProcessor = null
+          playbackProcessorSampleRateHz = null
           resetPlaybackBufferLocked()
           running.set(true)
           started = true
@@ -209,6 +213,8 @@ class CallAudioStream(context: Context) {
       audioTrack = null
       audioTrackSampleRateHz = null
       audioEncoder = null
+      playbackProcessor = null
+      playbackProcessorSampleRateHz = null
       audioDecoder = CallAudioCodecFactory.createDecoder(appContext)
       audioEffects = emptyList()
       diagnosticRecorder = null
@@ -318,17 +324,18 @@ class CallAudioStream(context: Context) {
   }
 
   private fun writePlaybackFrame(frame: PcmAudioFrame) {
+    val playbackFrame = processPlaybackFrame(frame)
     val track =
       synchronized(lock) {
-        val player = ensurePlayerLocked(frame.sampleRateHz)
+        val player = ensurePlayerLocked(playbackFrame.sampleRateHz)
         if (player.playState != AudioTrack.PLAYSTATE_PLAYING) {
           player.play()
         }
         player
       }
     var offset = 0
-    while (offset < frame.bytes.size && running.get()) {
-      val written = track.write(frame.bytes, offset, frame.bytes.size - offset, AudioTrack.WRITE_BLOCKING)
+    while (offset < playbackFrame.bytes.size && running.get()) {
+      val written = track.write(playbackFrame.bytes, offset, playbackFrame.bytes.size - offset, AudioTrack.WRITE_BLOCKING)
       check(written >= 0) { "Call audio playback failed: $written" }
       if (written == 0) {
         Thread.yield()
@@ -337,6 +344,21 @@ class CallAudioStream(context: Context) {
       }
     }
   }
+
+  private fun processPlaybackFrame(frame: PcmAudioFrame): PcmAudioFrame =
+    synchronized(lock) {
+      val existingProcessor = playbackProcessor
+      val processor =
+        if (existingProcessor == null || playbackProcessorSampleRateHz != frame.sampleRateHz) {
+          CallAudioPlaybackProcessor(frame.sampleRateHz).also {
+            playbackProcessor = it
+            playbackProcessorSampleRateHz = frame.sampleRateHz
+          }
+        } else {
+          existingProcessor
+        }
+      processor.process(frame)
+    }
 
   @SuppressLint("MissingPermission")
   private fun createRecorder(sampleRateHz: Int, frameBytes: Int): AudioRecord {

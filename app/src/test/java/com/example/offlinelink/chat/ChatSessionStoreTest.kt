@@ -7,6 +7,7 @@ import com.example.offlinelink.model.GroupMember
 import com.example.offlinelink.model.NearbyEndpoint
 import com.example.offlinelink.model.PendingConnection
 import com.example.offlinelink.model.VoiceAttachment
+import com.example.offlinelink.protocol.ChatProtocol
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
@@ -63,6 +64,17 @@ class ChatSessionStoreTest {
     assertEquals(MessageStatus.Sent, store.state.value.messages.single().status)
 
     store.acknowledge(message.id)
+    assertEquals(MessageStatus.Received, store.state.value.messages.single().status)
+  }
+
+  @Test
+  fun compactWireAckTransitionsOutgoingMessageStatus() {
+    val store = ChatSessionStore(localDeviceId = "device-a")
+    val message = store.queueOutgoingMessage("hello", now = 1000L)
+
+    store.markSent(message.id)
+    store.acknowledge(ChatProtocol.compactWireId(message.id))
+
     assertEquals(MessageStatus.Received, store.state.value.messages.single().status)
   }
 
@@ -210,6 +222,19 @@ class ChatSessionStoreTest {
     assertEquals("call-1", store.state.value.callState.callId)
     assertEquals("endpoint-b", store.state.value.callState.peerEndpointId)
     assertEquals(5000L, store.state.value.callState.startedAt)
+  }
+
+  @Test
+  fun compactWireCallIdCanAcceptOutgoingCall() {
+    val store = ChatSessionStore(localDeviceId = "device-a")
+    val phoneB = NearbyEndpoint("endpoint-b", "Phone B")
+    val callId = "33333333-3333-3333-3333-333333333333"
+
+    store.startOutgoingCall(phoneB, callId = callId)
+    store.acceptCall(ChatProtocol.compactWireId(callId), startedAt = 5000L)
+
+    assertEquals(CallStatus.Active, store.state.value.callState.status)
+    assertEquals(callId, store.state.value.callState.callId)
   }
 
   @Test

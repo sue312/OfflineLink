@@ -112,26 +112,26 @@ class CallAudioAdaptiveEncodingTest {
   }
 
   @Test
-  fun longRangeTransmitPolicyKeepsContinuousFramesUntilLinkPressure() {
-    assertEquals(1, CallAudioTransmitPolicy.captureFrameInterval(CallAudioProcessingMode.LongRange, CallAudioTransmitStats()))
+  fun systemTransmitPolicyKeepsContinuousFramesUntilLinkPressure() {
+    assertEquals(1, CallAudioTransmitPolicy.captureFrameInterval(CallAudioProcessingMode.System, CallAudioTransmitStats()))
     assertEquals(
       2,
       CallAudioTransmitPolicy.captureFrameInterval(
-        CallAudioProcessingMode.LongRange,
+        CallAudioProcessingMode.System,
         CallAudioTransmitStats(remoteRssi = -92),
       ),
     )
     assertEquals(
       2,
       CallAudioTransmitPolicy.captureFrameInterval(
-        CallAudioProcessingMode.LongRange,
+        CallAudioProcessingMode.System,
         CallAudioTransmitStats(writeQueueLength = 3),
       ),
     )
     assertEquals(
-      3,
+      2,
       CallAudioTransmitPolicy.captureFrameInterval(
-        CallAudioProcessingMode.LongRange,
+        CallAudioProcessingMode.System,
         CallAudioTransmitStats(socketCongested = true),
       ),
     )
