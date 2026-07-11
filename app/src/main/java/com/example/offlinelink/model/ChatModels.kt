@@ -6,6 +6,8 @@ data class NearbyEndpoint(
   val id: String,
   val name: String,
   val deviceId: String? = null,
+  val rssi: Int? = null,
+  val signalId: String? = null,
 )
 
 data class GroupMember(

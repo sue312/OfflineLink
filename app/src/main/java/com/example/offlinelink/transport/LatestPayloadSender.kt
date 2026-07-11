@@ -1,8 +1,16 @@
 package com.example.offlinelink.transport
 
-class LatestPayloadSender(private val transport: ChatTransport) {
+class LatestPayloadSender(
+  private val transport: ChatTransport,
+  private val maxPendingPerEndpoint: Int = DEFAULT_MAX_PENDING_PER_ENDPOINT,
+) {
   private val lock = Any()
   private val endpoints = mutableMapOf<String, EndpointState>()
+  private val endpointMetrics = mutableMapOf<String, EndpointMetrics>()
+
+  init {
+    require(maxPendingPerEndpoint > 0) { "maxPendingPerEndpoint must be greater than 0" }
+  }
 
   fun send(
     endpointId: String,
@@ -15,9 +23,13 @@ class LatestPayloadSender(private val transport: ChatTransport) {
 
     synchronized(lock) {
       val state = endpoints.getOrPut(endpointId) { EndpointState() }
+      val metrics = endpointMetrics.getOrPut(endpointId) { EndpointMetrics() }
       if (state.inFlight) {
-        dropped = state.latest
-        state.latest = item
+        if (state.pending.size >= maxPendingPerEndpoint) {
+          dropped = state.pending.removeFirst()
+          metrics.droppedStalePayloads++
+        }
+        state.pending.addLast(item)
       } else {
         state.inFlight = true
         dispatchState = state
@@ -31,10 +43,24 @@ class LatestPayloadSender(private val transport: ChatTransport) {
   fun clearEndpoint(endpointId: String) {
     val dropped =
       synchronized(lock) {
-        endpoints.remove(endpointId)?.latest
+        endpointMetrics.remove(endpointId)
+        endpoints.remove(endpointId)?.pending?.toList().orEmpty()
       }
-    dropped?.onResult?.invoke(Result.failure(EndpointClearedException("Live payload queue cleared for $endpointId")))
+    dropped.forEach {
+      it.onResult(Result.failure(EndpointClearedException("Live payload queue cleared for $endpointId")))
+    }
   }
+
+  fun stats(endpointId: String): EndpointStats =
+    synchronized(lock) {
+      val state = endpoints[endpointId]
+      val metrics = endpointMetrics[endpointId]
+      EndpointStats(
+        pendingCount = state?.pending?.size ?: 0,
+        inFlight = state?.inFlight == true,
+        droppedStalePayloads = metrics?.droppedStalePayloads ?: 0L,
+      )
+    }
 
   private fun dispatch(item: PendingPayload, state: EndpointState) {
     transport.send(item.endpointId, item.bytes) { result ->
@@ -45,12 +71,12 @@ class LatestPayloadSender(private val transport: ChatTransport) {
           if (endpoints[item.endpointId] !== state) {
             null
           } else {
-            state.latest.also { pending ->
-              state.latest = null
-              if (pending == null) {
-                state.inFlight = false
-                endpoints.remove(item.endpointId)
-              }
+            if (state.pending.isNotEmpty()) {
+              state.pending.removeFirst()
+            } else {
+              state.inFlight = false
+              endpoints.remove(item.endpointId)
+              null
             }
           }
         }
@@ -63,7 +89,7 @@ class LatestPayloadSender(private val transport: ChatTransport) {
 
   private class EndpointState(
     var inFlight: Boolean = false,
-    var latest: PendingPayload? = null,
+    val pending: ArrayDeque<PendingPayload> = ArrayDeque(),
   )
 
   private data class PendingPayload(
@@ -75,4 +101,18 @@ class LatestPayloadSender(private val transport: ChatTransport) {
   class StalePayloadDroppedException(message: String) : IllegalStateException(message)
 
   class EndpointClearedException(message: String) : IllegalStateException(message)
+
+  data class EndpointStats(
+    val pendingCount: Int = 0,
+    val inFlight: Boolean = false,
+    val droppedStalePayloads: Long = 0,
+  )
+
+  private class EndpointMetrics(
+    var droppedStalePayloads: Long = 0,
+  )
+
+  private companion object {
+    const val DEFAULT_MAX_PENDING_PER_ENDPOINT = 12
+  }
 }

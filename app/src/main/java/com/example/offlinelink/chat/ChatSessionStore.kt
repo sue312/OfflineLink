@@ -1,645 +1,136 @@
 package com.example.offlinelink.chat
 
 import com.example.offlinelink.data.PayloadCache
-import com.example.offlinelink.model.ChatMessage
-import com.example.offlinelink.model.ChatUiState
-import com.example.offlinelink.model.CallState
 import com.example.offlinelink.model.CallStatus
 import com.example.offlinelink.model.CallVoicePlayback
+import com.example.offlinelink.model.ChatMessage
+import com.example.offlinelink.model.ChatUiState
 import com.example.offlinelink.model.ConnectionStatus
 import com.example.offlinelink.model.GroupMember
-import com.example.offlinelink.model.GroupMemberStatus
-import com.example.offlinelink.model.ImageAttachment
-import com.example.offlinelink.model.LocationAttachment
-import com.example.offlinelink.model.MessageKind
-import com.example.offlinelink.model.MessageStatus
 import com.example.offlinelink.model.NearbyEndpoint
 import com.example.offlinelink.model.PendingConnection
-import com.example.offlinelink.model.VoiceAttachment
-import java.util.UUID
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
 class ChatSessionStore(
-  private val localDeviceId: String,
-  private val conversationId: String = "one-to-one",
-  private val payloadCache: PayloadCache? = null,
+  localDeviceId: String,
+  conversationId: String = "one-to-one",
+  payloadCache: PayloadCache? = null,
 ) {
-  private val mutableState = MutableStateFlow(ChatUiState(localDeviceId = localDeviceId))
+  private val connectionStore = ConnectionStateStore(localDeviceId)
+  private val messageStore = MessageStateStore(localDeviceId, conversationId, payloadCache)
+  private val callStore = CallStateStore()
+  private val mutableState = MutableStateFlow(combineState())
   val state: StateFlow<ChatUiState> = mutableState.asStateFlow()
 
-  fun setDisplayName(displayName: String) {
-    mutableState.value = mutableState.value.copy(displayName = displayName.ifBlank { "OfflineLink" })
+  fun setDisplayName(displayName: String) = sync { connectionStore.setDisplayName(displayName) }
+  fun setAvatarName(avatarName: String) = sync { connectionStore.setAvatarName(avatarName) }
+  fun setGroupName(groupName: String) = sync { connectionStore.setGroupName(groupName) }
+  fun setGroupWarning(groupWarning: String?) = sync { connectionStore.setGroupWarning(groupWarning) }
+  fun setStatus(status: ConnectionStatus, message: String, error: String? = null) = sync { connectionStore.setStatus(status, message, error) }
+  fun setVisibleToNearby(isVisible: Boolean) = sync { connectionStore.setVisibleToNearby(isVisible) }
+  fun restoreConnectedStatus(error: String? = null) = sync { connectionStore.restoreConnectedStatus(error) }
+  fun setDiscoveredEndpoints(endpoints: List<NearbyEndpoint>) = sync { connectionStore.setDiscoveredEndpoints(endpoints) }
+  fun upsertEndpoint(endpoint: NearbyEndpoint) = sync { connectionStore.upsertEndpoint(endpoint) }
+  fun removeEndpoint(endpointId: String) = sync { connectionStore.removeEndpoint(endpointId) }
+  fun setPendingConnection(pendingConnection: PendingConnection?) = sync { connectionStore.setPendingConnection(pendingConnection) }
+  fun addConnectedEndpoint(endpoint: NearbyEndpoint) = sync { connectionStore.addConnectedEndpoint(endpoint) }
+  fun updateConnectedEndpointSignal(endpointId: String, deviceId: String?, rssi: Int, signalId: String? = null): Boolean =
+    syncResult { connectionStore.updateConnectedEndpointSignal(endpointId, deviceId, rssi, signalId) }
+  fun updateConnectedEndpointSignalId(endpointId: String, signalId: String?): Boolean =
+    syncResult { connectionStore.updateConnectedEndpointSignalId(endpointId, signalId) }
+  fun setConnectedEndpoint(endpoint: NearbyEndpoint?) = sync {
+    connectionStore.setConnectedEndpoint(endpoint)
+    if (endpoint == null) callStore.clear()
+  }
+  fun clearConnectedEndpoints() = sync {
+    connectionStore.clearConnectedEndpoints()
+    callStore.clear()
+  }
+  fun mergeGroupMembers(members: List<GroupMember>): Boolean = syncResult { connectionStore.mergeGroupMembers(members) }
+  fun replaceGroupMember(oldId: String, member: GroupMember): Boolean = syncResult { connectionStore.replaceGroupMember(oldId, member) }
+  fun removeGroupMember(memberId: String): Boolean = syncResult { connectionStore.removeGroupMember(memberId) }
+  fun markGroupMembersReconnecting() = sync { connectionStore.markGroupMembersReconnecting() }
+  fun markGroupMemberReconnecting(memberId: String, displayName: String): Boolean =
+    syncResult { connectionStore.markGroupMemberReconnecting(memberId, displayName) }
+  fun removeConnectedEndpoint(endpointId: String) = sync {
+    val shouldClearCall = callStore.state.value.callState.peerEndpointId == endpointId
+    connectionStore.removeConnectedEndpoint(endpointId)
+    if (shouldClearCall) callStore.clear()
+  }
+  fun renameConnectedEndpoint(endpointId: String, displayName: String) = sync { connectionStore.renameConnectedEndpoint(endpointId, displayName) }
+
+  fun loadMessages(messages: List<ChatMessage>) = sync { messageStore.loadMessages(messages) }
+  fun setConversationId(conversationId: String) = sync { messageStore.setConversationId(conversationId) }
+  fun clearMessages() = sync { messageStore.clearMessages() }
+  fun deleteMessage(messageId: String) = sync { messageStore.deleteMessage(messageId) }
+  fun localMessagesPendingDelivery(): List<ChatMessage> = messageStore.localMessagesPendingDelivery()
+  fun queueOutgoingMessage(text: String, now: Long = System.currentTimeMillis()): ChatMessage = syncResult { messageStore.queueOutgoingMessage(text, now) }
+  fun queueOutgoingVoiceMessage(payloadKey: String, durationMs: Long, mimeType: String, now: Long = System.currentTimeMillis()): ChatMessage =
+    syncResult { messageStore.queueOutgoingVoiceMessage(payloadKey, durationMs, mimeType, now) }
+  fun queueOutgoingLocationMessage(latitude: Double, longitude: Double, accuracy: Float?, now: Long = System.currentTimeMillis()): ChatMessage =
+    syncResult { messageStore.queueOutgoingLocationMessage(latitude, longitude, accuracy, now) }
+  fun queueOutgoingImageMessage(payloadKey: String, mimeType: String, width: Int, height: Int, now: Long = System.currentTimeMillis()): ChatMessage =
+    syncResult { messageStore.queueOutgoingImageMessage(payloadKey, mimeType, width, height, now) }
+  fun receiveRemoteMessage(messageId: String, conversationId: String, senderId: String, text: String, createdAt: Long): Boolean =
+    syncResult { messageStore.receiveRemoteMessage(messageId, conversationId, senderId, text, createdAt) }
+  fun receiveRemoteVoiceMessage(messageId: String, conversationId: String, senderId: String, payloadKey: String, durationMs: Long, mimeType: String, createdAt: Long): Boolean =
+    syncResult { messageStore.receiveRemoteVoiceMessage(messageId, conversationId, senderId, payloadKey, durationMs, mimeType, createdAt) }
+  fun receiveRemoteLocationMessage(messageId: String, conversationId: String, senderId: String, latitude: Double, longitude: Double, accuracy: Float?, createdAt: Long): Boolean =
+    syncResult { messageStore.receiveRemoteLocationMessage(messageId, conversationId, senderId, latitude, longitude, accuracy, createdAt) }
+  fun receiveRemoteImageMessage(messageId: String, conversationId: String, senderId: String, payloadKey: String, mimeType: String, width: Int, height: Int, createdAt: Long): Boolean =
+    syncResult { messageStore.receiveRemoteImageMessage(messageId, conversationId, senderId, payloadKey, mimeType, width, height, createdAt) }
+  fun markSent(messageId: String) = sync { messageStore.markSent(messageId) }
+  fun markQueued(messageId: String) = sync { messageStore.markQueued(messageId) }
+  fun markFailed(messageId: String) = sync { messageStore.markFailed(messageId) }
+  fun acknowledge(messageId: String) = sync { messageStore.acknowledge(messageId) }
+
+  fun startOutgoingCall(endpoint: NearbyEndpoint, callId: String, peerMemberId: String? = null, peerName: String = endpoint.name) =
+    sync { callStore.startOutgoingCall(endpoint, callId, peerMemberId, peerName) }
+  fun receiveIncomingCall(endpoint: NearbyEndpoint, callId: String, peerMemberId: String? = null, peerName: String = endpoint.name) =
+    sync { callStore.receiveIncomingCall(endpoint, callId, peerMemberId, peerName) }
+  fun acceptCall(callId: String, startedAt: Long = System.currentTimeMillis()): Boolean = syncResult { callStore.acceptCall(callId, startedAt) }
+  fun endCall(callId: String? = null): Boolean = syncResult { callStore.endCall(callId) }
+  fun rejectCall(callId: String? = null): Boolean = syncResult { callStore.rejectCall(callId) }
+  fun setCallActivity(activityLabel: String?) = sync { callStore.setCallActivity(activityLabel) }
+  fun showCallPlayback(playback: CallVoicePlayback, activityLabel: String) = sync { callStore.showCallPlayback(playback, activityLabel) }
+  fun finishCallPlayback(clipId: String) = sync { callStore.finishCallPlayback(clipId) }
+
+  private fun sync(block: () -> Unit) {
+    block()
+    mutableState.value = combineState()
   }
 
-  fun setAvatarName(avatarName: String) {
-    mutableState.value = mutableState.value.copy(avatarName = avatarName.trim())
+  private fun <T> syncResult(block: () -> T): T {
+    val result = block()
+    mutableState.value = combineState()
+    return result
   }
 
-  fun setGroupName(groupName: String) {
-    mutableState.value = mutableState.value.copy(groupName = groupName.ifBlank { "Offline group" })
-  }
-
-  fun setGroupWarning(groupWarning: String?) {
-    mutableState.value = mutableState.value.copy(groupWarning = groupWarning)
-  }
-
-  fun setStatus(status: ConnectionStatus, message: String, error: String? = null) {
-    mutableState.value = mutableState.value.copy(status = status, statusMessage = message, lastError = error)
-  }
-
-  fun setVisibleToNearby(isVisible: Boolean) {
-    mutableState.value = mutableState.value.copy(isVisibleToNearby = isVisible)
-  }
-
-  fun restoreConnectedStatus(error: String? = null) {
-    val current = mutableState.value
-    if (current.connectedEndpoints.isEmpty()) return
-    mutableState.value =
-      current.copy(
-        status = ConnectionStatus.Connected,
-        statusMessage = connectedStatusMessage(current.connectedEndpoints),
-        lastError = error,
-      )
-  }
-
-  fun setDiscoveredEndpoints(endpoints: List<NearbyEndpoint>) {
-    mutableState.value = mutableState.value.copy(discoveredEndpoints = endpoints.distinctBy { it.id })
-  }
-
-  fun upsertEndpoint(endpoint: NearbyEndpoint) {
-    setDiscoveredEndpoints(state.value.discoveredEndpoints.filterNot { it.id == endpoint.id } + endpoint)
-  }
-
-  fun removeEndpoint(endpointId: String) {
-    setDiscoveredEndpoints(state.value.discoveredEndpoints.filterNot { it.id == endpointId })
-  }
-
-  fun setPendingConnection(pendingConnection: PendingConnection?) {
-    mutableState.value = mutableState.value.copy(pendingConnection = pendingConnection)
-  }
-
-  fun addConnectedEndpoint(endpoint: NearbyEndpoint) {
-    val current = mutableState.value
-    val connectedEndpoints = listOf(endpoint)
-    mutableState.value =
-      current.copy(
-        connectedEndpoints = connectedEndpoints,
-        groupMembers = listOf(GroupMember(endpoint.id, endpoint.name, GroupMemberStatus.Online)),
-        isVisibleToNearby = false,
-        pendingConnection = null,
-        discoveredEndpoints = emptyList(),
-        status = ConnectionStatus.Connected,
-        statusMessage = connectedStatusMessage(connectedEndpoints),
-      )
-  }
-
-  fun mergeGroupMembers(members: List<GroupMember>): Boolean {
-    val current = mutableState.value
-    val merged = mergeGroupMembers(current.groupMembers, members)
-    if (merged == current.groupMembers) return false
-    mutableState.value = current.copy(groupMembers = merged)
-    return true
-  }
-
-  fun replaceGroupMember(oldId: String, member: GroupMember): Boolean {
-    val current = mutableState.value
-    val cleanedMember = cleanGroupMember(member)
-    val withoutOldMember = current.groupMembers.filterNot { it.id == oldId || it.id == cleanedMember.id }
-    val groupMembers =
-      if (cleanedMember.id == localDeviceId) {
-        withoutOldMember
-      } else {
-        withoutOldMember + cleanedMember
-      }
-    if (groupMembers == current.groupMembers) return false
-    mutableState.value = current.copy(groupMembers = groupMembers)
-    return true
-  }
-
-  fun removeGroupMember(memberId: String): Boolean {
-    val current = mutableState.value
-    val groupMembers = current.groupMembers.filterNot { it.id == memberId }
-    if (groupMembers == current.groupMembers) return false
-    mutableState.value = current.copy(groupMembers = groupMembers)
-    return true
-  }
-
-  fun markGroupMembersReconnecting() {
-    mutableState.value =
-      mutableState.value.copy(
-        groupMembers =
-          mutableState.value.groupMembers.map { member ->
-            if (member.status == GroupMemberStatus.Reconnecting) member else member.copy(status = GroupMemberStatus.Reconnecting)
-          },
-      )
-  }
-
-  fun markGroupMemberReconnecting(
-    memberId: String,
-    displayName: String,
-  ): Boolean {
-    val current = mutableState.value
-    if (memberId == localDeviceId) return false
-    val cleanedName = displayName.ifBlank { "Nearby device" }
-    val existing = current.groupMembers.firstOrNull { it.id == memberId }
-    val groupMembers =
-      if (existing == null) {
-        current.groupMembers + GroupMember(memberId, cleanedName, GroupMemberStatus.Reconnecting)
-      } else {
-        current.groupMembers.map { member ->
-          if (member.id == memberId) {
-            member.copy(displayName = member.displayName.ifBlank { cleanedName }, status = GroupMemberStatus.Reconnecting)
-          } else {
-            member
-          }
-        }
-      }
-    if (groupMembers == current.groupMembers) return false
-    mutableState.value = current.copy(groupMembers = groupMembers)
-    return true
-  }
-
-  fun removeConnectedEndpoint(endpointId: String) {
-    val connectedEndpoints = mutableState.value.connectedEndpoints.filterNot { it.id == endpointId }
-    val groupMembers =
-      if (connectedEndpoints.isEmpty()) {
-        emptyList()
-      } else {
-        connectedEndpoints.map { endpoint -> GroupMember(endpoint.id, endpoint.name, GroupMemberStatus.Online) }
-      }
-    val callState =
-      if (mutableState.value.callState.peerEndpointId == endpointId) {
-        CallState()
-      } else {
-        mutableState.value.callState
-      }
-    mutableState.value =
-      mutableState.value.copy(
-        connectedEndpoints = connectedEndpoints,
-        groupMembers = groupMembers,
-        status = if (connectedEndpoints.isEmpty()) ConnectionStatus.Disconnected else ConnectionStatus.Connected,
-        statusMessage = connectedStatusMessage(connectedEndpoints),
-        callState = callState,
-        callPlayback = if (callState.status == CallStatus.Idle) null else mutableState.value.callPlayback,
-      )
-  }
-
-  fun renameConnectedEndpoint(endpointId: String, displayName: String) {
-    val cleanedName = displayName.ifBlank { "Nearby device" }
-    val connectedEndpoints =
-      mutableState.value.connectedEndpoints.map {
-        if (it.id == endpointId) it.copy(name = cleanedName) else it
-      }
-    mutableState.value =
-      mutableState.value.copy(
-        connectedEndpoints = connectedEndpoints,
-        statusMessage = connectedStatusMessage(connectedEndpoints),
-      )
-  }
-
-  fun setConnectedEndpoint(endpoint: NearbyEndpoint?) {
-    if (endpoint == null) {
-      clearConnectedEndpoints()
-    } else {
-      mutableState.value =
-        mutableState.value.copy(
-          connectedEndpoints = listOf(endpoint),
-          groupMembers = listOf(GroupMember(endpoint.id, endpoint.name, GroupMemberStatus.Online)),
-          isVisibleToNearby = false,
-          pendingConnection = null,
-          discoveredEndpoints = emptyList(),
-          status = ConnectionStatus.Connected,
-          statusMessage = connectedStatusMessage(listOf(endpoint)),
-        )
-    }
-  }
-
-  fun clearConnectedEndpoints() {
-    mutableState.value =
-      mutableState.value.copy(
-        connectedEndpoints = emptyList(),
-        groupMembers = emptyList(),
-        isVisibleToNearby = false,
-        pendingConnection = null,
-        status = ConnectionStatus.Disconnected,
-        statusMessage = "Disconnected",
-        callState = CallState(),
-        callPlayback = null,
-      )
-  }
-
-  fun loadMessages(messages: List<ChatMessage>) {
-    val cleanedMessages = messages.distinctBy { it.id }
-    mutableState.value =
-      mutableState.value.copy(
-        messages = cleanedMessages,
-        messageRevision = mutableState.value.messageRevision + 1,
-      )
-  }
-
-  fun clearMessages() {
-    mutableState.value.messages.forEach { deletePayloadFor(it) }
-    mutableState.value =
-      mutableState.value.copy(
-        messages = emptyList(),
-        messageRevision = mutableState.value.messageRevision + 1,
-      )
-  }
-
-  fun deleteMessage(messageId: String) {
-    val message = mutableState.value.messages.firstOrNull { it.id == messageId }
-    message?.let { deletePayloadFor(it) }
-    val messages = mutableState.value.messages.filterNot { it.id == messageId }
-    mutableState.value =
-      mutableState.value.copy(
-        messages = messages,
-        messageRevision = mutableState.value.messageRevision + 1,
-      )
-  }
-
-  private fun deletePayloadFor(message: ChatMessage) {
-    val cache = payloadCache ?: return
-    message.voice?.let { cache.remove(it.payloadKey) }
-    message.image?.let { cache.remove(it.payloadKey) }
-  }
-
-  fun localMessagesPendingDelivery(): List<ChatMessage> =
-    state.value.messages.filter { message ->
-      message.isLocal && message.status != MessageStatus.Received
-    }
-
-  fun startOutgoingCall(
-    endpoint: NearbyEndpoint,
-    callId: String,
-    peerMemberId: String? = null,
-    peerName: String = endpoint.name,
-  ) {
-    mutableState.value =
-      mutableState.value.copy(
-        callState =
-          CallState(
-            status = CallStatus.Outgoing,
-            callId = callId,
-            peerEndpointId = endpoint.id,
-            peerMemberId = peerMemberId,
-            peerName = peerName,
-            isInitiator = true,
-          ),
-      )
-  }
-
-  fun receiveIncomingCall(
-    endpoint: NearbyEndpoint,
-    callId: String,
-    peerMemberId: String? = null,
-    peerName: String = endpoint.name,
-  ) {
-    mutableState.value =
-      mutableState.value.copy(
-        callState =
-          CallState(
-            status = CallStatus.Incoming,
-            callId = callId,
-            peerEndpointId = endpoint.id,
-            peerMemberId = peerMemberId,
-            peerName = peerName,
-            isInitiator = false,
-          ),
-      )
-  }
-
-  fun acceptCall(callId: String, startedAt: Long = System.currentTimeMillis()): Boolean {
-    val current = mutableState.value
-    val callState = current.callState
-    if (callState.callId != callId) return false
-    if (callState.status != CallStatus.Incoming && callState.status != CallStatus.Outgoing) return false
-    mutableState.value =
-      current.copy(
-        callState =
-          callState.copy(
-            status = CallStatus.Active,
-            startedAt = startedAt,
-          ),
-      )
-    return true
-  }
-
-  fun endCall(callId: String? = null): Boolean {
-    val current = mutableState.value
-    if (current.callState.status == CallStatus.Idle) return false
-    if (callId != null && current.callState.callId != callId) return false
-    mutableState.value = current.copy(callState = CallState(), callPlayback = null)
-    return true
-  }
-
-  fun rejectCall(callId: String? = null): Boolean = endCall(callId)
-
-  fun setCallActivity(activityLabel: String?) {
-    val current = mutableState.value
-    if (current.callState.status == CallStatus.Idle) return
-    mutableState.value = current.copy(callState = current.callState.copy(activityLabel = activityLabel))
-  }
-
-  fun showCallPlayback(playback: CallVoicePlayback, activityLabel: String) {
-    val current = mutableState.value
-    if (current.callState.status != CallStatus.Active) return
-    if (current.callState.callId != playback.callId) return
-    mutableState.value =
-      current.copy(
-        callState = current.callState.copy(activityLabel = activityLabel),
-        callPlayback = playback,
-      )
-  }
-
-  fun finishCallPlayback(clipId: String) {
-    val current = mutableState.value
-    if (current.callPlayback?.clipId != clipId) return
-    mutableState.value =
-      current.copy(
-        callState = current.callState.copy(activityLabel = null),
-        callPlayback = null,
-      )
-  }
-
-  fun queueOutgoingMessage(text: String, now: Long = System.currentTimeMillis()): ChatMessage {
-    val message =
-      ChatMessage(
-        id = UUID.randomUUID().toString(),
-        conversationId = conversationId,
-        senderId = localDeviceId,
-        text = text,
-        createdAt = now,
-        status = MessageStatus.Queued,
-        isLocal = true,
-      )
-    mutableState.value =
-      mutableState.value.copy(
-        messages = mutableState.value.messages + message,
-        messageRevision = mutableState.value.messageRevision + 1,
-      )
-    return message
-  }
-
-  fun queueOutgoingVoiceMessage(
-    payloadKey: String,
-    durationMs: Long,
-    mimeType: String,
-    now: Long = System.currentTimeMillis(),
-  ): ChatMessage {
-    val message =
-      ChatMessage(
-        id = UUID.randomUUID().toString(),
-        conversationId = conversationId,
-        senderId = localDeviceId,
-        text = voiceLabel(durationMs),
-        createdAt = now,
-        status = MessageStatus.Queued,
-        isLocal = true,
-        kind = MessageKind.Voice,
-        voice = VoiceAttachment(payloadKey, durationMs, mimeType),
-      )
-    mutableState.value =
-      mutableState.value.copy(
-        messages = mutableState.value.messages + message,
-        messageRevision = mutableState.value.messageRevision + 1,
-      )
-    return message
-  }
-
-  fun receiveRemoteMessage(
-    messageId: String,
-    conversationId: String,
-    senderId: String,
-    text: String,
-    createdAt: Long,
-  ): Boolean {
-    if (state.value.messages.any { it.id == messageId }) return false
-    val message =
-      ChatMessage(
-        id = messageId,
-        conversationId = conversationId,
-        senderId = senderId,
-        text = text,
-        createdAt = createdAt,
-        status = MessageStatus.Received,
-        isLocal = false,
-      )
-    mutableState.value =
-      mutableState.value.copy(
-        messages = mutableState.value.messages + message,
-        messageRevision = mutableState.value.messageRevision + 1,
-      )
-    return true
-  }
-
-  fun receiveRemoteVoiceMessage(
-    messageId: String,
-    conversationId: String,
-    senderId: String,
-    payloadKey: String,
-    durationMs: Long,
-    mimeType: String,
-    createdAt: Long,
-  ): Boolean {
-    if (state.value.messages.any { it.id == messageId }) return false
-    val message =
-      ChatMessage(
-        id = messageId,
-        conversationId = conversationId,
-        senderId = senderId,
-        text = voiceLabel(durationMs),
-        createdAt = createdAt,
-        status = MessageStatus.Received,
-        isLocal = false,
-        kind = MessageKind.Voice,
-        voice = VoiceAttachment(payloadKey, durationMs, mimeType),
-      )
-    mutableState.value =
-      mutableState.value.copy(
-        messages = mutableState.value.messages + message,
-        messageRevision = mutableState.value.messageRevision + 1,
-      )
-    return true
-  }
-
-  fun queueOutgoingLocationMessage(
-    latitude: Double,
-    longitude: Double,
-    accuracy: Float?,
-    now: Long = System.currentTimeMillis(),
-  ): ChatMessage {
-    val message =
-      ChatMessage(
-        id = UUID.randomUUID().toString(),
-        conversationId = conversationId,
-        senderId = localDeviceId,
-        text = locationLabel(latitude, longitude),
-        createdAt = now,
-        status = MessageStatus.Queued,
-        isLocal = true,
-        kind = MessageKind.Location,
-        location = LocationAttachment(latitude, longitude, accuracy),
-      )
-    mutableState.value =
-      mutableState.value.copy(
-        messages = mutableState.value.messages + message,
-        messageRevision = mutableState.value.messageRevision + 1,
-      )
-    return message
-  }
-
-  fun receiveRemoteLocationMessage(
-    messageId: String,
-    conversationId: String,
-    senderId: String,
-    latitude: Double,
-    longitude: Double,
-    accuracy: Float?,
-    createdAt: Long,
-  ): Boolean {
-    if (state.value.messages.any { it.id == messageId }) return false
-    val message =
-      ChatMessage(
-        id = messageId,
-        conversationId = conversationId,
-        senderId = senderId,
-        text = locationLabel(latitude, longitude),
-        createdAt = createdAt,
-        status = MessageStatus.Received,
-        isLocal = false,
-        kind = MessageKind.Location,
-        location = LocationAttachment(latitude, longitude, accuracy),
-      )
-    mutableState.value =
-      mutableState.value.copy(
-        messages = mutableState.value.messages + message,
-        messageRevision = mutableState.value.messageRevision + 1,
-      )
-    return true
-  }
-
-  fun queueOutgoingImageMessage(
-    payloadKey: String,
-    mimeType: String,
-    width: Int,
-    height: Int,
-    now: Long = System.currentTimeMillis(),
-  ): ChatMessage {
-    val message =
-      ChatMessage(
-        id = UUID.randomUUID().toString(),
-        conversationId = conversationId,
-        senderId = localDeviceId,
-        text = imageLabel(width, height),
-        createdAt = now,
-        status = MessageStatus.Queued,
-        isLocal = true,
-        kind = MessageKind.Image,
-        image = ImageAttachment(payloadKey, mimeType, width, height),
-      )
-    mutableState.value =
-      mutableState.value.copy(
-        messages = mutableState.value.messages + message,
-        messageRevision = mutableState.value.messageRevision + 1,
-      )
-    return message
-  }
-
-  fun receiveRemoteImageMessage(
-    messageId: String,
-    conversationId: String,
-    senderId: String,
-    payloadKey: String,
-    mimeType: String,
-    width: Int,
-    height: Int,
-    createdAt: Long,
-  ): Boolean {
-    if (state.value.messages.any { it.id == messageId }) return false
-    val message =
-      ChatMessage(
-        id = messageId,
-        conversationId = conversationId,
-        senderId = senderId,
-        text = imageLabel(width, height),
-        createdAt = createdAt,
-        status = MessageStatus.Received,
-        isLocal = false,
-        kind = MessageKind.Image,
-        image = ImageAttachment(payloadKey, mimeType, width, height),
-      )
-    mutableState.value =
-      mutableState.value.copy(
-        messages = mutableState.value.messages + message,
-        messageRevision = mutableState.value.messageRevision + 1,
-      )
-    return true
-  }
-
-  fun markSent(messageId: String) {
-    updateMessageStatus(messageId, MessageStatus.Sent)
-  }
-
-  fun markQueued(messageId: String) {
-    updateMessageStatus(messageId, MessageStatus.Queued)
-  }
-
-  fun markFailed(messageId: String) {
-    updateMessageStatus(messageId, MessageStatus.Failed)
-  }
-
-  fun acknowledge(messageId: String) {
-    updateMessageStatus(messageId, MessageStatus.Received)
-  }
-
-  private fun updateMessageStatus(messageId: String, status: MessageStatus) {
-    mutableState.value =
-      mutableState.value.copy(
-        messages = mutableState.value.messages.map { if (it.id == messageId) it.copy(status = status) else it },
-      )
-  }
-
-  private fun mergeGroupMembers(current: List<GroupMember>, incoming: List<GroupMember>): List<GroupMember> {
-    val currentById = current.associateBy { it.id }
-    return (current + incoming.map(::cleanGroupMember))
-      .filterNot { it.id == localDeviceId }
-      .associateBy { it.id }
-      .values
-      .map { member ->
-        val existing = currentById[member.id]
-        when {
-          existing?.status == GroupMemberStatus.Online && member.status != GroupMemberStatus.Online -> member.copy(status = GroupMemberStatus.Online)
-          existing?.status == GroupMemberStatus.Reconnecting && member.status != GroupMemberStatus.Online -> member.copy(status = GroupMemberStatus.Reconnecting)
-          else -> member
-        }
-      }
-      .toList()
-  }
-
-  private fun cleanGroupMember(member: GroupMember): GroupMember =
-    GroupMember(
-      id = member.id,
-      displayName = member.displayName.ifBlank { "Nearby device" },
-      status = member.status,
+  private fun combineState(): ChatUiState {
+    val connection = connectionStore.state.value
+    val messages = messageStore.state.value
+    val call = callStore.state.value
+    val callPlayback = if (call.callState.status == CallStatus.Idle) null else call.callPlayback
+    return ChatUiState(
+      localDeviceId = connection.localDeviceId,
+      displayName = connection.displayName,
+      avatarName = connection.avatarName,
+      groupName = connection.groupName,
+      status = connection.status,
+      statusMessage = connection.statusMessage,
+      isVisibleToNearby = connection.isVisibleToNearby,
+      discoveredEndpoints = connection.discoveredEndpoints,
+      pendingConnection = connection.pendingConnection,
+      connectedEndpoints = connection.connectedEndpoints,
+      groupMembers = connection.groupMembers,
+      messages = messages.messages,
+      messageRevision = messages.messageRevision,
+      groupWarning = connection.groupWarning,
+      lastError = connection.lastError,
+      callState = call.callState,
+      callPlayback = callPlayback,
     )
-
-  private fun connectedStatusMessage(endpoints: List<NearbyEndpoint>): String =
-    when (endpoints.size) {
-      0 -> "Disconnected"
-      1 -> "Connected to ${endpoints.single().name}"
-      else -> "Connected to ${endpoints.size} devices"
-    }
-
-  private fun voiceLabel(durationMs: Long): String {
-    val seconds = ((durationMs.coerceAtLeast(1L) + 999L) / 1000L).coerceAtLeast(1L)
-    return "Voice ${seconds}s"
   }
-
-  private fun locationLabel(latitude: Double, longitude: Double): String =
-    "%.6f, %.6f".format(latitude, longitude)
-
-  private fun imageLabel(width: Int, height: Int): String =
-    "Image ${width}x$height"
 }

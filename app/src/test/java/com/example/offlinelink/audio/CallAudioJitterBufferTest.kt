@@ -51,6 +51,21 @@ class CallAudioJitterBufferTest {
     assertEquals(6, buffer.pollReady()?.label())
   }
 
+  @Test
+  fun defaultBufferWaitsForBluetoothBurstToleranceBeforePlayback() {
+    val buffer = CallAudioJitterBuffer()
+
+    repeat(4) { index ->
+      buffer.enqueue(pcmFrame(label = index + 1))
+    }
+
+    assertNull(buffer.pollReady())
+
+    buffer.enqueue(pcmFrame(label = 5))
+
+    assertEquals(1, buffer.pollReady()?.label())
+  }
+
   private fun pcmFrame(label: Int): PcmAudioFrame =
     PcmAudioFrame(
       bytes = ByteArray(callAudioPcmFrameBytes(sampleRateHz = 16_000)) { label.toByte() },

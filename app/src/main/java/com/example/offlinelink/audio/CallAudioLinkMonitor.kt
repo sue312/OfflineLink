@@ -1,5 +1,6 @@
 package com.example.offlinelink.audio
 
+import java.util.ArrayDeque
 import kotlin.math.min
 import kotlin.math.pow
 
@@ -13,10 +14,32 @@ data class CallAudioLinkStats(
   val maxInterArrivalMs: Long = 0,
   val bufferedDurationMs: Long = 0,
   val lastSequenceNumber: Int? = null,
+  val recentReceivedFrames: Long = 0,
+  val recentLostFrames: Long = 0,
+  val recentConcealedFrames: Long = 0,
+  val recentLateFrames: Long = 0,
+  val recentMaxGapFrames: Int = 0,
+  val recentAverageInterArrivalMs: Long = 0,
+  val recentMaxInterArrivalMs: Long = 0,
+  val transmitStats: CallAudioTransmitStats = CallAudioTransmitStats(),
+)
+
+data class CallAudioTransmitStats(
+  val remoteRssi: Int? = null,
+  val sentBytesPerSecond: Long = 0,
+  val averageWriteBlockedMs: Long = 0,
+  val maxWriteBlockedMs: Long = 0,
+  val writeQueueLength: Int = 0,
+  val maxWriteQueueLength: Int = 0,
+  val socketCongested: Boolean = false,
+  val liveAudioPendingFrames: Int = 0,
+  val liveAudioDroppedFrames: Long = 0,
+  val forceReliableEncoding: Boolean = false,
 )
 
 class CallAudioLinkMonitor(
   private val maxConcealedGapFrames: Int = DEFAULT_MAX_CONCEALED_GAP_FRAMES,
+  private val recentWindowFrames: Int = DEFAULT_RECENT_WINDOW_FRAMES,
   private val clockMs: () -> Long = { System.currentTimeMillis() },
 ) {
   private var expectedSequenceNumber: Int? = null
@@ -32,9 +55,20 @@ class CallAudioLinkMonitor(
   private var maxInterArrivalMs = 0L
   private var bufferedDurationMs = 0L
   private var lastSequenceNumber: Int? = null
+  private val recentSamples = ArrayDeque<RecentLinkSample>()
 
   init {
     require(maxConcealedGapFrames >= 0) { "maxConcealedGapFrames must not be negative" }
+    require(recentWindowFrames >= 1) { "recentWindowFrames must be at least 1" }
+  }
+
+  @Synchronized
+  fun shouldDecode(sequenceNumber: Int?): Boolean {
+    val expected = expectedSequenceNumber ?: return true
+    if (sequenceNumber == null || sequenceNumber >= expected) return true
+    lateFrames++
+    recordRecentSample(lateFrames = 1)
+    return false
   }
 
   @Synchronized
@@ -42,26 +76,32 @@ class CallAudioLinkMonitor(
     frame: PcmAudioFrame,
     sequenceNumber: Int?,
   ): List<PcmAudioFrame> {
-    recordArrival()
+    val interArrivalMs = recordArrival()
     if (sequenceNumber == null) {
       receivedFrames++
       lastFrame = frame
+      recordRecentSample(receivedFrames = 1, interArrivalMs = interArrivalMs)
       return listOf(frame)
     }
 
     val expected = expectedSequenceNumber
     if (expected != null && sequenceNumber < expected) {
       lateFrames++
+      recordRecentSample(lateFrames = 1, interArrivalMs = interArrivalMs)
       return emptyList()
     }
 
     receivedFrames++
     val output = mutableListOf<PcmAudioFrame>()
+    var lostInFrame = 0
+    var concealedInFrame = 0
     if (expected != null && sequenceNumber > expected) {
       val gap = sequenceNumber - expected
+      lostInFrame = gap
       lostFrames += gap.toLong()
       maxGapFrames = maxOf(maxGapFrames, gap)
       val concealed = min(gap, maxConcealedGapFrames)
+      concealedInFrame = concealed
       repeat(concealed) { index ->
         output += concealmentFrame(reference = frame, distance = index + 1)
       }
@@ -71,6 +111,13 @@ class CallAudioLinkMonitor(
     expectedSequenceNumber = sequenceNumber + 1
     lastSequenceNumber = sequenceNumber
     lastFrame = frame
+    recordRecentSample(
+      receivedFrames = 1,
+      lostFrames = lostInFrame,
+      concealedFrames = concealedInFrame,
+      gapFrames = lostInFrame,
+      interArrivalMs = interArrivalMs,
+    )
     return output
   }
 
@@ -80,8 +127,9 @@ class CallAudioLinkMonitor(
   }
 
   @Synchronized
-  fun snapshot(): CallAudioLinkStats =
-    CallAudioLinkStats(
+  fun snapshot(): CallAudioLinkStats {
+    val recent = recentSnapshot()
+    return CallAudioLinkStats(
       receivedFrames = receivedFrames,
       lostFrames = lostFrames,
       concealedFrames = concealedFrames,
@@ -91,7 +139,15 @@ class CallAudioLinkMonitor(
       maxInterArrivalMs = maxInterArrivalMs,
       bufferedDurationMs = bufferedDurationMs,
       lastSequenceNumber = lastSequenceNumber,
+      recentReceivedFrames = recent.receivedFrames,
+      recentLostFrames = recent.lostFrames,
+      recentConcealedFrames = recent.concealedFrames,
+      recentLateFrames = recent.lateFrames,
+      recentMaxGapFrames = recent.maxGapFrames,
+      recentAverageInterArrivalMs = recent.averageInterArrivalMs,
+      recentMaxInterArrivalMs = recent.maxInterArrivalMs,
     )
+  }
 
   @Synchronized
   fun reset() {
@@ -108,17 +164,75 @@ class CallAudioLinkMonitor(
     maxInterArrivalMs = 0L
     bufferedDurationMs = 0L
     lastSequenceNumber = null
+    recentSamples.clear()
   }
 
-  private fun recordArrival() {
+  private fun recordArrival(): Long? {
     val now = clockMs()
-    lastArrivalMs?.let { previous ->
+    val interArrivalMs =
+      lastArrivalMs?.let { previous ->
       val delta = (now - previous).coerceAtLeast(0L)
       interArrivalTotalMs += delta
       interArrivalSamples++
       maxInterArrivalMs = maxOf(maxInterArrivalMs, delta)
+      delta
     }
     lastArrivalMs = now
+    return interArrivalMs
+  }
+
+  private fun recordRecentSample(
+    receivedFrames: Int = 0,
+    lostFrames: Int = 0,
+    concealedFrames: Int = 0,
+    lateFrames: Int = 0,
+    gapFrames: Int = 0,
+    interArrivalMs: Long? = null,
+  ) {
+    recentSamples +=
+      RecentLinkSample(
+        receivedFrames = receivedFrames,
+        lostFrames = lostFrames,
+        concealedFrames = concealedFrames,
+        lateFrames = lateFrames,
+        gapFrames = gapFrames,
+        interArrivalMs = interArrivalMs,
+      )
+    while (recentSamples.size > recentWindowFrames) {
+      recentSamples.removeFirst()
+    }
+  }
+
+  private fun recentSnapshot(): RecentLinkStats {
+    var received = 0L
+    var lost = 0L
+    var concealed = 0L
+    var late = 0L
+    var maxGap = 0
+    var interArrivalTotal = 0L
+    var interArrivalCount = 0L
+    var maxInterArrival = 0L
+    recentSamples.forEach { sample ->
+      received += sample.receivedFrames.toLong()
+      lost += sample.lostFrames.toLong()
+      concealed += sample.concealedFrames.toLong()
+      late += sample.lateFrames.toLong()
+      maxGap = maxOf(maxGap, sample.gapFrames)
+      sample.interArrivalMs?.let { interArrival ->
+        interArrivalTotal += interArrival
+        interArrivalCount++
+        maxInterArrival = maxOf(maxInterArrival, interArrival)
+      }
+    }
+    return RecentLinkStats(
+      receivedFrames = received,
+      lostFrames = lost,
+      concealedFrames = concealed,
+      lateFrames = late,
+      maxGapFrames = maxGap,
+      averageInterArrivalMs = if (interArrivalCount == 0L) 0L else interArrivalTotal / interArrivalCount,
+      maxInterArrivalMs = maxInterArrival,
+    )
   }
 
   private fun concealmentFrame(
@@ -155,6 +269,26 @@ class CallAudioLinkMonitor(
 
   private companion object {
     const val DEFAULT_MAX_CONCEALED_GAP_FRAMES = 3
+    const val DEFAULT_RECENT_WINDOW_FRAMES = 96
     const val CONCEALMENT_GAIN = 0.78
   }
+
+  private data class RecentLinkSample(
+    val receivedFrames: Int,
+    val lostFrames: Int,
+    val concealedFrames: Int,
+    val lateFrames: Int,
+    val gapFrames: Int,
+    val interArrivalMs: Long?,
+  )
+
+  private data class RecentLinkStats(
+    val receivedFrames: Long,
+    val lostFrames: Long,
+    val concealedFrames: Long,
+    val lateFrames: Long,
+    val maxGapFrames: Int,
+    val averageInterArrivalMs: Long,
+    val maxInterArrivalMs: Long,
+  )
 }

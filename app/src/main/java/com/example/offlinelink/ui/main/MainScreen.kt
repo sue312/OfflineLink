@@ -1,7 +1,7 @@
-package com.example.offlinelink.ui.main
+﻿package com.example.offlinelink.ui.main
 
-import android.bluetooth.BluetoothManager
 import android.app.Activity
+import android.bluetooth.BluetoothManager
 import android.content.Context
 import android.content.ContextWrapper
 import android.content.Intent
@@ -134,14 +134,17 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation3.runtime.NavKey
 import com.example.offlinelink.audio.CallAudioFrame
+import com.example.offlinelink.audio.CallAudioEncodingMode
 import com.example.offlinelink.audio.CallAudioLinkStats
 import com.example.offlinelink.audio.CallAudioProcessingMode
 import com.example.offlinelink.audio.CallAudioStream
+import com.example.offlinelink.audio.CallAudioTransmitStats
 import com.example.offlinelink.audio.CallTonePlayer
 import com.example.offlinelink.audio.RecordedVoiceClip
 import com.example.offlinelink.audio.VoicePlayer
 import com.example.offlinelink.audio.VoiceRecorder
-import com.example.offlinelink.audio.callAudioProcessingModeFromName
+import com.example.offlinelink.audio.callAudioEncodingModeFromName
+import com.example.offlinelink.audio.initialCallAudioProcessingMode
 import com.example.offlinelink.data.JsonChatHistoryRepository
 import com.example.offlinelink.data.PayloadCache
 import com.example.offlinelink.image.ImageCompressor
@@ -159,11 +162,12 @@ import com.example.offlinelink.model.MessageStatus
 import com.example.offlinelink.model.NearbyEndpoint
 import com.example.offlinelink.model.VoiceAttachment
 import com.example.offlinelink.model.callToneModeFor
-import com.example.offlinelink.permissions.requiredNearbyRuntimePermissions
+import com.example.offlinelink.permissions.requiredBluetoothRuntimePermissions
 import com.example.offlinelink.service.OfflineKeepAliveService
 import com.example.offlinelink.theme.MyApplicationTheme
-import com.example.offlinelink.transport.NearbyChatTransport
+import com.example.offlinelink.offlineLinkSession
 import java.io.File
+import java.util.UUID
 import kotlin.io.encoding.Base64
 import kotlin.io.encoding.ExperimentalEncodingApi
 import kotlinx.coroutines.Dispatchers
@@ -173,16 +177,16 @@ import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-private val LocalPayloadCache = androidx.compose.runtime.staticCompositionLocalOf<PayloadCache> {
+internal val LocalPayloadCache = androidx.compose.runtime.staticCompositionLocalOf<PayloadCache> {
   error("No PayloadCache provided")
 }
-
 @Composable
 fun MainScreen(
   onItemClick: (NavKey) -> Unit,
   modifier: Modifier = Modifier,
 ) {
   val context = LocalContext.current
+  val appSession = remember(context.applicationContext) { context.applicationContext.offlineLinkSession }
   val locationHelper = remember(context) { LocationHelper(context.applicationContext) }
   val contentResolver = context.applicationContext.contentResolver
   val historyRepository =
@@ -204,14 +208,24 @@ fun MainScreen(
     remember(preferences) {
       preferences.getStringSet(KEY_TRUSTED_DEVICE_IDS, emptySet()).orEmpty().toSet()
     }
+  val localDeviceId =
+    remember(preferences) {
+      preferences.getString(KEY_LOCAL_DEVICE_ID, null)
+        ?.trim()
+        ?.takeIf { it.isNotEmpty() }
+        ?: UUID.randomUUID().toString().also { generatedId ->
+          preferences.edit().putString(KEY_LOCAL_DEVICE_ID, generatedId).apply()
+        }
+    }
   val viewModel: MainScreenViewModel =
     viewModel {
       MainScreenViewModel(
-        NearbyChatTransport(context.applicationContext),
+        appSession.transport,
         locationHelper::currentLocation,
         { uri -> ImageCompressor.compress(contentResolver, uri) },
         defaultDisplayName = defaultDisplayName,
         defaultAvatarName = defaultAvatarName,
+        localDeviceId = localDeviceId,
         historyRepository = historyRepository,
         payloadCache = payloadCache,
         initialTrustedDeviceIds = trustedDeviceIds,
@@ -225,7 +239,15 @@ fun MainScreen(
   val callAudioStream = remember(context) { CallAudioStream(context.applicationContext) }
   val callTonePlayer = remember(context) { CallTonePlayer(context.applicationContext) }
   var callAudioProcessingMode by rememberSaveable {
-    mutableStateOf(callAudioProcessingModeFromName(preferences.getString(KEY_CALL_AUDIO_PROCESSING_MODE, null)))
+    mutableStateOf(
+      initialCallAudioProcessingMode(
+        savedName = preferences.getString(KEY_CALL_AUDIO_PROCESSING_MODE, null),
+        userSelected = preferences.getBoolean(KEY_CALL_AUDIO_PROCESSING_MODE_USER_SELECTED, false),
+      ),
+    )
+  }
+  var callAudioEncodingMode by rememberSaveable {
+    mutableStateOf(callAudioEncodingModeFromName(preferences.getString(KEY_CALL_AUDIO_ENCODING_MODE, null)))
   }
   var callAudioDiagnosticsEnabled by rememberSaveable {
     mutableStateOf(preferences.getBoolean(KEY_CALL_AUDIO_DIAGNOSTICS_ENABLED, false))
@@ -233,7 +255,8 @@ fun MainScreen(
   val callAudioDiagnosticsPath = remember(callAudioStream) { callAudioStream.diagnosticsDirectoryPath() }
   val callAudioLinkStats = callAudioStream.linkStats()
   val state by viewModel.uiState.collectAsStateWithLifecycle()
-  val requiredPermissions = remember { requiredNearbyRuntimePermissions() }
+  val callAudioTransmitStats = viewModel.callAudioTransmitStats()
+  val requiredPermissions = remember { requiredBluetoothRuntimePermissions() }
   var hasPermissions by remember {
     mutableStateOf(requiredPermissions.all { ContextCompat.checkSelfPermission(context, it) == PackageManager.PERMISSION_GRANTED })
   }
@@ -256,6 +279,12 @@ fun MainScreen(
   LaunchedEffect(callAudioProcessingMode, callAudioStream) {
     callAudioStream.setProcessingMode(callAudioProcessingMode)
   }
+  LaunchedEffect(callAudioEncodingMode, callAudioStream) {
+    callAudioStream.setEncodingMode(callAudioEncodingMode)
+  }
+  LaunchedEffect(callAudioStream, viewModel) {
+    callAudioStream.setTransmitStatsProvider { viewModel.callAudioTransmitStats() }
+  }
   LaunchedEffect(callAudioDiagnosticsEnabled, callAudioStream) {
     callAudioStream.setDiagnosticsEnabled(callAudioDiagnosticsEnabled)
   }
@@ -271,12 +300,6 @@ fun MainScreen(
       runCatching { OfflineKeepAliveService.stop(context.applicationContext) }
     }
   }
-  DisposableEffect(context) {
-    onDispose {
-      runCatching { OfflineKeepAliveService.stop(context.applicationContext) }
-    }
-  }
-
   androidx.compose.runtime.CompositionLocalProvider(LocalPayloadCache provides payloadCache) {
     OfflineChatContent(
     state = state,
@@ -292,7 +315,9 @@ fun MainScreen(
       viewModel.setAvatarName(avatarName)
     },
     onDiscover = viewModel::startDiscovery,
-    onVisibleToNearbyChange = viewModel::setVisibleToNearby,
+    onVisibleToNearbyChange = { isVisible ->
+      viewModel.setVisibleToNearby(isVisible)
+    },
     onConnect = viewModel::connectTo,
     onAccept = viewModel::acceptPendingConnection,
     onReject = viewModel::rejectPendingConnection,
@@ -309,7 +334,7 @@ fun MainScreen(
     onStopVoiceRecording = voiceRecorder::stop,
     onPlayVoice = { voice ->
       val bytes = payloadCache.get(voice.payloadKey)
-      if (bytes != null) voicePlayer.play(bytes)
+      if (bytes != null) voicePlayer.play(bytes, voice.mimeType)
       else Result.failure(IllegalStateException("Voice payload not found"))
     },
     onDisconnect = viewModel::disconnect,
@@ -327,15 +352,28 @@ fun MainScreen(
         hasPermissions = hasPermissions,
         state = state,
         callAudioProcessingMode = callAudioProcessingMode,
+        callAudioEncodingMode = callAudioEncodingMode,
         callAudioDiagnosticsEnabled = callAudioDiagnosticsEnabled,
         callAudioDiagnosticsPath = callAudioDiagnosticsPath,
         callAudioLinkStats = callAudioLinkStats,
+        callAudioTransmitStats = callAudioTransmitStats,
       ),
     callAudioProcessingMode = callAudioProcessingMode,
     onCallAudioProcessingModeChange = { mode ->
       callAudioProcessingMode = mode
-      preferences.edit().putString(KEY_CALL_AUDIO_PROCESSING_MODE, mode.name).apply()
+      preferences.edit()
+        .putString(KEY_CALL_AUDIO_PROCESSING_MODE, mode.name)
+        .putBoolean(KEY_CALL_AUDIO_PROCESSING_MODE_USER_SELECTED, true)
+        .apply()
       callAudioStream.setProcessingMode(mode)
+    },
+    callAudioEncodingMode = callAudioEncodingMode,
+    onCallAudioEncodingModeChange = { mode ->
+      callAudioEncodingMode = mode
+      preferences.edit()
+        .putString(KEY_CALL_AUDIO_ENCODING_MODE, mode.name)
+        .apply()
+      callAudioStream.setEncodingMode(mode)
     },
     callAudioDiagnosticsEnabled = callAudioDiagnosticsEnabled,
     onCallAudioDiagnosticsEnabledChange = { enabled ->
@@ -349,7 +387,6 @@ fun MainScreen(
     )
   }
 }
-
 @OptIn(ExperimentalEncodingApi::class)
 @Composable
 private fun OfflineChatContent(
@@ -388,6 +425,8 @@ private fun OfflineChatContent(
   diagnostics: List<DiagnosticItem>,
   callAudioProcessingMode: CallAudioProcessingMode,
   onCallAudioProcessingModeChange: (CallAudioProcessingMode) -> Unit,
+  callAudioEncodingMode: CallAudioEncodingMode,
+  onCallAudioEncodingModeChange: (CallAudioEncodingMode) -> Unit,
   callAudioDiagnosticsEnabled: Boolean,
   onCallAudioDiagnosticsEnabledChange: (Boolean) -> Unit,
   callAudioDiagnosticsPath: String,
@@ -512,13 +551,13 @@ private fun OfflineChatContent(
           .padding(start = 12.dp, top = 10.dp, end = 12.dp, bottom = 8.dp),
       verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-      Header(onOpenSettings = { showSettings = true })
+      HeaderSection(onOpenSettings = { showSettings = true })
 
       if (!hasPermissions) {
         PermissionPanel(onRequestPermissions, modifier = Modifier.fillMaxWidth())
       } else {
         Alerts(lastError = state.lastError)
-        SetupDisclosure(
+        SetupSection(
           state = state,
           expanded = isSetupExpanded,
           onToggle = { isSetupExpanded = !isSetupExpanded },
@@ -530,7 +569,7 @@ private fun OfflineChatContent(
           onAccept = onAccept,
           onReject = onReject,
         )
-        MessageList(
+        MessageListSection(
           state = state,
           messages = state.messages,
           localDeviceId = state.localDeviceId,
@@ -613,8 +652,9 @@ private fun OfflineChatContent(
       }
     }
     if (state.callState.status != CallStatus.Idle) {
-      CallPanel(
+      CallSection(
         callState = state.callState,
+        connectedEndpointRssi = state.connectedEndpoint?.rssi,
         isCallAudioLive = isCallAudioLive,
         isCallMuted = isCallMuted,
         isSpeakerOn = isSpeakerOn,
@@ -636,6 +676,8 @@ private fun OfflineChatContent(
         diagnostics = diagnostics,
         callAudioProcessingMode = callAudioProcessingMode,
         onCallAudioProcessingModeChange = onCallAudioProcessingModeChange,
+        callAudioEncodingMode = callAudioEncodingMode,
+        onCallAudioEncodingModeChange = onCallAudioEncodingModeChange,
         callAudioDiagnosticsEnabled = callAudioDiagnosticsEnabled,
         onCallAudioDiagnosticsEnabledChange = onCallAudioDiagnosticsEnabledChange,
         callAudioDiagnosticsPath = callAudioDiagnosticsPath,
@@ -655,1610 +697,16 @@ private fun OfflineChatContent(
   }
 }
 
-@Composable
-private fun Header(
-  onOpenSettings: () -> Unit,
-) {
-  Row(
-    modifier = Modifier.fillMaxWidth(),
-    verticalAlignment = Alignment.CenterVertically,
-    horizontalArrangement = Arrangement.SpaceBetween,
-  ) {
-    Text("OfflineLink", style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
-    IconButton(onClick = onOpenSettings, modifier = Modifier.size(38.dp)) {
-      Icon(Icons.Rounded.Settings, contentDescription = "Settings", modifier = Modifier.size(20.dp))
-    }
-  }
-}
-
-@Composable
-private fun Alerts(lastError: String?) {
-  lastError?.let { AlertBanner(text = it, isError = true) }
-}
-
-@Composable
-private fun AlertBanner(
-  text: String,
-  isError: Boolean,
-) {
-  val container = if (isError) MaterialTheme.colorScheme.errorContainer else MaterialTheme.colorScheme.tertiaryContainer
-  val content = if (isError) MaterialTheme.colorScheme.onErrorContainer else MaterialTheme.colorScheme.onTertiaryContainer
-  Surface(
-    color = container,
-    contentColor = content,
-    shape = RoundedCornerShape(8.dp),
-    modifier = Modifier.fillMaxWidth(),
-  ) {
-    Row(
-      modifier = Modifier.padding(horizontal = 12.dp, vertical = 9.dp),
-      horizontalArrangement = Arrangement.spacedBy(8.dp),
-      verticalAlignment = Alignment.CenterVertically,
-    ) {
-      Icon(Icons.Rounded.ErrorOutline, contentDescription = null, modifier = Modifier.size(18.dp))
-      Text(text, style = MaterialTheme.typography.bodyMedium)
-    }
-  }
-}
-
-@Composable
-private fun PermissionPanel(
-  onRequestPermissions: () -> Unit,
-  modifier: Modifier = Modifier,
-) {
-  Surface(
-    modifier = modifier,
-    color = MaterialTheme.colorScheme.errorContainer,
-    contentColor = MaterialTheme.colorScheme.onErrorContainer,
-    shape = RoundedCornerShape(8.dp),
-  ) {
-    Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-      Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-        Icon(Icons.Rounded.Lock, contentDescription = null)
-        Text("Permissions needed", style = MaterialTheme.typography.titleMedium)
-      }
-      Text("Nearby, Bluetooth, location, and microphone access are required before this phone can find devices or send voice messages.")
-      Button(onClick = onRequestPermissions, shape = RoundedCornerShape(8.dp)) { Text("Grant permissions") }
-    }
-  }
-}
-
-@Composable
-private fun SettingsDialog(
-  state: ChatUiState,
-  diagnostics: List<DiagnosticItem>,
-  callAudioProcessingMode: CallAudioProcessingMode,
-  onCallAudioProcessingModeChange: (CallAudioProcessingMode) -> Unit,
-  callAudioDiagnosticsEnabled: Boolean,
-  onCallAudioDiagnosticsEnabledChange: (Boolean) -> Unit,
-  callAudioDiagnosticsPath: String,
-  onDisplayNameChange: (String) -> Unit,
-  onAvatarNameChange: (String) -> Unit,
-  onClearMessages: () -> Unit,
-  onDismiss: () -> Unit,
-) {
-  Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
-    Surface(
-      color = MaterialTheme.colorScheme.surface,
-      contentColor = MaterialTheme.colorScheme.onSurface,
-      shape = RoundedCornerShape(8.dp),
-      modifier = Modifier.fillMaxWidth(0.94f).heightIn(max = 620.dp),
-    ) {
-      Column(
-        modifier = Modifier.padding(14.dp).verticalScroll(rememberScrollState()),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
-      ) {
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-          Icon(Icons.Rounded.Settings, contentDescription = null, modifier = Modifier.size(20.dp))
-          Text("Settings", style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
-          IconButton(onClick = onDismiss, modifier = Modifier.size(34.dp)) {
-            Icon(Icons.Rounded.Close, contentDescription = "Close", modifier = Modifier.size(18.dp))
-          }
-        }
-        OutlinedTextField(
-          value = state.displayName,
-          onValueChange = onDisplayNameChange,
-          label = { Text("Display name") },
-          leadingIcon = { Icon(Icons.Rounded.Person, contentDescription = null, modifier = Modifier.size(18.dp)) },
-          singleLine = true,
-          shape = RoundedCornerShape(8.dp),
-          modifier = Modifier.fillMaxWidth(),
-        )
-        OutlinedTextField(
-          value = state.avatarName,
-          onValueChange = onAvatarNameChange,
-          label = { Text("Avatar label") },
-          leadingIcon = { Avatar(state.avatarName.ifBlank { state.displayName }, color = MaterialTheme.colorScheme.primary) },
-          singleLine = true,
-          shape = RoundedCornerShape(8.dp),
-          modifier = Modifier.fillMaxWidth(),
-        )
-        SettingsSection(title = "Call audio") {
-          CallAudioModePicker(
-            selectedMode = callAudioProcessingMode,
-            onModeSelected = onCallAudioProcessingModeChange,
-          )
-          Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-              Text("WAV diagnostics", style = MaterialTheme.typography.bodyMedium)
-              Text(
-                text = if (callAudioDiagnosticsEnabled) "Saving next calls to app files." else "Capture raw, processed, and received call audio.",
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-              )
-            }
-            OutlinedButton(
-              onClick = { onCallAudioDiagnosticsEnabledChange(!callAudioDiagnosticsEnabled) },
-              shape = RoundedCornerShape(8.dp),
-            ) {
-              Text(if (callAudioDiagnosticsEnabled) "On" else "Off")
-            }
-          }
-          Text(
-            text = callAudioDiagnosticsPath,
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-          )
-        }
-        SettingsSection(title = "Diagnostics") {
-          diagnostics.forEach { item ->
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-              Text(item.label, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-              Text(item.value, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
-            }
-          }
-        }
-        SettingsSection(title = "History") {
-          Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-              Text("${state.messages.size} messages", style = MaterialTheme.typography.bodyMedium)
-              Text("Clear only this phone's local history.", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-            OutlinedButton(onClick = onClearMessages, shape = RoundedCornerShape(8.dp), enabled = state.messages.isNotEmpty()) {
-              Icon(Icons.Rounded.Delete, contentDescription = null, modifier = Modifier.size(16.dp))
-              Spacer(Modifier.width(5.dp))
-              Text("Clear")
-            }
-          }
-        }
-      }
-    }
-  }
-}
-
-@Composable
-private fun CallAudioModePicker(
-  selectedMode: CallAudioProcessingMode,
-  onModeSelected: (CallAudioProcessingMode) -> Unit,
-) {
-  Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-    CallAudioProcessingMode.entries.forEach { mode ->
-      val selected = mode == selectedMode
-      if (selected) {
-        Button(
-          onClick = { onModeSelected(mode) },
-          shape = RoundedCornerShape(8.dp),
-          modifier = Modifier.fillMaxWidth(),
-        ) {
-          CallAudioModeContent(mode = mode, selected = true)
-        }
-      } else {
-        OutlinedButton(
-          onClick = { onModeSelected(mode) },
-          shape = RoundedCornerShape(8.dp),
-          modifier = Modifier.fillMaxWidth(),
-        ) {
-          CallAudioModeContent(mode = mode, selected = false)
-        }
-      }
-    }
-  }
-}
-
-@Composable
-private fun CallAudioModeContent(
-  mode: CallAudioProcessingMode,
-  selected: Boolean,
-) {
-  Row(
-    modifier = Modifier.fillMaxWidth(),
-    verticalAlignment = Alignment.CenterVertically,
-    horizontalArrangement = Arrangement.spacedBy(8.dp),
-  ) {
-    Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-      Text(mode.displayName, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
-      Text(mode.description, style = MaterialTheme.typography.labelMedium)
-    }
-    if (selected) {
-      Icon(Icons.Rounded.Check, contentDescription = null, modifier = Modifier.size(18.dp))
-    }
-  }
-}
-
-@Composable
-private fun CallFullScreenEffect(enabled: Boolean) {
-  val view = LocalView.current
-  DisposableEffect(enabled, view) {
-    val window = view.context.findActivity()?.window
-    if (window == null) {
-      onDispose {}
-    } else {
-      val controller = WindowCompat.getInsetsController(window, view)
-      val previousFlags = window.attributes.flags
-      val previousCutoutMode = window.attributes.layoutInDisplayCutoutMode
-      val previousStatusBarColor = window.statusBarColor
-      val previousNavigationBarColor = window.navigationBarColor
-      val previousSystemUiVisibility = window.decorView.systemUiVisibility
-      val previousLightStatusBars = controller.isAppearanceLightStatusBars
-      val previousLightNavigationBars = controller.isAppearanceLightNavigationBars
-      if (enabled) {
-        val attrs = window.attributes
-        attrs.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
-        window.attributes = attrs
-        window.addFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN)
-        window.statusBarColor = AndroidColor.TRANSPARENT
-        window.navigationBarColor = AndroidColor.TRANSPARENT
-        window.decorView.systemUiVisibility =
-          previousSystemUiVisibility or
-            View.SYSTEM_UI_FLAG_FULLSCREEN or
-            View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or
-            View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY or
-            View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or
-            View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION or
-            View.SYSTEM_UI_FLAG_LAYOUT_STABLE
-        controller.isAppearanceLightStatusBars = false
-        controller.isAppearanceLightNavigationBars = false
-        controller.hide(WindowInsetsCompat.Type.systemBars())
-        controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-      }
-      onDispose {
-        if (enabled) {
-          controller.show(WindowInsetsCompat.Type.systemBars())
-          controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_DEFAULT
-          controller.isAppearanceLightStatusBars = previousLightStatusBars
-          controller.isAppearanceLightNavigationBars = previousLightNavigationBars
-          window.statusBarColor = previousStatusBarColor
-          window.navigationBarColor = previousNavigationBarColor
-          window.decorView.systemUiVisibility = previousSystemUiVisibility
-          if (previousFlags and WindowManager.LayoutParams.FLAG_FULLSCREEN == 0) {
-            window.clearFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN)
-          } else {
-            window.addFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN)
-          }
-          val attrs = window.attributes
-          attrs.layoutInDisplayCutoutMode = previousCutoutMode
-          window.attributes = attrs
-        }
-      }
-    }
-  }
-}
-
-private fun Context.findActivity(): Activity? {
-  var current = this
-  while (current is ContextWrapper) {
-    if (current is Activity) return current
-    current = current.baseContext
-  }
-  return current as? Activity
-}
-
-@Composable
-private fun SettingsSection(
-  title: String,
-  content: @Composable () -> Unit,
-) {
-  Surface(
-    color = MaterialTheme.colorScheme.background,
-    shape = RoundedCornerShape(8.dp),
-    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-    modifier = Modifier.fillMaxWidth(),
-  ) {
-    Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-      Text(title, style = MaterialTheme.typography.titleMedium)
-      content()
-    }
-  }
-}
-
-@Composable
-private fun ImagePreviewDialog(
-  message: ChatMessage,
-  imageBitmapCache: Base64DecodedImageCache<ImageBitmap>,
-  onDismiss: () -> Unit,
-) {
-  val image = message.image ?: return
-  val payloadCache = LocalPayloadCache.current
-  val imageBitmap = rememberDecodedImageBitmap(image.payloadKey, payloadCache, imageBitmapCache)
-  Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
-    Surface(color = MaterialTheme.colorScheme.scrim.copy(alpha = 0.92f), modifier = Modifier.fillMaxSize()) {
-      Box(modifier = Modifier.fillMaxSize().padding(12.dp)) {
-        Image(
-          bitmap = imageBitmap,
-          contentDescription = "Shared image preview",
-          contentScale = ContentScale.Fit,
-          modifier = Modifier.fillMaxSize(),
-        )
-        Surface(shape = CircleShape, color = MaterialTheme.colorScheme.surface, modifier = Modifier.align(Alignment.TopEnd)) {
-          IconButton(onClick = onDismiss, modifier = Modifier.size(42.dp)) {
-            Icon(Icons.Rounded.Close, contentDescription = "Close preview")
-          }
-        }
-      }
-    }
-  }
-}
-
-@Composable
-private fun SetupDisclosure(
-  state: ChatUiState,
-  expanded: Boolean,
-  onToggle: () -> Unit,
-  onDiscover: () -> Unit,
-  onVisibleToNearbyChange: (Boolean) -> Unit,
-  onDisconnect: () -> Unit,
-  onStartCall: (String?) -> Unit,
-  onConnect: (NearbyEndpoint) -> Unit,
-  onAccept: () -> Unit,
-  onReject: () -> Unit,
-) {
-  Column(
-    modifier = Modifier.fillMaxWidth().animateContentSize(),
-    verticalArrangement = Arrangement.spacedBy(8.dp),
-  ) {
-    SetupToggleHeader(
-      state = state,
-      expanded = expanded,
-      onToggle = onToggle,
-      onDisconnect = onDisconnect,
-      onStartCall = onStartCall,
-    )
-    AnimatedVisibility(visible = expanded && state.status != ConnectionStatus.Connected) {
-      Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        ConnectionConsole(
-          state = state,
-          onDiscover = onDiscover,
-          onVisibleToNearbyChange = onVisibleToNearbyChange,
-        )
-        state.pendingConnection?.let { pending ->
-          PendingConnectionPanel(
-            title = pending.endpointName,
-            token = pending.authenticationToken,
-            onAccept = onAccept,
-            onReject = onReject,
-          )
-        }
-        if (state.status != ConnectionStatus.Connected) {
-          EndpointList(endpoints = state.discoveredEndpoints, onConnect = onConnect)
-        }
-      }
-    }
-  }
-}
-
-@Composable
-private fun SetupToggleHeader(
-  state: ChatUiState,
-  expanded: Boolean,
-  onToggle: () -> Unit,
-  onDisconnect: () -> Unit,
-  onStartCall: (String?) -> Unit,
-) {
-  val isConnected = state.status == ConnectionStatus.Connected
-  val dotColor =
-    when (state.status) {
-      ConnectionStatus.Connected -> MaterialTheme.colorScheme.primary
-      ConnectionStatus.Advertising, ConnectionStatus.Discovering, ConnectionStatus.Connecting -> MaterialTheme.colorScheme.secondary
-      ConnectionStatus.Error -> MaterialTheme.colorScheme.error
-      else -> MaterialTheme.colorScheme.outline
-    }
-
-  Surface(
-    color = MaterialTheme.colorScheme.surface,
-    contentColor = MaterialTheme.colorScheme.onSurface,
-    shape = RoundedCornerShape(8.dp),
-    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-    modifier = Modifier.fillMaxWidth(),
-  ) {
-    val rowModifier =
-      Modifier
-        .fillMaxWidth()
-        .then(if (isConnected) Modifier else Modifier.clickable(onClick = onToggle))
-        .padding(horizontal = 12.dp, vertical = 9.dp)
-    Row(
-      modifier = rowModifier,
-      horizontalArrangement = Arrangement.spacedBy(10.dp),
-      verticalAlignment = Alignment.CenterVertically,
-    ) {
-      Box(modifier = Modifier.size(8.dp).background(dotColor, CircleShape))
-      Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(1.dp)) {
-        Text(setupHeaderTitle(state), style = MaterialTheme.typography.titleMedium)
-        Text(setupSummaryText(state), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
-      }
-      if (isConnected) {
-        val callTargets = callTargetOptions(state)
-        val canStartCall = state.callState.status == CallStatus.Idle && state.connectedEndpoints.isNotEmpty() && callTargets.isNotEmpty()
-        ComposerActionButton(
-          icon = Icons.Rounded.Call,
-          contentDescription = "Start call",
-          enabled = canStartCall,
-          primary = canStartCall,
-          onClick = { onStartCall(callTargets.firstOrNull()?.id) },
-        )
-        ComposerActionButton(
-          icon = Icons.Rounded.Close,
-          contentDescription = "Disconnect",
-          enabled = true,
-          onClick = onDisconnect,
-        )
-      } else {
-        Icon(
-          imageVector = if (expanded) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore,
-          contentDescription = if (expanded) "Collapse setup" else "Expand setup",
-          tint = MaterialTheme.colorScheme.onSurfaceVariant,
-          modifier = Modifier.size(22.dp),
-        )
-      }
-    }
-  }
-}
-
-@Composable
-private fun ConnectionConsole(
-  state: ChatUiState,
-  onDiscover: () -> Unit,
-  onVisibleToNearbyChange: (Boolean) -> Unit,
-) {
-  Surface(
-    color = MaterialTheme.colorScheme.surface,
-    shape = RoundedCornerShape(8.dp),
-    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-    modifier = Modifier.fillMaxWidth(),
-  ) {
-    Row(
-      modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 8.dp),
-      horizontalArrangement = Arrangement.spacedBy(10.dp),
-      verticalAlignment = Alignment.CenterVertically,
-    ) {
-      Row(
-        modifier = Modifier.weight(1f),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-      ) {
-        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(1.dp)) {
-          Text("Visible", style = MaterialTheme.typography.labelLarge)
-          Text(connectionVisibilityLabel(state.isVisibleToNearby), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
-        Switch(
-          checked = state.isVisibleToNearby,
-          onCheckedChange = onVisibleToNearbyChange,
-          enabled = connectionVisibilityEnabled(state.status),
-        )
-      }
-      val searchEnabled = state.status != ConnectionStatus.Connected
-      val searching = state.status == ConnectionStatus.Discovering
-      if (searching) {
-        Button(
-          onClick = onDiscover,
-          enabled = searchEnabled,
-          shape = RoundedCornerShape(8.dp),
-          contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
-        ) {
-          Icon(Icons.Rounded.Search, contentDescription = null, modifier = Modifier.size(17.dp))
-          Spacer(Modifier.width(6.dp))
-          Text(connectionSearchLabel(state.status), style = MaterialTheme.typography.labelLarge)
-        }
-      } else {
-        OutlinedButton(
-          onClick = onDiscover,
-          enabled = searchEnabled,
-          shape = RoundedCornerShape(8.dp),
-          contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
-        ) {
-          Icon(Icons.Rounded.Search, contentDescription = null, modifier = Modifier.size(17.dp))
-          Spacer(Modifier.width(6.dp))
-          Text(connectionSearchLabel(state.status), style = MaterialTheme.typography.labelLarge)
-        }
-      }
-    }
-  }
-}
-
-@Composable
-private fun CallPanel(
-  callState: CallState,
-  isCallAudioLive: Boolean,
-  isCallMuted: Boolean,
-  isSpeakerOn: Boolean,
-  onToggleMute: () -> Unit,
-  onToggleSpeaker: () -> Unit,
-  onAcceptCall: () -> Unit,
-  onRejectCall: () -> Unit,
-  onEndCall: () -> Unit,
-  modifier: Modifier = Modifier,
-) {
-  val peerName = callState.peerName ?: "Nearby device"
-  var now by remember { mutableStateOf(System.currentTimeMillis()) }
-  LaunchedEffect(callState.status, callState.startedAt) {
-    while (callState.status == CallStatus.Active && callState.startedAt != null) {
-      now = System.currentTimeMillis()
-      delay(1_000L)
-    }
-  }
-  val durationLabel =
-    callState.startedAt
-      ?.takeIf { callState.status == CallStatus.Active }
-      ?.let { formatCallDuration(now - it) }
-  val primaryText = Color(0xFFF4F1EA)
-  val secondaryText = Color(0xB8F4F1EA)
-  val quietText = Color(0x99F4F1EA)
-  val sideButtonColor = Color(0x29F4F1EA)
-  val activeSideButtonColor = Color(0x3DF4F1EA)
-
-  Box(
-    modifier =
-      modifier
-        .background(callScreenBackground())
-        .statusBarsPadding()
-        .navigationBarsPadding()
-        .padding(horizontal = 34.dp),
-  ) {
-    Column(
-      modifier = Modifier.fillMaxSize().padding(top = 112.dp, bottom = 42.dp),
-      horizontalAlignment = Alignment.CenterHorizontally,
-    ) {
-      Text(
-        text = peerName,
-        style = MaterialTheme.typography.displaySmall,
-        color = primaryText,
-        fontWeight = FontWeight.SemiBold,
-        textAlign = TextAlign.Center,
-        maxLines = 1,
-        overflow = TextOverflow.Ellipsis,
-      )
-      Spacer(Modifier.height(10.dp))
-      Text(
-        text = callScreenStatusLabel(callState.status),
-        style = MaterialTheme.typography.titleMedium,
-        color = secondaryText,
-        textAlign = TextAlign.Center,
-      )
-      if (callState.status == CallStatus.Active) {
-        Spacer(Modifier.height(10.dp))
-        Text(
-          text = durationLabel ?: "0:00",
-          style = MaterialTheme.typography.titleLarge,
-          color = primaryText,
-          textAlign = TextAlign.Center,
-        )
-        Spacer(Modifier.height(72.dp))
-        Row(
-          horizontalArrangement = Arrangement.spacedBy(10.dp),
-          verticalAlignment = Alignment.CenterVertically,
-        ) {
-          Icon(Icons.Rounded.Lock, contentDescription = null, tint = quietText, modifier = Modifier.size(22.dp))
-          Text(
-            text = if (isCallAudioLive) callNetworkQualityLabel() else "OfflineLink / Connecting audio",
-            style = MaterialTheme.typography.titleMedium,
-            color = quietText,
-            textAlign = TextAlign.Center,
-          )
-        }
-      }
-
-      Spacer(Modifier.weight(1f))
-
-      if (callState.status == CallStatus.Incoming) {
-        Row(
-          modifier = Modifier.fillMaxWidth(),
-          horizontalArrangement = Arrangement.SpaceEvenly,
-          verticalAlignment = Alignment.CenterVertically,
-        ) {
-          CallControlButton(
-            icon = Icons.Rounded.CallEnd,
-            contentDescription = "Reject call",
-            containerColor = Color(0xFFE94B4E),
-            contentColor = primaryText,
-            size = 72.dp,
-            iconSize = 30.dp,
-            onClick = onRejectCall,
-          )
-          CallControlButton(
-            icon = Icons.Rounded.Call,
-            contentDescription = "Accept call",
-            containerColor = Color(0xFF25C064),
-            contentColor = primaryText,
-            size = 72.dp,
-            iconSize = 30.dp,
-            onClick = onAcceptCall,
-          )
-        }
-      } else {
-        Row(
-          modifier = Modifier.fillMaxWidth(),
-          horizontalArrangement = Arrangement.SpaceBetween,
-          verticalAlignment = Alignment.CenterVertically,
-        ) {
-          CallControlButton(
-            icon = if (isSpeakerOn) Icons.AutoMirrored.Rounded.VolumeUp else Icons.Rounded.Hearing,
-            contentDescription = callOutputRouteLabel(isSpeakerOn),
-            containerColor = if (isSpeakerOn) activeSideButtonColor else sideButtonColor,
-            contentColor = primaryText,
-            onClick = onToggleSpeaker,
-          )
-          CallControlButton(
-            icon = Icons.Rounded.CallEnd,
-            contentDescription = "End call",
-            containerColor = Color(0xFFE94B4E),
-            contentColor = primaryText,
-            size = 80.dp,
-            iconSize = 34.dp,
-            onClick = onEndCall,
-          )
-          CallControlButton(
-            icon = if (isCallMuted) Icons.Rounded.MicOff else Icons.Rounded.Mic,
-            contentDescription = if (isCallMuted) "Muted" else "Mic",
-            containerColor = if (isCallMuted) activeSideButtonColor else sideButtonColor,
-            contentColor = primaryText,
-            onClick = onToggleMute,
-          )
-        }
-      }
-    }
-  }
-}
-
-@Composable
-private fun CallControlButton(
-  icon: ImageVector,
-  contentDescription: String,
-  containerColor: Color,
-  contentColor: Color,
-  onClick: () -> Unit,
-  size: Dp = 58.dp,
-  iconSize: Dp = 27.dp,
-) {
-  Surface(
-    color = containerColor,
-    contentColor = contentColor,
-    shape = CircleShape,
-    modifier = Modifier.size(size),
-  ) {
-    IconButton(onClick = onClick, modifier = Modifier.fillMaxSize()) {
-      Icon(icon, contentDescription = contentDescription, modifier = Modifier.size(iconSize))
-    }
-  }
-}
-
-private fun callScreenBackground(): Brush =
-  Brush.linearGradient(
-    colors =
-      listOf(
-        Color(0xFF7B766A),
-        Color(0xFF626259),
-        Color(0xFF444A43),
-      ),
-    start = Offset(0f, 0f),
-    end = Offset(900f, 1600f),
-  )
-
-@Composable
-private fun Avatar(
-  name: String,
-  color: Color,
-) {
-  Surface(shape = CircleShape, color = color, contentColor = MaterialTheme.colorScheme.onPrimary, modifier = Modifier.size(30.dp)) {
-    Box(contentAlignment = Alignment.Center) {
-      Text(avatarInitials(name), style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.SemiBold)
-    }
-  }
-}
-
-@Composable
-private fun PendingConnectionPanel(
-  title: String,
-  token: String,
-  onAccept: () -> Unit,
-  onReject: () -> Unit,
-) {
-  Surface(
-    modifier = Modifier.fillMaxWidth(),
-    color = MaterialTheme.colorScheme.primaryContainer,
-    contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
-    shape = RoundedCornerShape(8.dp),
-  ) {
-    Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-      Text("Connection request from $title", style = MaterialTheme.typography.titleMedium)
-      Text("Confirm code: $token", style = MaterialTheme.typography.bodyMedium)
-      Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        Button(onClick = onAccept, shape = RoundedCornerShape(8.dp)) {
-          Icon(Icons.Rounded.Check, contentDescription = null, modifier = Modifier.size(18.dp))
-          Spacer(Modifier.width(6.dp))
-          Text("Accept")
-        }
-        OutlinedButton(onClick = onReject, shape = RoundedCornerShape(8.dp)) {
-          Icon(Icons.Rounded.Close, contentDescription = null, modifier = Modifier.size(18.dp))
-          Spacer(Modifier.width(6.dp))
-          Text("Reject")
-        }
-      }
-    }
-  }
-}
-
-@Composable
-private fun EndpointList(
-  endpoints: List<NearbyEndpoint>,
-  onConnect: (NearbyEndpoint) -> Unit,
-) {
-  Surface(
-    color = MaterialTheme.colorScheme.surface,
-    shape = RoundedCornerShape(8.dp),
-    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-    modifier = Modifier.fillMaxWidth(),
-  ) {
-    Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-      Text("Nearby devices", style = MaterialTheme.typography.titleMedium)
-      if (endpoints.isEmpty()) {
-        Text(nearbyEmptyStateText(), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-      } else {
-        endpoints.forEach { endpoint ->
-          Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
-          ) {
-            Avatar(endpoint.name, color = MaterialTheme.colorScheme.secondary)
-            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(1.dp)) {
-              Text(endpoint.name, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium)
-              Text("Ready to pair", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-            OutlinedButton(onClick = { onConnect(endpoint) }, shape = RoundedCornerShape(8.dp)) { Text("Connect") }
-          }
-        }
-      }
-    }
-  }
-}
-
-@Composable
-private fun MessageList(
-  state: ChatUiState,
-  messages: List<ChatMessage>,
-  localDeviceId: String,
-  localDisplayName: String,
-  localAvatarName: String,
-  groupMembers: List<GroupMember>,
-  listState: LazyListState,
-  imageBitmapCache: Base64DecodedImageCache<ImageBitmap>,
-  onRetryMessage: (String) -> Unit,
-  onDeleteMessage: (String) -> Unit,
-  onPreviewImage: (ChatMessage) -> Unit,
-  onPlayVoice: (VoiceAttachment) -> Unit,
-  onOpenMaps: (Double, Double) -> Unit,
-  modifier: Modifier = Modifier,
-) {
-  LazyColumn(
-    modifier = modifier,
-    state = listState,
-    contentPadding = PaddingValues(vertical = 6.dp),
-    verticalArrangement = Arrangement.spacedBy(8.dp),
-  ) {
-    if (messages.isEmpty()) {
-      item(contentType = "empty") { EmptyChatState(state = state) }
-    } else {
-      items(
-        items = messages,
-        key = { it.id },
-        contentType = { it.kind },
-      ) { message ->
-        val senderName =
-          senderDisplayName(
-            senderId = message.senderId,
-            isLocal = message.isLocal,
-            localDeviceId = localDeviceId,
-            groupMembers = groupMembers,
-          )
-        val avatarName = if (message.isLocal) localAvatarName.ifBlank { localDisplayName } else senderName
-        MessageRow(message, senderName, avatarName, imageBitmapCache, onRetryMessage, onDeleteMessage, onPreviewImage, onPlayVoice, onOpenMaps)
-      }
-    }
-  }
-}
-
-@Composable
-private fun EmptyChatState(state: ChatUiState) {
-  Surface(
-    color = MaterialTheme.colorScheme.surface.copy(alpha = 0.72f),
-    shape = RoundedCornerShape(8.dp),
-    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-    modifier = Modifier.fillMaxWidth(),
-  ) {
-    Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-      Text(emptyChatTitle(state), style = MaterialTheme.typography.titleMedium)
-      Text(
-        emptyChatSubtitle(state),
-        style = MaterialTheme.typography.bodyMedium,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-      )
-    }
-  }
-}
-
-@OptIn(ExperimentalFoundationApi::class)
-@Composable
-private fun MessageRow(
-  message: ChatMessage,
-  senderName: String,
-  avatarName: String,
-  imageBitmapCache: Base64DecodedImageCache<ImageBitmap>,
-  onRetryMessage: (String) -> Unit,
-  onDeleteMessage: (String) -> Unit,
-  onPreviewImage: (ChatMessage) -> Unit,
-  onPlayVoice: (VoiceAttachment) -> Unit,
-  onOpenMaps: (Double, Double) -> Unit,
-) {
-  val isLocal = message.isLocal
-  val isAttachment = message.kind != MessageKind.Text
-  val bubbleColor =
-    when {
-      isLocal && isAttachment -> MaterialTheme.colorScheme.surface
-      isLocal -> MaterialTheme.colorScheme.primaryContainer
-      else -> MaterialTheme.colorScheme.surface
-    }
-  val contentColor = MaterialTheme.colorScheme.onSurface
-  val accentColor = if (isLocal) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.secondary
-  val border = BorderStroke(1.dp, if (isLocal) MaterialTheme.colorScheme.primary.copy(alpha = 0.32f) else MaterialTheme.colorScheme.outlineVariant)
-  val attachmentButtonBorder = BorderStroke(1.dp, contentColor.copy(alpha = 0.42f))
-  val attachmentButtonColors = ButtonDefaults.outlinedButtonColors(contentColor = contentColor)
-  var menuExpanded by remember { mutableStateOf(false) }
-  val clipboardManager = LocalClipboardManager.current
-
-  if (message.kind == MessageKind.Image && message.image != null) {
-    ImageMessageRow(
-      message = message,
-      isLocal = isLocal,
-      senderName = senderName,
-      avatarName = avatarName,
-      imageBitmapCache = imageBitmapCache,
-      onRetryMessage = onRetryMessage,
-      onDeleteMessage = onDeleteMessage,
-      onPreviewImage = onPreviewImage,
-    )
-    return
-  }
-
-  Row(
-    modifier = Modifier.fillMaxWidth(),
-    horizontalArrangement = if (isLocal) Arrangement.End else Arrangement.Start,
-    verticalAlignment = Alignment.Bottom,
-  ) {
-    if (!isLocal) {
-      MessageAvatar(name = avatarName, color = MaterialTheme.colorScheme.secondary)
-      Spacer(Modifier.width(7.dp))
-    }
-    Column(horizontalAlignment = if (isLocal) Alignment.End else Alignment.Start, verticalArrangement = Arrangement.spacedBy(3.dp)) {
-      Text(senderName, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-      Surface(
-        color = bubbleColor,
-        contentColor = contentColor,
-        shape = messageBubbleShape(isLocal),
-        border = border,
-        modifier =
-          Modifier
-            .widthIn(max = 300.dp)
-            .combinedClickable(
-              onClick = {},
-              onLongClick = { menuExpanded = true },
-            ),
-      ) {
-        Column(Modifier.padding(horizontal = 12.dp, vertical = 9.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-          when {
-            message.kind == MessageKind.Location && message.location != null -> {
-              LocationMessageContent(
-                latitude = message.location.latitude,
-                longitude = message.location.longitude,
-                accuracy = message.location.accuracy,
-                contentColor = contentColor,
-                accentColor = accentColor,
-                onOpenMaps = onOpenMaps,
-              )
-            }
-            message.voice != null -> {
-              VoiceMessageContent(
-                durationMs = message.voice.durationMs,
-                contentColor = contentColor,
-                accentColor = accentColor,
-                border = attachmentButtonBorder,
-                colors = attachmentButtonColors,
-                onPlay = { onPlayVoice(message.voice) },
-              )
-            }
-            else -> {
-              Text(message.text, style = MaterialTheme.typography.bodyLarge)
-            }
-          }
-          MessageStatusLine(message = message, contentColor = contentColor, onRetryMessage = onRetryMessage)
-        }
-      }
-      MessageActionMenu(
-        expanded = menuExpanded,
-        message = message,
-        onDismiss = { menuExpanded = false },
-        onCopy = {
-          clipboardManager.setText(AnnotatedString(message.copyText()))
-          menuExpanded = false
-        },
-        onRetry = {
-          onRetryMessage(message.id)
-          menuExpanded = false
-        },
-        onDelete = {
-          onDeleteMessage(message.id)
-          menuExpanded = false
-        },
-      )
-    }
-    if (isLocal) {
-      Spacer(Modifier.width(7.dp))
-      MessageAvatar(name = avatarName, color = MaterialTheme.colorScheme.primary)
-    }
-  }
-}
-
-@OptIn(ExperimentalFoundationApi::class)
-@Composable
-private fun ImageMessageRow(
-  message: ChatMessage,
-  isLocal: Boolean,
-  senderName: String,
-  avatarName: String,
-  imageBitmapCache: Base64DecodedImageCache<ImageBitmap>,
-  onRetryMessage: (String) -> Unit,
-  onDeleteMessage: (String) -> Unit,
-  onPreviewImage: (ChatMessage) -> Unit,
-) {
-  val image = message.image ?: return
-  val payloadCache = LocalPayloadCache.current
-  val imageBitmap = rememberDecodedImageBitmap(image.payloadKey, payloadCache, imageBitmapCache)
-  var menuExpanded by remember { mutableStateOf(false) }
-  val clipboardManager = LocalClipboardManager.current
-  val sourceWidth = image.width.coerceAtLeast(1)
-  val sourceHeight = image.height.coerceAtLeast(1)
-  val aspect = sourceWidth.toFloat() / sourceHeight.toFloat()
-  val previewWidth: Float
-  val previewHeight: Float
-  if (aspect < 0.75f) {
-    previewWidth = 188f
-    previewHeight = 250f
-  } else {
-    previewWidth = 238f
-    previewHeight = (previewWidth / aspect).coerceIn(116f, 250f)
-  }
-
-  Row(
-    modifier = Modifier.fillMaxWidth(),
-    horizontalArrangement = if (isLocal) Arrangement.End else Arrangement.Start,
-    verticalAlignment = Alignment.Bottom,
-  ) {
-    if (!isLocal) {
-      MessageAvatar(name = avatarName, color = MaterialTheme.colorScheme.secondary)
-      Spacer(Modifier.width(7.dp))
-    }
-    Column(horizontalAlignment = if (isLocal) Alignment.End else Alignment.Start, verticalArrangement = Arrangement.spacedBy(3.dp)) {
-      Text(senderName, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-      Image(
-        bitmap = imageBitmap,
-        contentDescription = "Shared image",
-        contentScale = ContentScale.Crop,
-        modifier =
-          Modifier
-            .width(previewWidth.dp)
-            .height(previewHeight.dp)
-            .clip(messageBubbleShape(isLocal))
-            .combinedClickable(
-              onClick = { onPreviewImage(message) },
-              onLongClick = { menuExpanded = true },
-            ),
-      )
-      MessageStatusLine(message = message, contentColor = MaterialTheme.colorScheme.onSurfaceVariant, onRetryMessage = onRetryMessage)
-      MessageActionMenu(
-        expanded = menuExpanded,
-        message = message,
-        onDismiss = { menuExpanded = false },
-        onCopy = {
-          clipboardManager.setText(AnnotatedString(message.copyText()))
-          menuExpanded = false
-        },
-        onRetry = {
-          onRetryMessage(message.id)
-          menuExpanded = false
-        },
-        onDelete = {
-          onDeleteMessage(message.id)
-          menuExpanded = false
-        },
-      )
-    }
-    if (isLocal) {
-      Spacer(Modifier.width(7.dp))
-      MessageAvatar(name = avatarName, color = MaterialTheme.colorScheme.primary)
-    }
-  }
-}
-
-@Composable
-private fun MessageStatusLine(
-  message: ChatMessage,
-  contentColor: Color,
-  onRetryMessage: (String) -> Unit,
-) {
-  Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-    Text(message.status.displayLabel(message.isLocal), style = MaterialTheme.typography.labelSmall, color = contentColor.copy(alpha = 0.68f))
-    if (message.isLocal && message.status == MessageStatus.Failed) {
-      TextButton(
-        onClick = { onRetryMessage(message.id) },
-        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
-        modifier = Modifier.height(26.dp),
-      ) {
-        Icon(Icons.Rounded.Refresh, contentDescription = null, modifier = Modifier.size(14.dp))
-        Spacer(Modifier.width(3.dp))
-        Text("Retry", style = MaterialTheme.typography.labelSmall)
-      }
-    }
-  }
-}
-
-@Composable
-private fun MessageActionMenu(
-  expanded: Boolean,
-  message: ChatMessage,
-  onDismiss: () -> Unit,
-  onCopy: () -> Unit,
-  onRetry: () -> Unit,
-  onDelete: () -> Unit,
-) {
-  DropdownMenu(expanded = expanded, onDismissRequest = onDismiss) {
-    DropdownMenuItem(
-      text = { Text("Copy") },
-      leadingIcon = { Icon(Icons.Rounded.ContentCopy, contentDescription = null) },
-      onClick = onCopy,
-    )
-    if (message.isLocal && message.status == MessageStatus.Failed) {
-      DropdownMenuItem(
-        text = { Text("Retry") },
-        leadingIcon = { Icon(Icons.Rounded.Refresh, contentDescription = null) },
-        onClick = onRetry,
-      )
-    }
-    DropdownMenuItem(
-      text = { Text("Delete") },
-      leadingIcon = { Icon(Icons.Rounded.Delete, contentDescription = null) },
-      onClick = onDelete,
-    )
-  }
-}
-
-@Composable
-private fun MessageAvatar(
-  name: String,
-  color: Color,
-) {
-  Surface(shape = CircleShape, color = color, contentColor = MaterialTheme.colorScheme.onPrimary, modifier = Modifier.size(28.dp)) {
-    Box(contentAlignment = Alignment.Center) {
-      Text(avatarInitials(name), style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.SemiBold)
-    }
-  }
-}
-
-@Composable
-private fun VoiceMessageContent(
-  durationMs: Long,
-  contentColor: Color,
-  accentColor: Color,
-  border: BorderStroke,
-  colors: ButtonColors,
-  onPlay: () -> Unit,
-) {
-  OutlinedButton(
-    onClick = onPlay,
-    shape = RoundedCornerShape(8.dp),
-    border = border,
-    colors = colors,
-    contentPadding = PaddingValues(horizontal = 9.dp, vertical = 7.dp),
-    modifier = Modifier.width(194.dp),
-  ) {
-    Surface(color = accentColor, contentColor = MaterialTheme.colorScheme.onPrimary, shape = CircleShape, modifier = Modifier.size(28.dp)) {
-      Box(contentAlignment = Alignment.Center) {
-        Icon(Icons.Rounded.PlayArrow, contentDescription = null, modifier = Modifier.size(18.dp))
-      }
-    }
-    Spacer(Modifier.width(9.dp))
-    Waveform(color = accentColor, modifier = Modifier.weight(1f))
-    Spacer(Modifier.width(9.dp))
-    Text(formatDuration(durationMs), style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
-  }
-}
-
-@Composable
-private fun Waveform(
-  color: Color,
-  modifier: Modifier = Modifier,
-) {
-  val heights = listOf(10, 18, 13, 23, 15, 20, 11, 17, 24, 14, 19, 12)
-  Row(modifier = modifier, horizontalArrangement = Arrangement.spacedBy(3.dp), verticalAlignment = Alignment.CenterVertically) {
-    heights.forEachIndexed { index, height ->
-      Box(
-        modifier =
-          Modifier
-            .width(3.dp)
-            .height(height.dp)
-            .background(color.copy(alpha = if (index % 3 == 0) 0.82f else 0.52f), CircleShape),
-      )
-    }
-  }
-}
-
-@Composable
-private fun LocationMessageContent(
-  latitude: Double,
-  longitude: Double,
-  accuracy: Float?,
-  contentColor: Color,
-  accentColor: Color,
-  onOpenMaps: (Double, Double) -> Unit,
-) {
-  Column(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.width(238.dp)) {
-    Surface(color = accentColor.copy(alpha = 0.08f), shape = RoundedCornerShape(8.dp), modifier = Modifier.fillMaxWidth().height(86.dp)) {
-      Box(contentAlignment = Alignment.Center) {
-        Canvas(modifier = Modifier.fillMaxSize()) {
-          val gridColor = accentColor.copy(alpha = 0.13f)
-          val roadColor = accentColor.copy(alpha = 0.24f)
-          for (i in 1..3) {
-            val x = size.width * i / 4f
-            drawLine(gridColor, Offset(x, 0f), Offset(x, size.height))
-          }
-          for (i in 1..2) {
-            val y = size.height * i / 3f
-            drawLine(gridColor, Offset(0f, y), Offset(size.width, y))
-          }
-          drawLine(roadColor, Offset(0f, size.height * 0.7f), Offset(size.width, size.height * 0.38f), strokeWidth = 8f)
-          drawLine(roadColor, Offset(size.width * 0.22f, 0f), Offset(size.width * 0.68f, size.height), strokeWidth = 5f)
-        }
-        Surface(color = accentColor, contentColor = MaterialTheme.colorScheme.onPrimary, shape = CircleShape) {
-          Icon(Icons.Rounded.Place, contentDescription = null, modifier = Modifier.padding(8.dp).size(20.dp))
-        }
-      }
-    }
-    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-      Icon(Icons.Rounded.Place, contentDescription = null, tint = accentColor, modifier = Modifier.size(18.dp))
-      Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(1.dp)) {
-        Text("Shared location", style = MaterialTheme.typography.titleMedium)
-        Text("%.5f, %.5f".format(latitude, longitude), style = MaterialTheme.typography.labelMedium, color = contentColor.copy(alpha = 0.75f))
-        accuracy?.let {
-          Text("Accuracy ${"%.0f".format(it)}m", style = MaterialTheme.typography.labelSmall, color = contentColor.copy(alpha = 0.62f))
-        }
-      }
-    }
-    OutlinedButton(
-      onClick = { onOpenMaps(latitude, longitude) },
-      shape = RoundedCornerShape(8.dp),
-      border = BorderStroke(1.dp, accentColor.copy(alpha = 0.42f)),
-      colors = ButtonDefaults.outlinedButtonColors(contentColor = accentColor),
-      contentPadding = PaddingValues(horizontal = 10.dp, vertical = 7.dp),
-    ) {
-      Text("Open Maps", style = MaterialTheme.typography.labelMedium)
-    }
-  }
-}
-
-@Composable
-private fun MessageComposer(
-  draft: String,
-  enabled: Boolean,
-  isRecordingVoice: Boolean,
-  isSendingLocation: Boolean,
-  voiceError: String?,
-  onDraftChange: (String) -> Unit,
-  onSend: () -> Unit,
-  onToggleVoice: () -> Unit,
-  onSendLocation: () -> Unit,
-  onPickImage: () -> Unit,
-) {
-  var attachmentMenuExpanded by remember { mutableStateOf(false) }
-  Surface(
-    color = MaterialTheme.colorScheme.surface,
-    shape = RoundedCornerShape(8.dp),
-    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-    modifier = Modifier.fillMaxWidth(),
-  ) {
-    Column(verticalArrangement = Arrangement.spacedBy(5.dp), modifier = Modifier.padding(6.dp)) {
-      if (isRecordingVoice) {
-        Text("Recording voice...", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
-      }
-      if (isSendingLocation) {
-        Text("Getting location...", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
-      }
-      voiceError?.let { Text(it, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.error) }
-      Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
-        CompactMessageField(
-          value = draft,
-          onValueChange = onDraftChange,
-          enabled = enabled && !isRecordingVoice,
-          keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
-          keyboardActions = KeyboardActions(onSend = { if (enabled && draft.isNotBlank()) onSend() }),
-          modifier = Modifier.weight(1f),
-        )
-        ComposerActionButton(
-          icon = if (isRecordingVoice) Icons.Rounded.Stop else Icons.Rounded.Mic,
-          contentDescription = if (isRecordingVoice) "Stop voice recording" else "Record voice",
-          enabled = enabled || isRecordingVoice,
-          selected = isRecordingVoice,
-          onClick = onToggleVoice,
-        )
-        Box {
-          ComposerActionButton(
-            icon = Icons.Rounded.AttachFile,
-            contentDescription = "Attachments",
-            enabled = enabled && !isRecordingVoice && !isSendingLocation,
-            onClick = { attachmentMenuExpanded = true },
-          )
-          DropdownMenu(expanded = attachmentMenuExpanded, onDismissRequest = { attachmentMenuExpanded = false }) {
-            DropdownMenuItem(
-              text = { Text("Location") },
-              leadingIcon = { Icon(Icons.Rounded.Place, contentDescription = null, modifier = Modifier.size(18.dp)) },
-              onClick = {
-                attachmentMenuExpanded = false
-                onSendLocation()
-              },
-            )
-            DropdownMenuItem(
-              text = { Text("Image") },
-              leadingIcon = { Icon(Icons.Rounded.Image, contentDescription = null, modifier = Modifier.size(18.dp)) },
-              onClick = {
-                attachmentMenuExpanded = false
-                onPickImage()
-              },
-            )
-          }
-        }
-        ComposerActionButton(
-          icon = Icons.AutoMirrored.Rounded.Send,
-          contentDescription = "Send message",
-          enabled = enabled && draft.isNotBlank() && !isRecordingVoice && !isSendingLocation,
-          primary = true,
-          onClick = onSend,
-        )
-      }
-    }
-  }
-}
-
-@Composable
-private fun CompactMessageField(
-  value: String,
-  onValueChange: (String) -> Unit,
-  enabled: Boolean,
-  keyboardOptions: KeyboardOptions,
-  keyboardActions: KeyboardActions,
-  modifier: Modifier = Modifier,
-) {
-  Surface(
-    color = MaterialTheme.colorScheme.background,
-    contentColor = MaterialTheme.colorScheme.onSurface,
-    shape = RoundedCornerShape(8.dp),
-    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-    modifier = modifier.height(42.dp),
-  ) {
-    BasicTextField(
-      value = value,
-      onValueChange = onValueChange,
-      enabled = enabled,
-      singleLine = true,
-      textStyle = MaterialTheme.typography.bodyLarge.copy(color = if (enabled) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant),
-      keyboardOptions = keyboardOptions,
-      keyboardActions = keyboardActions,
-      cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
-      decorationBox = { innerTextField ->
-        Box(modifier = Modifier.fillMaxSize().padding(horizontal = 13.dp), contentAlignment = Alignment.CenterStart) {
-          if (value.isEmpty()) {
-            Text("Message", style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.62f), maxLines = 1)
-          }
-          innerTextField()
-        }
-      },
-    )
-  }
-}
-
-@Composable
-private fun ComposerActionButton(
-  icon: ImageVector,
-  contentDescription: String,
-  enabled: Boolean,
-  selected: Boolean = false,
-  primary: Boolean = false,
-  onClick: () -> Unit,
-) {
-  val container =
-    when {
-      primary && enabled -> MaterialTheme.colorScheme.primary
-      selected -> MaterialTheme.colorScheme.errorContainer
-      else -> MaterialTheme.colorScheme.surfaceVariant
-    }
-  val content =
-    when {
-      !enabled -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.38f)
-      primary -> MaterialTheme.colorScheme.onPrimary
-      selected -> MaterialTheme.colorScheme.error
-      else -> MaterialTheme.colorScheme.onSurfaceVariant
-    }
-
-  Surface(shape = CircleShape, color = container, contentColor = content) {
-    IconButton(onClick = onClick, enabled = enabled, modifier = Modifier.size(36.dp)) {
-      Icon(icon, contentDescription = contentDescription, modifier = Modifier.size(17.dp))
-    }
-  }
-}
-
-internal fun MessageStatus.displayLabel(isLocal: Boolean): String =
-  when (this) {
-    MessageStatus.Queued -> "queued"
-    MessageStatus.Sent -> "sent"
-    MessageStatus.Received -> if (isLocal) "delivered" else "received"
-    MessageStatus.Failed -> "failed"
-  }
-
-internal fun senderDisplayName(
-  senderId: String,
-  isLocal: Boolean,
-  localDeviceId: String,
-  groupMembers: List<GroupMember>,
-): String {
-  if (isLocal || senderId == localDeviceId) return "You"
-  return groupMembers.firstOrNull { it.id == senderId }?.displayName
-    ?: "Device ${senderId.take(4).uppercase().ifBlank { "?" }}"
-}
-
-internal fun avatarInitials(name: String): String {
-  val cleaned = name.trim()
-  if (cleaned.isEmpty()) return "?"
-  val words = cleaned.split(Regex("\\s+")).filter { it.isNotBlank() }
-  return if (words.size >= 2) {
-    words.take(2).joinToString("") { it.take(1) }.uppercase()
-  } else {
-    cleaned.take(1).uppercase()
-  }
-}
-
-internal fun defaultDeviceDisplayName(modelName: String): String =
-  modelName.trim().ifBlank { "OfflineLink" }
-
-internal fun defaultSetupExpanded(messageCount: Int): Boolean = messageCount == 0
-
-internal fun connectionSetupActionLabels(status: ConnectionStatus): List<String> =
-  if (status == ConnectionStatus.Connected) emptyList() else listOf("Search")
-
-internal fun connectionSearchLabel(status: ConnectionStatus): String =
-  if (status == ConnectionStatus.Discovering) "Searching" else "Search"
-
-internal fun connectionVisibilityLabel(isVisible: Boolean): String =
-  if (isVisible) "Visible" else "Hidden"
-
-internal fun connectionVisibilityEnabled(status: ConnectionStatus): Boolean =
-  status != ConnectionStatus.Connected && status != ConnectionStatus.Connecting
-
-internal fun connectionSetupFieldLabels(status: ConnectionStatus): List<String> =
-  emptyList()
-
-internal fun connectionRecoveryActionLabels(state: ChatUiState): List<String> =
-  emptyList()
-
-internal fun nearbyEmptyStateText(): String =
-  "No visible devices nearby."
-
-internal fun connectedSummarySubtitle(state: ChatUiState): String =
-  state.connectedEndpoints.firstOrNull()?.name ?: state.groupMembers.firstOrNull()?.displayName ?: "Peer"
-
-internal fun connectedSetupSectionLabels(state: ChatUiState): List<String> =
-  emptyList()
-
-internal fun connectedHeaderActionLabels(state: ChatUiState): List<String> =
-  if (state.status == ConnectionStatus.Connected) listOf("Call", "Disconnect") else emptyList()
-
-internal fun localMemberSubtitle(localDisplayName: String): String = "You: ${localDisplayName.ifBlank { "OfflineLink" }}"
-
-internal fun groupMemberStatusText(status: GroupMemberStatus): String? = null
-
-internal fun setupHeaderTitle(state: ChatUiState): String =
-  if (state.status == ConnectionStatus.Connected) "Connected" else "Setup"
-
-internal fun setupSummaryText(state: ChatUiState): String {
-  return when {
-    state.pendingConnection != null -> "Request from ${state.pendingConnection.endpointName}"
-    state.status == ConnectionStatus.Connected -> connectedSummarySubtitle(state)
-    state.status == ConnectionStatus.Discovering -> "Searching"
-    state.status == ConnectionStatus.Advertising || state.isVisibleToNearby -> "Visible"
-    state.discoveredEndpoints.isNotEmpty() -> countLabel(state.discoveredEndpoints.size, "nearby device")
-    state.groupMembers.isNotEmpty() -> connectedSummarySubtitle(state)
-    state.status == ConnectionStatus.Error -> "Issue"
-    else -> connectionVisibilityLabel(isVisible = false)
-  }
-}
-
-internal fun emptyChatTitle(state: ChatUiState): String =
-  when (state.status) {
-    ConnectionStatus.Connected -> "No messages yet"
-    ConnectionStatus.Discovering -> "Searching nearby"
-    ConnectionStatus.Advertising -> "Visible to nearby"
-    else -> "Ready to link"
-  }
-
-internal fun emptyChatSubtitle(state: ChatUiState): String =
-  when (state.status) {
-    ConnectionStatus.Connected -> "Messages appear here."
-    ConnectionStatus.Discovering -> "Visible phones will appear above."
-    ConnectionStatus.Advertising -> "Waiting for a nearby phone."
-    else -> "Turn on Visible or search nearby."
-  }
-
-private fun countLabel(
-  count: Int,
-  singular: String,
-): String = "$count $singular${if (count == 1) "" else "s"}"
-
-private fun ChatMessage.copyText(): String =
-  when (kind) {
-    MessageKind.Text -> text
-    MessageKind.Voice -> text
-    MessageKind.Location -> location?.let { "%.6f, %.6f".format(it.latitude, it.longitude) } ?: text
-    MessageKind.Image -> text
-  }
-
-private data class DiagnosticItem(
-  val label: String,
-  val value: String,
-)
-
-private fun diagnosticsFor(
-  context: Context,
-  hasPermissions: Boolean,
-  state: ChatUiState,
-  callAudioProcessingMode: CallAudioProcessingMode,
-  callAudioDiagnosticsEnabled: Boolean,
-  callAudioDiagnosticsPath: String,
-  callAudioLinkStats: CallAudioLinkStats,
-): List<DiagnosticItem> =
-  listOf(
-    DiagnosticItem("Permissions", if (hasPermissions) "Granted" else "Missing"),
-    DiagnosticItem("Bluetooth", bluetoothStatusLabel(context)),
-    DiagnosticItem("Connection", state.status.label()),
-    DiagnosticItem("Peer", state.connectedEndpoints.firstOrNull()?.name ?: "None"),
-    DiagnosticItem("Messages", state.messages.size.toString()),
-    DiagnosticItem("Call audio", callAudioProcessingMode.displayName),
-    DiagnosticItem("Call RX", "${callAudioLinkStats.receivedFrames} rx / ${callAudioLinkStats.lostFrames} lost / ${callAudioLinkStats.lateFrames} late"),
-    DiagnosticItem("Call buffer", "${callAudioLinkStats.bufferedDurationMs} ms / ${callAudioLinkStats.concealedFrames} concealed"),
-    DiagnosticItem("Call jitter", "${callAudioLinkStats.averageInterArrivalMs} avg / ${callAudioLinkStats.maxInterArrivalMs} max ms"),
-    DiagnosticItem("Audio WAV", if (callAudioDiagnosticsEnabled) "On" else "Off"),
-    DiagnosticItem("WAV folder", callAudioDiagnosticsPath),
-  )
-
-private fun bluetoothStatusLabel(context: Context): String =
-  runCatching {
-    val manager = context.applicationContext.getSystemService(BluetoothManager::class.java)
-    if (manager?.adapter?.isEnabled == true) "On" else "Off"
-  }.getOrDefault("Unknown")
-
-private fun ConnectionStatus.label(): String =
-  when (this) {
-    ConnectionStatus.Idle -> "Ready"
-    ConnectionStatus.Advertising -> "Visible"
-    ConnectionStatus.Discovering -> "Searching"
-    ConnectionStatus.Connecting -> "Pairing"
-    ConnectionStatus.Connected -> "Online"
-    ConnectionStatus.Disconnected -> "Offline"
-    ConnectionStatus.Error -> "Issue"
-  }
-
-private fun messageBubbleShape(isLocal: Boolean): RoundedCornerShape =
-  RoundedCornerShape(
-    topStart = 8.dp,
-    topEnd = 8.dp,
-    bottomStart = if (isLocal) 8.dp else 2.dp,
-    bottomEnd = if (isLocal) 2.dp else 8.dp,
-  )
-
-private fun formatDuration(durationMs: Long): String {
-  val totalSeconds = (durationMs / 1000L).coerceAtLeast(1L)
-  val minutes = totalSeconds / 60L
-  val seconds = totalSeconds % 60L
-  return if (minutes == 0L) {
-    "${seconds}s"
-  } else {
-    "$minutes:${seconds.toString().padStart(2, '0')}"
-  }
-}
-
-internal fun formatCallDuration(durationMs: Long): String {
-  val totalSeconds = (durationMs / 1000L).coerceAtLeast(0L)
-  val minutes = totalSeconds / 60L
-  val seconds = totalSeconds % 60L
-  return "$minutes:${seconds.toString().padStart(2, '0')}"
-}
-
-internal fun callOutputRouteLabel(isSpeakerOn: Boolean): String =
-  if (isSpeakerOn) "Speaker" else "Earpiece"
-
-internal fun callScreenStatusLabel(status: CallStatus): String =
-  when (status) {
-    CallStatus.Incoming -> "Incoming call"
-    CallStatus.Outgoing -> "Calling"
-    CallStatus.Active -> "Offline call"
-    CallStatus.Idle -> "Call"
-  }
-
-internal fun callNetworkQualityLabel(): String = "OfflineLink / Strong signal"
-
-internal fun shouldUseFullScreenCallUi(status: CallStatus): Boolean = status != CallStatus.Idle
-
-internal data class CallTargetOption(
-  val id: String,
-  val name: String,
-  val isDirect: Boolean,
-)
-
-internal fun callTargetOptions(state: ChatUiState): List<CallTargetOption> {
-  return state.connectedEndpoints
-    .filter { endpoint -> endpoint.id.isNotBlank() && endpoint.id != state.localDeviceId }
-    .map { endpoint ->
-      CallTargetOption(
-        id = endpoint.id,
-        name = endpoint.name.ifBlank { "Nearby device" },
-        isDirect = true,
-      )
-    }
-}
-
-private fun decodeImageBitmap(rawBytes: ByteArray): ImageBitmap {
-  return BitmapFactory.decodeByteArray(rawBytes, 0, rawBytes.size).asImageBitmap()
-}
-
-@Composable
-private fun rememberDecodedImageBitmap(
-  payloadKey: String,
-  payloadCache: PayloadCache,
-  cache: Base64DecodedImageCache<ImageBitmap>,
-): ImageBitmap =
-  remember(payloadKey, cache) {
-    cache.getOrPut(payloadKey) {
-      val bytes = payloadCache.get(payloadKey) ?: ByteArray(0)
-      decodeImageBitmap(bytes)
-    }
-  }
-
-internal class Base64DecodedImageCache<T>(
-  private val maxEntries: Int,
-) {
-  private val values =
-    object : LinkedHashMap<String, T>(maxEntries, 0.75f, true) {
-      override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, T>?): Boolean = size > maxEntries
-    }
-
-  fun getOrPut(
-    key: String,
-    decode: () -> T,
-  ): T =
-    values.getOrPut(key, decode)
-}
-
-internal fun shouldApplyRootImePadding(windowResizesForKeyboard: Boolean): Boolean = !windowResizesForKeyboard
-
 private const val IMAGE_BITMAP_CACHE_SIZE = 24
 private const val SETTINGS_PREFS_NAME = "offline-link-settings"
 private const val KEY_DISPLAY_NAME = "display_name"
 private const val KEY_AVATAR_NAME = "avatar_name"
 private const val KEY_CALL_AUDIO_PROCESSING_MODE = "call_audio_processing_mode"
+private const val KEY_CALL_AUDIO_PROCESSING_MODE_USER_SELECTED = "call_audio_processing_mode_user_selected"
+private const val KEY_CALL_AUDIO_ENCODING_MODE = "call_audio_encoding_mode"
 private const val KEY_CALL_AUDIO_DIAGNOSTICS_ENABLED = "call_audio_diagnostics_enabled"
 private const val KEY_TRUSTED_DEVICE_IDS = "trusted_device_ids"
+private const val KEY_LOCAL_DEVICE_ID = "local_device_id"
 
 @Preview(showBackground = true)
 @Composable
@@ -2315,6 +763,8 @@ private fun OfflineChatContentPreview() {
       diagnostics = listOf(DiagnosticItem("Permissions", "Granted"), DiagnosticItem("Bluetooth", "On")),
       callAudioProcessingMode = CallAudioProcessingMode.Default,
       onCallAudioProcessingModeChange = {},
+      callAudioEncodingMode = CallAudioEncodingMode.Default,
+      onCallAudioEncodingModeChange = {},
       callAudioDiagnosticsEnabled = false,
       onCallAudioDiagnosticsEnabledChange = {},
       callAudioDiagnosticsPath = "/tmp/offline-link",

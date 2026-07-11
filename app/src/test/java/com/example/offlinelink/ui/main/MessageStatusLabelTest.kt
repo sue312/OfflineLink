@@ -117,6 +117,12 @@ class MessageStatusLabelTest {
   }
 
   @Test
+  fun connectedSignalLabelKeepsRssiVisibleAfterConnection() {
+    assertEquals("Signal -61 dBm", connectedSignalLabel(-61))
+    assertEquals("Signal -- dBm", connectedSignalLabel(null))
+  }
+
+  @Test
   fun connectedSetupUsesInlineActionsOnly() {
     val state =
       ChatUiState(
@@ -195,6 +201,7 @@ class MessageStatusLabelTest {
   @Test
   fun fullScreenCallShowsNetworkQualityCopy() {
     assertEquals("OfflineLink / Strong signal", callNetworkQualityLabel())
+    assertEquals("OfflineLink / Signal -61 dBm", callNetworkQualityLabel(-61))
     assertEquals("0:03", formatCallDuration(3_000L))
   }
 

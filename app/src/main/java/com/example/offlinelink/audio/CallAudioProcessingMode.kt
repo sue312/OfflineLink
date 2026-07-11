@@ -5,6 +5,8 @@ enum class CallAudioProcessingMode(
   val description: String,
   val useSystemEffects: Boolean,
   val inputProcessorProfile: CallAudioInputProcessorProfile?,
+  val forceReliableEncoding: Boolean = false,
+  val baseTransmitFrameInterval: Int = 1,
 ) {
   Raw(
     displayName = "Raw",
@@ -43,5 +45,22 @@ enum class CallAudioProcessingMode(
   }
 }
 
-fun callAudioProcessingModeFromName(name: String?): CallAudioProcessingMode =
-  CallAudioProcessingMode.entries.firstOrNull { it.name == name } ?: CallAudioProcessingMode.Default
+val selectableCallAudioProcessingModes =
+  listOf(
+    CallAudioProcessingMode.System,
+  )
+
+fun callAudioProcessingModeFromName(name: String?): CallAudioProcessingMode {
+  val mode = CallAudioProcessingMode.entries.firstOrNull { it.name == name } ?: return CallAudioProcessingMode.Default
+  return if (mode in selectableCallAudioProcessingModes) mode else CallAudioProcessingMode.System
+}
+
+fun initialCallAudioProcessingMode(
+  savedName: String?,
+  userSelected: Boolean,
+): CallAudioProcessingMode =
+  if (userSelected) {
+    callAudioProcessingModeFromName(savedName)
+  } else {
+    CallAudioProcessingMode.Default
+  }

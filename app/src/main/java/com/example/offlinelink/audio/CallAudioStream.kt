@@ -31,7 +31,9 @@ class CallAudioStream(context: Context) {
   private val playbackBuffer = CallAudioJitterBuffer()
   private val linkMonitor = CallAudioLinkMonitor()
   private var audioEncoder: CallAudioEncoder? = null
-  private var audioDecoder: CallAudioDecoder = CallAudioCodecFactory.createDecoder()
+  private var audioDecoder: CallAudioDecoder = CallAudioCodecFactory.createDecoder(appContext)
+  private var playbackProcessor: CallAudioPlaybackProcessor? = null
+  private var playbackProcessorSampleRateHz: Int? = null
   private var audioRecord: AudioRecord? = null
   private var audioTrack: AudioTrack? = null
   private var audioTrackSampleRateHz: Int? = null
@@ -41,19 +43,31 @@ class CallAudioStream(context: Context) {
   private var playbackThread: Thread? = null
   private var previousAudioMode: Int? = null
   private var previousSpeakerphoneOn: Boolean? = null
+  private var previousBluetoothScoOn: Boolean? = null
+  private var bluetoothScoStarted = false
   private var previousCommunicationDevice: AudioDeviceInfo? = null
   private var previousCommunicationDeviceCaptured = false
   @Volatile private var muted = false
   @Volatile private var speakerEnabled = true
   @Volatile private var processingMode = CallAudioProcessingMode.Default
+  @Volatile private var encodingMode = CallAudioEncodingMode.Default
   @Volatile private var diagnosticsEnabled = false
+  @Volatile private var transmitStatsProvider: () -> CallAudioTransmitStats = { CallAudioTransmitStats() }
 
   fun setProcessingMode(mode: CallAudioProcessingMode) {
     processingMode = mode
   }
 
+  fun setEncodingMode(mode: CallAudioEncodingMode) {
+    encodingMode = mode
+  }
+
   fun setDiagnosticsEnabled(enabled: Boolean) {
     diagnosticsEnabled = enabled
+  }
+
+  fun setTransmitStatsProvider(provider: () -> CallAudioTransmitStats) {
+    transmitStatsProvider = provider
   }
 
   fun diagnosticsDirectoryPath(): String = diagnosticsDirectory().absolutePath
@@ -78,8 +92,8 @@ class CallAudioStream(context: Context) {
         "Microphone permission is required"
       }
 
-      val encoder = CallAudioCodecFactory.createEncoder()
       val mode = processingMode
+      val encoder = CallAudioCodecFactory.createEncoder(appContext, encodingMode)
       val record = createRecorder(encoder.inputSampleRateHz, encoder.inputFrameBytes)
       val track = createPlayer(encoder.inputSampleRateHz)
       val diagnostics = createDiagnosticRecorder(encoder.inputSampleRateHz, mode)
@@ -102,6 +116,8 @@ class CallAudioStream(context: Context) {
           diagnosticRecorder = diagnostics
           noiseGate.reset()
           linkMonitor.reset()
+          playbackProcessor = null
+          playbackProcessorSampleRateHz = null
           resetPlaybackBufferLocked()
           running.set(true)
           started = true
@@ -149,6 +165,7 @@ class CallAudioStream(context: Context) {
   fun play(frame: CallAudioFrame): Result<Unit> =
     runCatching {
       if (frame.bytes.isEmpty()) return@runCatching
+      if (!linkMonitor.shouldDecode(frame.sequenceNumber)) return@runCatching
       val pcmFrame = audioDecoder.decode(frame).getOrThrow() ?: return@runCatching
       diagnosticRecorder?.writeReceivedDecoded(pcmFrame.bytes, pcmFrame.bytes.size, pcmFrame.sampleRateHz)
       val playbackFrames = linkMonitor.process(pcmFrame, frame.sequenceNumber)
@@ -196,7 +213,9 @@ class CallAudioStream(context: Context) {
       audioTrack = null
       audioTrackSampleRateHz = null
       audioEncoder = null
-      audioDecoder = CallAudioCodecFactory.createDecoder()
+      playbackProcessor = null
+      playbackProcessorSampleRateHz = null
+      audioDecoder = CallAudioCodecFactory.createDecoder(appContext)
       audioEffects = emptyList()
       diagnosticRecorder = null
       captureThread = null
@@ -235,6 +254,7 @@ class CallAudioStream(context: Context) {
     var encoder = initialEncoder
     val inputProcessor = mode.inputProcessorProfile?.let { CallAudioInputProcessor(encoder.inputSampleRateHz, it) }
     val buffer = ByteArray(encoder.inputFrameBytes)
+    var transmittableFrameIndex = 0L
     while (running.get()) {
       val read = record.read(buffer, 0, buffer.size, AudioRecord.READ_BLOCKING)
       if (read > 0) {
@@ -244,9 +264,13 @@ class CallAudioStream(context: Context) {
             noiseGate.reset()
             inputProcessor?.reset()
           } else {
-            inputProcessor?.process(buffer, read)
+            val speechHint = inputProcessor?.process(buffer, read)
             diagnostics?.writeCaptureProcessed(buffer, read)
-            if (!noiseGate.shouldTransmit(buffer, read)) return@runCatching
+            if (!noiseGate.shouldTransmit(buffer, read, speechHint)) return@runCatching
+            val frameIndex = transmittableFrameIndex++
+            if (!CallAudioTransmitPolicy.shouldTransmitCapturedFrame(mode, transmitStatsFor(mode), frameIndex)) {
+              return@runCatching
+            }
             val encodedFrame =
               encoder.encode(buffer, read).getOrElse {
                 val fallback =
@@ -272,6 +296,15 @@ class CallAudioStream(context: Context) {
     }
   }
 
+  private fun transmitStatsFor(mode: CallAudioProcessingMode): CallAudioTransmitStats {
+    val stats = transmitStatsProvider()
+    return if (mode.forceReliableEncoding && !stats.forceReliableEncoding) {
+      stats.copy(forceReliableEncoding = true)
+    } else {
+      stats
+    }
+  }
+
   private fun playbackLoop() {
     runCatching { Process.setThreadPriority(Process.THREAD_PRIORITY_AUDIO) }
     while (running.get()) {
@@ -291,17 +324,18 @@ class CallAudioStream(context: Context) {
   }
 
   private fun writePlaybackFrame(frame: PcmAudioFrame) {
+    val playbackFrame = processPlaybackFrame(frame)
     val track =
       synchronized(lock) {
-        val player = ensurePlayerLocked(frame.sampleRateHz)
+        val player = ensurePlayerLocked(playbackFrame.sampleRateHz)
         if (player.playState != AudioTrack.PLAYSTATE_PLAYING) {
           player.play()
         }
         player
       }
     var offset = 0
-    while (offset < frame.bytes.size && running.get()) {
-      val written = track.write(frame.bytes, offset, frame.bytes.size - offset, AudioTrack.WRITE_BLOCKING)
+    while (offset < playbackFrame.bytes.size && running.get()) {
+      val written = track.write(playbackFrame.bytes, offset, playbackFrame.bytes.size - offset, AudioTrack.WRITE_BLOCKING)
       check(written >= 0) { "Call audio playback failed: $written" }
       if (written == 0) {
         Thread.yield()
@@ -310,6 +344,21 @@ class CallAudioStream(context: Context) {
       }
     }
   }
+
+  private fun processPlaybackFrame(frame: PcmAudioFrame): PcmAudioFrame =
+    synchronized(lock) {
+      val existingProcessor = playbackProcessor
+      val processor =
+        if (existingProcessor == null || playbackProcessorSampleRateHz != frame.sampleRateHz) {
+          CallAudioPlaybackProcessor(frame.sampleRateHz).also {
+            playbackProcessor = it
+            playbackProcessorSampleRateHz = frame.sampleRateHz
+          }
+        } else {
+          existingProcessor
+        }
+      processor.process(frame)
+    }
 
   @SuppressLint("MissingPermission")
   private fun createRecorder(sampleRateHz: Int, frameBytes: Int): AudioRecord {
@@ -385,6 +434,10 @@ class CallAudioStream(context: Context) {
         @Suppress("DEPRECATION")
         previousSpeakerphoneOn = manager.isSpeakerphoneOn
       }
+      if (previousBluetoothScoOn == null) {
+        @Suppress("DEPRECATION")
+        previousBluetoothScoOn = manager.isBluetoothScoOn
+      }
       if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && !previousCommunicationDeviceCaptured) {
         previousCommunicationDevice = manager.communicationDevice
         previousCommunicationDeviceCaptured = true
@@ -398,13 +451,16 @@ class CallAudioStream(context: Context) {
     val manager = audioManager ?: return
     val mode = previousAudioMode ?: return
     val speakerphoneOn = previousSpeakerphoneOn
+    val bluetoothScoOn = previousBluetoothScoOn
     val communicationDevice = previousCommunicationDevice
     val communicationDeviceCaptured = previousCommunicationDeviceCaptured
     previousAudioMode = null
     previousSpeakerphoneOn = null
+    previousBluetoothScoOn = null
     previousCommunicationDevice = null
     previousCommunicationDeviceCaptured = false
     runCatching {
+      stopManagedBluetoothSco(manager)
       if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && communicationDeviceCaptured) {
         if (communicationDevice != null) {
           manager.setCommunicationDevice(communicationDevice)
@@ -417,9 +473,14 @@ class CallAudioStream(context: Context) {
         @Suppress("DEPRECATION")
         manager.isSpeakerphoneOn = speakerphoneOn
       }
+      if (bluetoothScoOn != null) {
+        @Suppress("DEPRECATION")
+        manager.isBluetoothScoOn = bluetoothScoOn
+      }
     }
   }
 
+  @SuppressLint("MissingPermission")
   private fun applySpeakerRoute() {
     val manager = audioManager ?: return
     val outputDevice = preferredOutputDevice()
@@ -430,6 +491,11 @@ class CallAudioStream(context: Context) {
         } else {
           manager.clearCommunicationDevice()
         }
+      }
+      if (outputDevice?.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO) {
+        startManagedBluetoothSco(manager)
+      } else {
+        stopManagedBluetoothSco(manager)
       }
       @Suppress("DEPRECATION")
       manager.isSpeakerphoneOn = speakerEnabled
@@ -444,16 +510,48 @@ class CallAudioStream(context: Context) {
   }
 
   private fun preferredOutputDevice(): AudioDeviceInfo? {
-    val targetType =
-      if (speakerEnabled) {
-        AudioDeviceInfo.TYPE_BUILTIN_SPEAKER
-      } else {
-        AudioDeviceInfo.TYPE_BUILTIN_EARPIECE
-      }
-    return audioManager
-      ?.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
-      ?.firstOrNull { it.type == targetType }
+    val outputs = audioManager?.getDevices(AudioManager.GET_DEVICES_OUTPUTS).orEmpty()
+    return if (speakerEnabled) {
+      outputs.firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER }
+    } else {
+      outputs.firstOrNull { it.isBluetoothCallOutput() }
+        ?: outputs.firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_EARPIECE }
+    }
   }
+
+  private fun AudioDeviceInfo.isBluetoothCallOutput(): Boolean =
+    when (type) {
+      AudioDeviceInfo.TYPE_BLUETOOTH_SCO,
+      AudioDeviceInfo.TYPE_BLUETOOTH_A2DP
+      -> true
+      else ->
+        Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+          (type == AudioDeviceInfo.TYPE_BLE_HEADSET || type == AudioDeviceInfo.TYPE_BLE_SPEAKER)
+    }
+
+  @Suppress("DEPRECATION")
+  private fun startManagedBluetoothSco(manager: AudioManager) {
+    if (!hasBluetoothConnectPermission()) return
+    if (!bluetoothScoStarted) {
+      manager.startBluetoothSco()
+      bluetoothScoStarted = true
+    }
+    manager.isBluetoothScoOn = true
+  }
+
+  @Suppress("DEPRECATION")
+  private fun stopManagedBluetoothSco(manager: AudioManager) {
+    if (!bluetoothScoStarted) return
+    if (hasBluetoothConnectPermission()) {
+      manager.stopBluetoothSco()
+      manager.isBluetoothScoOn = false
+    }
+    bluetoothScoStarted = false
+  }
+
+  private fun hasBluetoothConnectPermission(): Boolean =
+    Build.VERSION.SDK_INT < Build.VERSION_CODES.S ||
+      ContextCompat.checkSelfPermission(appContext, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED
 
   private fun createVoiceEffects(record: AudioRecord): List<AudioEffect> =
     listOfNotNull(

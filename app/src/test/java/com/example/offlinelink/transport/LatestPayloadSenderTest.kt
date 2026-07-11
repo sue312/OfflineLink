@@ -10,7 +10,7 @@ import org.junit.Test
 class LatestPayloadSenderTest {
 
   @Test
-  fun sendsFirstPayloadImmediatelyAndKeepsOnlyLatestPendingPayload() {
+  fun sendsFirstPayloadImmediatelyAndQueuesPendingPayloadsInOrder() {
     val transport = RecordingChatTransport()
     val sender = LatestPayloadSender(transport)
     val results = mutableListOf<Pair<String, Throwable?>>()
@@ -20,18 +20,65 @@ class LatestPayloadSenderTest {
     sender.send(endpointId = ENDPOINT_A, bytes = bytes("three")) { results += "three" to it.exceptionOrNull() }
 
     assertEquals(listOf("one"), transport.sentPayloadLabels())
+    assertEquals(emptyList<String>(), results.map { it.first })
+
+    transport.completeNextSuccess()
+
+    assertEquals(listOf("one", "two"), transport.sentPayloadLabels())
+
+    transport.completeNextSuccess()
+
+    assertEquals(listOf("one", "two", "three"), transport.sentPayloadLabels())
+
+    transport.completeNextSuccess()
+
+    assertEquals(listOf("one", "two", "three"), results.map { it.first })
+    assertTrue(results.all { it.second == null })
+  }
+
+  @Test
+  fun dropsOldestPendingPayloadWhenQueueWouldGrowTooLarge() {
+    val transport = RecordingChatTransport()
+    val sender = LatestPayloadSender(transport, maxPendingPerEndpoint = 2)
+    val results = mutableListOf<Pair<String, Throwable?>>()
+
+    sender.send(endpointId = ENDPOINT_A, bytes = bytes("one")) { results += "one" to it.exceptionOrNull() }
+    sender.send(endpointId = ENDPOINT_A, bytes = bytes("two")) { results += "two" to it.exceptionOrNull() }
+    sender.send(endpointId = ENDPOINT_A, bytes = bytes("three")) { results += "three" to it.exceptionOrNull() }
+    sender.send(endpointId = ENDPOINT_A, bytes = bytes("four")) { results += "four" to it.exceptionOrNull() }
+
+    assertEquals(listOf("one"), transport.sentPayloadLabels())
     assertEquals(listOf("two"), results.map { it.first })
     assertTrue(results.single().second is LatestPayloadSender.StalePayloadDroppedException)
 
     transport.completeNextSuccess()
+    transport.completeNextSuccess()
+    transport.completeNextSuccess()
 
-    assertEquals(listOf("one", "three"), transport.sentPayloadLabels())
+    assertEquals(listOf("one", "three", "four"), transport.sentPayloadLabels())
+    assertEquals(listOf("two", "one", "three", "four"), results.map { it.first })
+  }
+
+  @Test
+  fun statsTrackPendingAndDroppedLivePayloads() {
+    val transport = RecordingChatTransport()
+    val sender = LatestPayloadSender(transport, maxPendingPerEndpoint = 2)
+
+    sender.send(endpointId = ENDPOINT_A, bytes = bytes("one"))
+    sender.send(endpointId = ENDPOINT_A, bytes = bytes("two"))
+    sender.send(endpointId = ENDPOINT_A, bytes = bytes("three"))
+    sender.send(endpointId = ENDPOINT_A, bytes = bytes("four"))
+
+    val congestedStats = sender.stats(ENDPOINT_A)
+    assertEquals(2, congestedStats.pendingCount)
+    assertEquals(1, congestedStats.droppedStalePayloads)
+    assertTrue(congestedStats.inFlight)
 
     transport.completeNextSuccess()
 
-    assertEquals(listOf("two", "one", "three"), results.map { it.first })
-    assertTrue(results.first { it.first == "one" }.second == null)
-    assertTrue(results.first { it.first == "three" }.second == null)
+    val afterOneSendStats = sender.stats(ENDPOINT_A)
+    assertEquals(1, afterOneSendStats.pendingCount)
+    assertEquals(1, afterOneSendStats.droppedStalePayloads)
   }
 
   @Test
@@ -47,23 +94,24 @@ class LatestPayloadSenderTest {
   }
 
   @Test
-  fun clearEndpointDropsPendingPayloadAndStopsFollowUpSend() {
+  fun clearEndpointDropsPendingPayloadsAndStopsFollowUpSends() {
     val transport = RecordingChatTransport()
     val sender = LatestPayloadSender(transport)
     val results = mutableListOf<Pair<String, Throwable?>>()
 
     sender.send(endpointId = ENDPOINT_A, bytes = bytes("one")) { results += "one" to it.exceptionOrNull() }
     sender.send(endpointId = ENDPOINT_A, bytes = bytes("two")) { results += "two" to it.exceptionOrNull() }
+    sender.send(endpointId = ENDPOINT_A, bytes = bytes("three")) { results += "three" to it.exceptionOrNull() }
 
     sender.clearEndpoint(ENDPOINT_A)
 
-    assertEquals(listOf("two"), results.map { it.first })
-    assertTrue(results.single().second is LatestPayloadSender.EndpointClearedException)
+    assertEquals(listOf("two", "three"), results.map { it.first })
+    assertTrue(results.all { it.second is LatestPayloadSender.EndpointClearedException })
 
     transport.completeNextSuccess()
 
     assertEquals(listOf("one"), transport.sentPayloadLabels())
-    assertEquals(listOf("two", "one"), results.map { it.first })
+    assertEquals(listOf("two", "three", "one"), results.map { it.first })
   }
 
   private class RecordingChatTransport : ChatTransport {

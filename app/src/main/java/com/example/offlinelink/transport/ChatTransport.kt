@@ -4,6 +4,12 @@ import com.example.offlinelink.model.NearbyEndpoint
 import com.example.offlinelink.model.PendingConnection
 import kotlinx.coroutines.flow.Flow
 
+/**
+ * Raw endpoint transport contract.
+ *
+ * App payloads are secured above this layer by EncryptedChatTransport before
+ * MainScreenViewModel receives Connected and sends its ChatProtocol Hello.
+ */
 interface ChatTransport {
   val events: Flow<TransportEvent>
 
@@ -18,6 +24,13 @@ interface ChatTransport {
 
   fun stopDiscovery()
 
+  fun startSignalMonitoring(
+    displayName: String,
+    deviceId: String,
+  ) = Unit
+
+  fun stopSignalMonitoring() = Unit
+
   fun requestConnection(
     endpoint: NearbyEndpoint,
     displayName: String,
@@ -30,13 +43,31 @@ interface ChatTransport {
 
   fun send(endpointId: String, bytes: ByteArray, onResult: (Result<Unit>) -> Unit)
 
+  fun linkStats(endpointId: String): TransportLinkStats = TransportLinkStats()
+
   fun disconnectEndpoint(endpointId: String)
 
   fun stopAll()
 }
 
+data class TransportLinkStats(
+  val sentBytesPerSecond: Long = 0,
+  val averageWriteBlockedMs: Long = 0,
+  val maxWriteBlockedMs: Long = 0,
+  val writeQueueLength: Int = 0,
+  val maxWriteQueueLength: Int = 0,
+  val socketCongested: Boolean = false,
+)
+
 sealed interface TransportEvent {
   data class EndpointFound(val endpoint: NearbyEndpoint) : TransportEvent
+
+  data class EndpointSignalChanged(
+    val endpointId: String,
+    val deviceId: String?,
+    val rssi: Int,
+    val signalId: String? = null,
+  ) : TransportEvent
 
   data class EndpointLost(val endpointId: String) : TransportEvent
 

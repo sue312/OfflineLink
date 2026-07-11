@@ -88,7 +88,7 @@ class CallAudioInputProcessor(
   private var noiseFloorAmplitude = INITIAL_NOISE_FLOOR_AMPLITUDE
   private var automaticGain = 1.0
 
-  fun process(bytes: ByteArray, length: Int) {
+  fun process(bytes: ByteArray, length: Int): Boolean {
     val usableLength = length.coerceAtMost(bytes.size).coerceAtLeast(0)
     val metrics = frameMetrics(bytes, usableLength)
     val speech = isSpeechFrame(metrics)
@@ -110,6 +110,7 @@ class CallAudioInputProcessor(
       writePcm16(bytes, index, output.toInt().coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt()).toShort())
       index += CALL_AUDIO_BYTES_PER_SAMPLE
     }
+    return speech
   }
 
   fun reset() {

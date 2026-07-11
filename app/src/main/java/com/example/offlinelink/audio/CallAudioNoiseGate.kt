@@ -13,9 +13,19 @@ class CallAudioNoiseGate(
     require(hangoverFrames >= 0) { "hangoverFrames must be non-negative" }
   }
 
-  fun shouldTransmit(bytes: ByteArray, length: Int): Boolean {
+  fun shouldTransmit(
+    bytes: ByteArray,
+    length: Int,
+    speechHint: Boolean? = null,
+  ): Boolean {
     val amplitude = averageAbsolutePcm16Amplitude(bytes, length)
-    if (amplitude >= threshold) {
+    val shouldOpen =
+      when (speechHint) {
+        true -> amplitude >= threshold
+        false -> amplitude >= LOUD_UNCLASSIFIED_THRESHOLD
+        null -> amplitude >= threshold
+      }
+    if (shouldOpen) {
       remainingHangoverFrames = hangoverFrames
       return true
     }
@@ -31,8 +41,9 @@ class CallAudioNoiseGate(
   }
 
   private companion object {
-    const val DEFAULT_THRESHOLD = 96
-    const val DEFAULT_HANGOVER_FRAMES = 4
+    const val DEFAULT_THRESHOLD = 48
+    const val DEFAULT_HANGOVER_FRAMES = 8
+    const val LOUD_UNCLASSIFIED_THRESHOLD = 2_400
   }
 }
 

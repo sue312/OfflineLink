@@ -40,6 +40,32 @@ class CallAudioProcessingTest {
     assertFalse(gate.shouldTransmit(quietFrame, quietFrame.size))
   }
 
+  @Test
+  fun defaultNoiseGatePreservesSoftSpeechAndLongerWordEndings() {
+    val gate = CallAudioNoiseGate()
+    val softVoiceFrame = repeatedPcmFrame(sample = 64, sampleCount = 320)
+    val quietFrame = repeatedPcmFrame(sample = 8, sampleCount = 320)
+
+    assertTrue(gate.shouldTransmit(softVoiceFrame, softVoiceFrame.size))
+    repeat(8) {
+      assertTrue(gate.shouldTransmit(quietFrame, quietFrame.size))
+    }
+    assertFalse(gate.shouldTransmit(quietFrame, quietFrame.size))
+  }
+
+  @Test
+  fun noiseGateSuppressesHighAmplitudeNonSpeechNoiseWhenSpeechHintIsFalse() {
+    val gate = CallAudioNoiseGate(threshold = 48, hangoverFrames = 2)
+    val noiseFrame = repeatedPcmFrame(sample = 900, sampleCount = 320)
+    val voiceFrame = repeatedPcmFrame(sample = 900, sampleCount = 320)
+
+    assertFalse(gate.shouldTransmit(noiseFrame, noiseFrame.size, speechHint = false))
+    assertTrue(gate.shouldTransmit(voiceFrame, voiceFrame.size, speechHint = true))
+    assertTrue(gate.shouldTransmit(noiseFrame, noiseFrame.size, speechHint = false))
+    assertTrue(gate.shouldTransmit(noiseFrame, noiseFrame.size, speechHint = false))
+    assertFalse(gate.shouldTransmit(noiseFrame, noiseFrame.size, speechHint = false))
+  }
+
   private fun repeatedPcmFrame(sample: Short, sampleCount: Int): ByteArray =
     pcmFrame(*ShortArray(sampleCount) { sample })
 
